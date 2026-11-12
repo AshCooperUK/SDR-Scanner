@@ -1,8 +1,19 @@
-# SDR Scanner v3.0
+# SDr Scanner – Web-Based RTL-SDR Radio Scanner for Ubuntu and Debian
 
-A receive-only scanner with a browser front panel modelled on the Uniden UBC-355CLT. Plug a USB RTL-SDR into an Ubuntu or Debian machine and listen from its desktop or from a browser on another computer. The panel opens without a scanner account or sign-in.
+SDr Scanner is a receive-only software-defined radio scanner with a browser interface modelled on the Uniden UBC-355CLT. Plug a USB RTL-SDR receiver such as the Nooelec NESDR SMArt v5 into an Ubuntu or Debian desktop or headless server, then tune, scan and listen in your browser.
 
-![SDR Scanner v3.0 front panel with the frequency, signal meter, favourite buttons and settings row](docs/screenshots/scanner-panel.png)
+[Download v3.0](https://github.com/AshCooperUK/SDR-Scanner/releases/tag/v3.0) · [Install on Ubuntu or Debian](#install-on-ubuntu-or-debian) · [Quick start](#open-the-panel-and-tune-your-first-station) · [Control reference](#front-panel-controls)
+
+![SDr Scanner v3.0 browser panel showing an FM station, signal meter and favourite channel buttons](docs/screenshots/scanner-panel.png)
+
+## Features
+
+- **Listen to broadcast FM with RDS.** Tune wide FM and display station names and RadioText when the station broadcasts them.
+- **Scan AM airband, marine VHF, PMR446 and CB radio.** Use the preset banks or search from **100 kHz to 1.75 GHz** with compatible hardware. Save up to 124 favourite channels.
+- **Record and replay radio audio.** Save MP3 clips when a signal opens the squelch, then play the latest recording from the panel.
+- **Listen from another device.** Keep the USB receiver on your Linux host and open the panel over a private network or SSH tunnel without a scanner account or sign-in.
+
+## Contents
 
 - [Install on Ubuntu or Debian](#install-on-ubuntu-or-debian)
 - [Open the panel and tune your first station](#open-the-panel-and-tune-your-first-station)
