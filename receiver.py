@@ -1,4 +1,4 @@
-"""Receive AM or narrowband FM from a local RTL-SDR.
+"""Receive AM, narrowband FM or broadcast FM from a local RTL-SDR.
 
 Only the radio worker should use a Receiver instance. Level measurements are
 channel power relative to ADC full scale. Audio is signed little-endian PCM.
@@ -19,7 +19,7 @@ from scipy import signal
 SAMPLE_RATE = 24_000
 IQ_RATE = 2_400_000
 CHANNEL_RATE = 2 * SAMPLE_RATE
-CHANNEL_DECIMATION = IQ_RATE // CHANNEL_RATE
+WFM_CHANNEL_RATE = 10 * SAMPLE_RATE
 IQ_SAMPLES = 32_000
 SETTLE_SAMPLES = 15_360
 TUNER_OFFSET = 300_000
@@ -29,6 +29,7 @@ PROBE_FFT = 8192
 PROBE_HALF_WIDTH = 900_000
 PROBE_STRIDE = 1_600_000
 NFM_DEEMPHASIS_SECONDS = 200e-6
+WFM_DEEMPHASIS_SECONDS = 50e-6
 TUNER_GAIN_TARGET = 280  # Librtlsdr expresses gain in tenths of a dB.
 GAIN_RECOVERY_BLOCKS = IQ_RATE // IQ_SAMPLES
 IQ_BLOCK_BYTES = 2 * IQ_SAMPLES
@@ -170,29 +171,49 @@ class _IqStream:
 
 class _ChannelDecoder:
     def __init__(self):
-        self.decimation_filter = signal.firwin(
+        narrow_decimation = signal.firwin(
             1101, 15_000, fs=IQ_RATE, window=("kaiser", 8.0)
         ).astype(np.float32)
+        self.decimation_filters = {
+            "AM": narrow_decimation,
+            "FM": narrow_decimation,
+            "WFM": signal.firwin(641, 104_000, fs=IQ_RATE, window=("kaiser", 8.0)).astype(np.float32),
+        }
         self.filters = {
             "AM": signal.firwin(121, 3700, fs=CHANNEL_RATE).astype(np.float32),
             "FM": signal.firwin(121, 5300, fs=CHANNEL_RATE).astype(np.float32),
+            "WFM": np.ones(1, dtype=np.float32),  # The wide decimator already selects the station.
         }
         # Narrow FM voice usually carries boosted treble and may carry a
         # subaudible tone. Filter both after the discriminator.
         deemphasis = np.exp(-1 / (CHANNEL_RATE * NFM_DEEMPHASIS_SECONDS))
+        wide_deemphasis = np.exp(-1 / (WFM_CHANNEL_RATE * WFM_DEEMPHASIS_SECONDS))
         self.audio_filters = {
             "AM": signal.butter(3, [250, 3400], fs=CHANNEL_RATE, btype="bandpass", output="sos"),
             "FM": np.vstack((
                 signal.butter(5, [320, 3000], fs=CHANNEL_RATE, btype="bandpass", output="sos"),
                 [1 - deemphasis, 0, 0, 1, -deemphasis, 0],
             )),
+            "WFM": np.vstack((
+                signal.butter(2, 40, fs=WFM_CHANNEL_RATE, btype="highpass", output="sos"),
+                # Extract mono and reject the stereo pilot before resampling to 24 kHz.
+                signal.butter(10, 10_000, fs=WFM_CHANNEL_RATE, output="sos"),
+                [1 - wide_deemphasis, 0, 0, 1, -wide_deemphasis, 0],
+            )),
         }
         self.sample_indexes = np.arange(IQ_SAMPLES, dtype=np.float64)
-        history_blocks = (len(self.decimation_filter) - 2) // CHANNEL_DECIMATION + 1
-        self.history_size = history_blocks * CHANNEL_DECIMATION
         self.reset(0, "FM")
 
     def reset(self, offset_hz, mode):
+        channel_rate = WFM_CHANNEL_RATE if mode == "WFM" else CHANNEL_RATE
+        self.channel_decimation = IQ_RATE // channel_rate
+        self.audio_decimation = channel_rate // SAMPLE_RATE
+        self.level_start = channel_rate // 400
+        deviation = 75_000 if mode == "WFM" else 2500
+        self.discriminator_scale = channel_rate / (2 * np.pi * deviation)
+        self.decimation_filter = self.decimation_filters[mode]
+        history_blocks = (len(self.decimation_filter) - 2) // self.channel_decimation + 1
+        self.history_size = history_blocks * self.channel_decimation
         self.mixer = np.exp((-2j * np.pi * offset_hz / IQ_RATE) * self.sample_indexes).astype(np.complex64)
         self.mixer_phase = 1 + 0j
         self.phase_step = np.exp((-2j * np.pi * offset_hz * IQ_SAMPLES) / IQ_RATE)
@@ -209,9 +230,9 @@ class _ChannelDecoder:
         self.mixer_phase *= self.phase_step
 
         samples = np.concatenate((self.iq_history, translated))
-        filtered = signal.upfirdn(self.decimation_filter, samples, down=CHANNEL_DECIMATION)
-        start = self.history_size // CHANNEL_DECIMATION
-        channel = filtered[start:start + IQ_SAMPLES // CHANNEL_DECIMATION]
+        filtered = signal.upfirdn(self.decimation_filter, samples, down=self.channel_decimation)
+        start = self.history_size // self.channel_decimation
+        channel = filtered[start:start + IQ_SAMPLES // self.channel_decimation]
         self.iq_history[:] = samples[-self.history_size:]
         channel, self.channel_history = signal.lfilter(
             self.filters[self.mode], np.array([1], dtype=np.float32), channel, zi=self.channel_history
@@ -219,11 +240,11 @@ class _ChannelDecoder:
 
         # Exclude the head of the block when estimating signal level so the
         # channel filter's short transient cannot hide a hit after a retune.
-        power = float(np.mean(np.abs(channel[120:]) ** 2))
+        power = float(np.mean(np.abs(channel[self.level_start:]) ** 2))
         level = float(10 * np.log10(max(power, 1e-15)))
         if self.mode == "AM":
             audio = np.abs(channel)
-            carrier = float(np.mean(audio[120:]))
+            carrier = float(np.mean(audio[self.level_start:]))
             if self.am_carrier is None:
                 self.am_carrier = carrier
                 self.audio_history = signal.sosfilt_zi(self.audio_filter) * (carrier / max(carrier, 0.005))
@@ -235,10 +256,10 @@ class _ChannelDecoder:
             previous[0] = self.previous_iq
             previous[1:] = channel[:-1]
             self.previous_iq = channel[-1]
-            audio = np.angle(channel * np.conjugate(previous)) * (CHANNEL_RATE / (2 * np.pi * 2500))
+            audio = np.angle(channel * np.conjugate(previous)) * self.discriminator_scale
 
         audio, self.audio_history = signal.sosfilt(self.audio_filter, audio, zi=self.audio_history)
-        pcm = (np.clip(audio[::2] * 0.65, -1.0, 1.0) * 32767).astype("<i2")
+        pcm = (np.clip(audio[::self.audio_decimation] * 0.65, -1.0, 1.0) * 32767).astype("<i2")
         return level, pcm.tobytes()
 
 
@@ -384,10 +405,11 @@ class Receiver:
 
     def tune(self, hz, mode):
         hz = int(hz)
-        if mode not in ("AM", "FM") or not 100_000 <= hz <= TUNER_LIMIT:
+        if mode not in ("AM", "FM", "WFM") or not 100_000 <= hz <= TUNER_LIMIT:
             raise ReceiverError("Frequency or modulation is outside the SDR receiver configuration")
         direct = hz < DIRECT_LIMIT
-        if self._center is None or self._direct != direct or not 20_000 <= abs(hz - self._center) <= 800_000:
+        dc_guard = 120_000 if mode == "WFM" else 20_000
+        if self._center is None or self._direct != direct or not dc_guard <= abs(hz - self._center) <= 800_000:
             # Moving the carrier away from tuner DC avoids false squelch hits.
             center = hz + TUNER_OFFSET if hz + TUNER_OFFSET <= TUNER_LIMIT else hz - TUNER_OFFSET
             if direct and center >= DIRECT_LIMIT:

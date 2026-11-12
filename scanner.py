@@ -21,6 +21,8 @@ PAIR_STATES = ((), (0, 1), (0,), (1,))
 FREQUENCY_SKIP_LIMIT = 100
 REPLY_SECONDS = 2.0
 FINE_STEP_HZ = 100
+MANUAL_MIN_HZ = 100_000
+MANUAL_MAX_HZ = 1_750_000_000
 
 
 def format_frequency(hz):
@@ -150,15 +152,15 @@ class Scanner:
                     if not isinstance(record, list) or len(record) != 2:
                         continue
                     hz, mode = record
-                    if (type(hz) is int and mode in ("FM", "AM")
-                            and any(band.lower <= hz <= band.upper for band in (*BANDS, *GERMAN_BANDS))):
+                    if (type(hz) is int and MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ
+                            and mode in ("FM", "AM", "WFM")):
                         slots[slot] = Channel(hz, mode, bank, slot)
         frequencies = raw.get("permanent_frequencies")
         self.permanent_frequencies = {}
         if isinstance(frequencies, list):
             self.permanent_frequencies = {
                 hz: None for hz in frequencies[-FREQUENCY_SKIP_LIMIT:]
-                if type(hz) is int and 25_000_000 <= hz <= 960_000_000
+                if type(hz) is int and MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ
             }
         slots = raw.get("permanent_slots")
         self.permanent_slots = set()
@@ -296,17 +298,24 @@ class Scanner:
     def tune_frequency(self, hz):
         if not self.power or self.menu:
             return
-        band = next((band for band in self.bands if band.lower <= hz <= band.upper), None)
-        if band is None:
+        if type(hz) is not int or not MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ:
             self._show("Error")
             self._tone("error")
             return
+        self._hold_frequency(hz, self._manual_modulation(hz))
+
+    def _manual_modulation(self, hz):
         channel = self.tuned
-        modulation = band.modulation
-        # A directly entered CB frequency keeps the selected AM or FM bank's mode.
-        if channel and 25_000_000 <= hz < 30_000_000 and channel.bank in ("CBAM", "CBFM"):
-            modulation = channel.modulation
-        self._hold_frequency(hz, modulation)
+        if (channel and 25_000_000 <= hz < 30_000_000
+                and (channel.bank in ("CBAM", "CBFM")
+                     or self.direct_frequency and 25_000_000 <= channel.hz < 30_000_000)):
+            return channel.modulation
+        if 87_500_000 <= hz < 108_000_000:
+            return "WFM"
+        if hz < 25_000_000 or 108_000_000 <= hz < 137_000_000 or 225_000_000 <= hz < 400_000_000:
+            return "AM"
+        band = next((band for band in self.bands if band.lower <= hz <= band.upper), None)
+        return band.modulation if band else "FM"
 
     def _hold_frequency(self, hz, modulation):
         self._leave_only()
@@ -320,14 +329,21 @@ class Scanner:
     def _frequency_step(self, direction, hz):
         bands = self.bands
         index = next((index for index, band in enumerate(bands)
-                      if hz is not None and band.lower <= hz <= band.upper), self.band_index)
+                      if band.lower <= hz <= band.upper), None)
+        if index is None:
+            if 87_500_000 <= hz < 108_000_000:
+                step = 100_000
+            else:
+                step = self.general_step or (5_000 if hz < 25_000_000 else 12_500)
+            hz += direction * step
+            if MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ:
+                self.tune_frequency(hz)
+            return
         band = bands[index]
         step = self.air_step if index == AIR_INDEX else self.general_step or band.step
         count = band.count(step)
         frequency = lambda position: band.frequency(position, step)
-        if hz is None:
-            position = 0 if direction > 0 else count - 1
-        elif direction > 0:
+        if direction > 0:
             position = bisect_right(range(count), hz, key=frequency)
         else:
             position = bisect_left(range(count), hz, key=frequency) - 1
@@ -337,7 +353,7 @@ class Scanner:
             step = self.air_step if index == AIR_INDEX else self.general_step or band.step
             position = 0 if direction > 0 else band.count(step) - 1
         modulation = band.modulation
-        if (self.direct_frequency and hz is not None and hz < 30_000_000
+        if (self.direct_frequency and hz < 30_000_000
                 and band.lower < 30_000_000):
             modulation = self.current.modulation
         self._hold_frequency(band.frequency(position, step), modulation)
@@ -351,13 +367,11 @@ class Scanner:
             self._hold_frequency(hz, self.band.modulation)
             return
         hz = channel.hz + direction * FINE_STEP_HZ
-        band = next((band for band in self.bands if band.lower <= hz <= band.upper), None)
-        if band is None:
+        if not MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ:
             if not self.hold:
                 self._hold_frequency(channel.hz, channel.modulation)
             return
-        modulation = channel.modulation if band.lower <= channel.hz <= band.upper else band.modulation
-        self._hold_frequency(hz, modulation)
+        self.tune_frequency(hz)
 
     def _start_search(self, reset=False):
         previous = self.activity
@@ -920,7 +934,7 @@ class Scanner:
                 if display == "SCAN" and channel and channel.bank:
                     blink_bank = "CB" if channel.bank.startswith("CB") else channel.bank
             if channel and channel.hz:
-                upper.append("AM" if channel.modulation == "AM" else "NFM")
+                upper.append("NFM" if channel.modulation == "FM" else channel.modulation)
             if self.close_mode != "off":
                 lower.append("CLOSE")
             if self.close_mode != "only" and not self.direct_frequency:

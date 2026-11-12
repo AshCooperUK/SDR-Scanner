@@ -97,7 +97,9 @@ function render(next) {
   if (visibleChannel) active.add("CH");
   for (const element of legends) {
     const name = element.dataset.lcd;
-    element.classList.toggle("is-visible", active.has(name));
+    const indicator = name === "NFM" && active.has("WFM") ? "WFM" : name;
+    if (name === "NFM" && element.textContent !== indicator) element.textContent = indicator;
+    element.classList.toggle("is-visible", active.has(indicator));
     element.classList.toggle("is-blinking",
       active.has(name) && (next.blink_bank === name || (name === "CLOSE" && next.close_blink)));
   }
