@@ -5,6 +5,7 @@ import math
 from bisect import bisect_left, bisect_right
 from pathlib import Path
 from time import localtime, monotonic
+from unicodedata import category
 
 from bandplan import (
     AIR_INDEX, AIR_STEP, AIR_STEPS, BANK_KEYS, BANKS, BANDS, CLOSE_GROUPS,
@@ -12,7 +13,8 @@ from bandplan import (
     factory_banks,
 )
 
-KEYS = {*BANK_KEYS, "hold", "up", "down", "close", "search", "lock", "band", "prog"}
+KEYS = {*BANK_KEYS, "hold", "up", "down", "mute", "close", "scan", "search", "lock", "band", "prog"}
+KEY_ALIASES = {"frn": "pmr", "emg": "fav"}
 STEP_LABELS = {
     0: "Auto", 5_000: "5.0", 6_250: "6.25", AIR_STEP: "8.33",
     10_000: "10.0", 12_500: "12.5",
@@ -23,6 +25,18 @@ REPLY_SECONDS = 2.0
 FINE_STEP_HZ = 100
 MANUAL_MIN_HZ = 100_000
 MANUAL_MAX_HZ = 1_750_000_000
+FULL_SEARCH_STEP_HZ = 12_500
+FAVORITE_COUNT = 24
+FAVORITE_NAME_LIMIT = 80
+
+
+def normalize_favorite_name(name):
+    if not isinstance(name, str) or len(name) > FAVORITE_NAME_LIMIT:
+        return None
+    name = name.strip()
+    if any(category(character) in ("Cc", "Cs", "Zl", "Zp") for character in name):
+        return None
+    return name
 
 
 def format_frequency(hz):
@@ -42,7 +56,9 @@ class Scanner:
         self._load()
         self.volume = 0.0
         self.squelch = 0.5
+        self.muted = False
         self.activity = "scan"
+        self.full_search = False
         self.hold = False
         self.direct_frequency = False
         self.enabled = set()
@@ -51,6 +67,7 @@ class Scanner:
         self.search_cursor = 0
         self.direction = 1
         self.current = None
+        self.last_held = None
         self.signal_open = False
         self.audio_open = False
         self.waiting_reply = None
@@ -96,6 +113,10 @@ class Scanner:
         return -120.0 if self.squelch == 0 else -98.0 + 100.0 * self.squelch
 
     @property
+    def audio_gate_open(self):
+        return self.audio_open and self.power and not self.menu and not self.preview_until
+
+    @property
     def bands(self):
         return GERMAN_BANDS if self.plan == 2 else BANDS
 
@@ -105,6 +126,8 @@ class Scanner:
 
     @property
     def search_step(self):
+        if self.full_search:
+            return self.general_step or FULL_SEARCH_STEP_HZ
         if self.band_index == AIR_INDEX:
             return self.air_step
         return self.general_step or self.band.step
@@ -140,21 +163,34 @@ class Scanner:
             self.close_groups = [True] * len(CLOSE_GROUPS)
         self.close_alert = raw.get("close_alert", True) is True
         self.program_locked = raw.get("program_locked", False) is True
-
+        self.rds_enabled = raw.get("rds_enabled") is True
+        parent = raw.get("recording_parent")
+        self.recording_parent = (Path(parent) if isinstance(parent, str) and "\0" not in parent
+                                 and Path(parent).is_absolute() and ".." not in Path(parent).parts
+                                 else None)
         saved = raw.get("memories")
-        self.memories = {bank: [None] * SLOTS for bank in WRITABLE.values()}
-        if isinstance(saved, dict):
-            for bank, slots in self.memories.items():
-                records = saved.get(bank)
-                if not isinstance(records, list):
+        if not isinstance(saved, dict):
+            saved = {}
+        self.memories = {
+            "PVT": self._load_slots(saved.get("PVT"), "PVT"),
+            "FAV": [None] * FAVORITE_COUNT
+            + self._load_slots(saved.get("EMG"), "FAV", FAVORITE_COUNT),
+        }
+        self.archived_frn = self._load_slots(saved.get("FRN"), "FRN")
+        self.favorite_names = [""] * FAVORITE_COUNT
+        names = raw.get("favorite_names")
+        if isinstance(names, list):
+            for index, name in enumerate(names[:FAVORITE_COUNT]):
+                self.favorite_names[index] = normalize_favorite_name(name) or ""
+        favorites = raw.get("favorites")
+        if isinstance(favorites, list):
+            for index, entry in enumerate(favorites[:FAVORITE_COUNT]):
+                if not isinstance(entry, dict):
                     continue
-                for slot, record in enumerate(records[:SLOTS]):
-                    if not isinstance(record, list) or len(record) != 2:
-                        continue
-                    hz, mode = record
-                    if (type(hz) is int and MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ
-                            and mode in ("FM", "AM", "WFM")):
-                        slots[slot] = Channel(hz, mode, bank, slot)
+                hz, mode = entry.get("hz"), entry.get("mode")
+                if (type(hz) is int and MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ
+                        and mode in ("AM", "FM", "WFM")):
+                    self.memories["FAV"][index] = Channel(hz, mode, "FAV", index)
         frequencies = raw.get("permanent_frequencies")
         self.permanent_frequencies = {}
         if isinstance(frequencies, list):
@@ -164,15 +200,50 @@ class Scanner:
             }
         slots = raw.get("permanent_slots")
         self.permanent_slots = set()
+        self.archived_frn_locks = set()
         if isinstance(slots, list):
             for entry in slots:
-                if (isinstance(entry, list) and len(entry) == 2
-                        and isinstance(entry[0], str) and entry[0] in self.memories
-                        and type(entry[1]) is int and 0 <= entry[1] < SLOTS
-                        and self.memories[entry[0]][entry[1]]):
-                    self.permanent_slots.add(tuple(entry))
+                if (not isinstance(entry, list) or len(entry) != 2
+                        or not isinstance(entry[0], str) or type(entry[1]) is not int):
+                    continue
+                bank, slot = entry
+                if bank == "FRN":
+                    if 0 <= slot < len(self.archived_frn) and self.archived_frn[slot]:
+                        self.archived_frn_locks.add(slot)
+                    continue
+                if bank == "EMG" and 0 <= slot < SLOTS:
+                    bank, slot = "FAV", slot + FAVORITE_COUNT
+                memories = self.memories.get(bank, ())
+                if 0 <= slot < len(memories) and memories[slot]:
+                    self.permanent_slots.add((bank, slot))
+
+    @staticmethod
+    def _load_slots(records, bank, offset=0):
+        slots = [None] * SLOTS
+        if isinstance(records, list):
+            for slot, record in enumerate(records[:SLOTS]):
+                if not isinstance(record, list) or len(record) != 2:
+                    continue
+                hz, mode = record
+                if (type(hz) is int and MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ
+                        and mode in ("AM", "FM", "WFM")):
+                    slots[slot] = Channel(hz, mode, bank, slot + offset)
+        return slots
 
     def _save(self):
+        # Preserve the old disk layout so rolling back can still read legacy
+        # emergency memories and any archived user-programmed Freenet entries.
+        memories = {
+            "PVT": self.memories["PVT"],
+            "EMG": self.memories["FAV"][FAVORITE_COUNT:],
+            "FRN": self.archived_frn,
+        }
+        locks = [
+            ("EMG", slot - FAVORITE_COUNT) if bank == "FAV" and slot >= FAVORITE_COUNT
+            else (bank, slot)
+            for bank, slot in self.permanent_slots
+        ]
+        locks.extend(("FRN", slot) for slot in self.archived_frn_locks)
         data = {
             "plan": self.plan,
             "general_step": self.general_step,
@@ -182,20 +253,102 @@ class Scanner:
             "close_groups": self.close_groups,
             "close_alert": self.close_alert,
             "program_locked": self.program_locked,
+            "rds_enabled": self.rds_enabled,
+            "favorites": self._favorite_entries(),
+            "favorite_names": self.favorite_names,
             "permanent_frequencies": list(self.permanent_frequencies),
-            "permanent_slots": sorted(self.permanent_slots),
+            "permanent_slots": sorted(locks),
             "memories": {
                 bank: [[channel.hz, channel.modulation] if channel else None for channel in slots]
-                for bank, slots in self.memories.items()
+                for bank, slots in memories.items()
             },
         }
+        if self.recording_parent is not None:
+            data["recording_parent"] = str(self.recording_parent)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
         temporary.write_text(json.dumps(data, separators=(",", ":")) + "\n")
         temporary.replace(self.state_path)
 
+    def set_recording_parent(self, parent):
+        previous = self.recording_parent
+        self.recording_parent = parent
+        try:
+            self._save()
+        except OSError:
+            self.recording_parent = previous
+            raise
+
     def _build_factory(self):
-        self.factory = factory_banks(self.plan, self.air_step)
+        self.factory = factory_banks(self.air_step)
+
+    def _favorite_entries(self):
+        return [{"hz": entry.hz, "mode": entry.modulation} if entry else None
+                for entry in self.memories["FAV"][:FAVORITE_COUNT]]
+
+    def rename_favorite(self, number, name):
+        name = normalize_favorite_name(name)
+        if type(number) is not int or not 1 <= number <= FAVORITE_COUNT or name is None:
+            raise ValueError("Invalid favourite name")
+        index = number - 1
+        previous = self.favorite_names[index]
+        if name == previous:
+            return
+        self.favorite_names[index] = name
+        try:
+            self._save()
+        except OSError:
+            self.favorite_names[index] = previous
+            raise
+
+    def favorite(self, number, gesture, *, rds_ps=None):
+        if type(number) is not int or not 1 <= number <= FAVORITE_COUNT or gesture not in ("tap", "long"):
+            raise ValueError("Invalid favourite action")
+        if not self.power or self.menu:
+            return
+        index = number - 1
+        if gesture == "long":
+            channel = self.tuned
+            selected = self.hold or self.capture_hold or self.received_signal
+            if not channel or not channel.hz or not selected or self.preview_until:
+                self._show("Error")
+                self._tone("error")
+                return
+            self._save_favorite(index, channel, rds_ps)
+        else:
+            entry = self.memories["FAV"][index]
+            if not entry:
+                return
+            self._hold_channel(entry)
+        self._tone()
+
+    def _save_favorite(self, index, channel, rds_ps):
+        entries = self.memories["FAV"]
+        previous = entries[index]
+        previous_name = self.favorite_names[index]
+        identity = ("FAV", index)
+        permanent = identity in self.permanent_slots
+        temporary = identity in self.temporary_slots
+        if not previous_name or (previous and previous.hz != channel.hz):
+            self.favorite_names[index] = normalize_favorite_name(rds_ps) or ""
+        self._store_slot("FAV", index, channel)
+        try:
+            self._save()
+        except OSError:
+            entries[index] = previous
+            self.favorite_names[index] = previous_name
+            if permanent:
+                self.permanent_slots.add(identity)
+            if temporary:
+                self.temporary_slots.add(identity)
+            raise
+        self._rebuild_scan()
+
+    def toggle_rds(self):
+        self.rds_enabled = not self.rds_enabled
+        self._save()
+        if self.power:
+            self._tone()
 
     def _clock_minutes(self):
         # time.localtime reflects the Ubuntu host time zone and daylight-saving rules.
@@ -203,7 +356,8 @@ class Scanner:
         return clock.tm_hour * 60 + clock.tm_min
 
     def _tone(self, kind="key", count=1):
-        self.tone = {"id": self.tone["id"] + 1, "kind": kind, "count": count}
+        if not self.muted:
+            self.tone = {"id": self.tone["id"] + 1, "kind": kind, "count": count}
 
     def _show(self, text, seconds=1.0):
         self.notice = text
@@ -220,6 +374,8 @@ class Scanner:
             self._clear_signal()
         self.current = channel
         self.direct_frequency = direct
+        if self.hold and channel and channel.hz:
+            self.last_held = Channel(channel.hz, channel.modulation)
         steps_per_second = 50
         if self.activity == "search":
             steps_per_second = 180 if self.search_step == 5_000 else 60
@@ -274,15 +430,44 @@ class Scanner:
                 return
         self._retune(None)
 
-    def _advance_search(self, direction, manual=False, first=False):
+    def _step_favorite(self, direction):
+        slots = self.memories["FAV"]
+        channel = self.current
+        if channel and channel.bank == "FAV":
+            start = channel.slot
+        else:
+            start = -1 if direction > 0 else 0
+        for offset in range(1, len(slots) + 1):
+            entry = slots[(start + direction * offset) % len(slots)]
+            if entry is None:
+                continue
+            self._hold_channel(entry)
+            return
+
+    def _advance_search(self, direction, manual=False, *, first=False, origin=None):
         band, step = self.band, self.search_step
-        count = band.count(step)
+        if self.full_search:
+            span = MANUAL_MAX_HZ - MANUAL_MIN_HZ
+            count = (span + step - 1) // step + 1
+            frequency = lambda position: min(MANUAL_MIN_HZ + position * step, MANUAL_MAX_HZ)
+        else:
+            count = band.count(step)
+            frequency = lambda position: band.frequency(position, step)
         index = self.search_cursor
         if first:
             index = -1 if direction > 0 else 0
+        elif origin is not None or self.direct_frequency:
+            if origin is None:
+                origin = self.current.hz
+            if direction > 0:
+                index = bisect_right(range(count), origin, key=frequency) - 1
+            else:
+                index = bisect_left(range(count), origin, key=frequency)
         for _ in range(count):
             index = (index + direction) % count
-            channel = Channel(band.frequency(index, step), band.modulation)
+            hz = frequency(index)
+            modulation = self._automatic_modulation(hz) if self.full_search else band.modulation
+            channel = Channel(hz, modulation)
             if manual or not self._lock_kind(channel):
                 self.search_cursor = index
                 self._retune(channel, force=True)
@@ -310,6 +495,9 @@ class Scanner:
                 and (channel.bank in ("CBAM", "CBFM")
                      or self.direct_frequency and 25_000_000 <= channel.hz < 30_000_000)):
             return channel.modulation
+        return self._automatic_modulation(hz)
+
+    def _automatic_modulation(self, hz):
         if 87_500_000 <= hz < 108_000_000:
             return "WFM"
         if hz < 25_000_000 or 108_000_000 <= hz < 137_000_000 or 225_000_000 <= hz < 400_000_000:
@@ -318,13 +506,18 @@ class Scanner:
         return band.modulation if band else "FM"
 
     def _hold_frequency(self, hz, modulation):
+        self._hold_channel(Channel(hz, modulation))
+
+    def _hold_channel(self, channel):
         self._leave_only()
         self._drop_capture()
         self.probe_request = None
         self.preview_until = 0
         self.notice_until = 0
         self.hold = True
-        self._retune(Channel(hz, modulation), force=True, direct=True)
+        self._retune(channel, force=True, direct=True)
+        if channel.bank == "FAV" and self.activity == "scan" and "FAV" in self.enabled:
+            self.scan_cursor = self.scan_list.index(channel)
 
     def _frequency_step(self, direction, hz):
         bands = self.bands
@@ -358,45 +551,89 @@ class Scanner:
             modulation = self.current.modulation
         self._hold_frequency(band.frequency(position, step), modulation)
 
-    def tune_step(self, direction):
+    def tune_step(self, direction, step_hz=FINE_STEP_HZ):
         if not self.power or self.menu:
             return
         channel = self.tuned
         if channel is None:
-            hz = self.band.lower if direction > 0 else self.band.upper
-            self._hold_frequency(hz, self.band.modulation)
+            if self.activity == "search" and self.full_search:
+                self.tune_frequency(MANUAL_MIN_HZ if direction > 0 else MANUAL_MAX_HZ)
+            else:
+                hz = self.band.lower if direction > 0 else self.band.upper
+                self._hold_frequency(hz, self.band.modulation)
             return
-        hz = channel.hz + direction * FINE_STEP_HZ
+        hz = channel.hz + direction * step_hz
         if not MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ:
             if not self.hold:
                 self._hold_frequency(channel.hz, channel.modulation)
             return
         self.tune_frequency(hz)
 
+    def _start_scan(self):
+        if (self.activity == "scan" and self.enabled and self.current and not self.hold
+                and not self.capture and self.close_mode != "only"):
+            return
+
+        held_bank = self.current.bank if self.hold and self.current else None
+        first_bank = None
+        if held_bank and held_bank not in self.enabled and (held_bank == "FAV" or not self.enabled):
+            first_bank = held_bank
+        elif not self.enabled and any(self.memories["FAV"]):
+            first_bank = "FAV"
+        enabled = self.enabled | {first_bank} if first_bank else self.enabled
+        if not any(not self._lock_kind(channel) for bank in BANKS if bank in enabled
+                   for channel in self._bank_entries(bank)):
+            if self.activity == "search":
+                self.activity = "scan"
+                self.preview_until = 0
+                if self.tuned:
+                    self._hold_channel(self.tuned)
+            self._show("no Ch")
+            self._tone("error")
+            return
+
+        self.enabled = enabled
+        self.activity = "scan"
+        self.hold = False
+        self.preview_until = 0
+        self.notice_until = 0
+        self._leave_only()
+        self._drop_capture()
+        self._rebuild_scan()
+        self._advance_scan(first_bank=first_bank)
+
     def _start_search(self, reset=False):
-        previous = self.activity
+        origin = self.tuned
+        if self.activity != "search":
+            self.full_search = True
         self.activity = "search"
         self.hold = False
         self.preview_until = 0
         self._leave_only()
         self._drop_capture()
-        self._advance_search(self.direction, first=reset or previous != "search" or not self.current)
+        self._advance_search(self.direction, first=reset or origin is None,
+                             origin=origin.hz if origin else None)
 
     def _preview_band(self, delta=0):
         self._leave_only()
         self._drop_capture()
+        band_count = len(self.bands)
+        index = band_count if self.activity == "search" and self.full_search else self.band_index
+        index = (index + delta) % (band_count + 1)
         self.activity = "search"
         self.hold = False
-        self.band_index = (self.band_index + delta) % len(self.bands)
+        self.full_search = index == band_count
+        if not self.full_search:
+            self.band_index = index
         self.preview_until = monotonic() + 3
         self._retune(None)
-        if delta:
+        if delta and not self.full_search:
             self._save()
 
     def _select_bank(self, key):
         groups = BANK_KEYS[key]
         selected = tuple(index for index, bank in enumerate(groups) if bank in self.enabled)
-        if self.activity != "scan" or self.hold or self.capture:
+        if self.activity != "scan" or self.capture:
             updated = selected or tuple(range(len(groups)))
         elif len(groups) == 1:
             updated = () if selected else (0,)
@@ -410,44 +647,57 @@ class Scanner:
         self.activity = "scan"
         self.hold = False
         self._rebuild_scan()
+        if not self.enabled and self.last_held:
+            self._hold_channel(self.last_held)
+            return
         active = [groups[index] for index in updated]
         self._advance_scan(first_bank=active[0] if active else None)
         if active and not any(not self._lock_kind(channel) for bank in active
                               for channel in self._bank_entries(bank)):
             self._tone("error")
 
-    def _bulk_unlock(self, channel):
-        if self.activity == "scan":
-            if not channel or channel.bank not in self.factory:
-                return
-            bank = channel.bank
-            frequency_set = {entry.hz for entry in self.factory[bank]}
-            self.permanent_slots = {identity for identity in self.permanent_slots if identity[0] != bank}
-            self.permanent_frequencies = {hz: None for hz in self.permanent_frequencies
-                                          if hz not in frequency_set}
-        elif self.activity == "search":
-            self.permanent_frequencies = {
-                hz: None for hz in self.permanent_frequencies if not self.band.lower <= hz <= self.band.upper
-            }
+    def _unlock_permanent(self, channel):
+        saved_slots, saved_frequencies = self.permanent_slots, self.permanent_frequencies
+        if channel.slot is not None:
+            self.permanent_slots = saved_slots - {(channel.bank, channel.slot)}
         else:
-            return
-        self._save()
-        self._tone(count=2)
+            self.permanent_frequencies = saved_frequencies.copy()
+            del self.permanent_frequencies[channel.hz]
+        try:
+            self._save()
+        except OSError:
+            self.permanent_slots, self.permanent_frequencies = saved_slots, saved_frequencies
+            raise
+
+    def _clear_lockouts(self, channel):
+        permanent = self._lock_kind(channel) == 2
+        had_locks = permanent or bool(self.temporary_slots or self.temporary_frequencies)
+        if permanent:
+            self._unlock_permanent(channel)
+        self.temporary_slots.clear()
+        self.temporary_frequencies.clear()
+        self.lock_notice = 0
+        self.lock_notice_until = 0
+        self.last_lock = None
+        if had_locks:
+            self._tone(count=2)
 
     def _lock(self, gesture):
         now = monotonic()
         channel = self.tuned
         if gesture == "long":
-            if self.hold:
-                self._bulk_unlock(channel)
+            self._clear_lockouts(channel)
             return
         if gesture == "double" and self.last_lock and now - self.last_lock[0] < 0.6:
             channel = self.last_lock[1]
         if not channel or not channel.hz:
             return
         kind = self._lock_kind(channel)
-        restore = gesture == "tap" and (self.capture_hold if self.capture else self.hold) and kind
         permanent = gesture == "double"
+        if not permanent and kind == 2:
+            return
+        held = self.capture_hold if self.capture else self.hold
+        restore = not permanent and held and kind == 1
         if permanent and channel.bank and channel.bank not in FULL_LOCKOUT and kind != 2:
             available = sum(not self._lock_kind(entry) or entry == channel
                             for entry in self.factory[channel.bank])
@@ -457,27 +707,23 @@ class Scanner:
         if channel.slot is not None:
             identity = (channel.bank, channel.slot)
             self.temporary_slots.discard(identity)
-            if restore:
-                self.permanent_slots.discard(identity)
-            elif permanent:
+            if permanent:
                 self.permanent_slots.add(identity)
-            else:
+            elif not restore:
                 self.temporary_slots.add(identity)
         else:
             self.temporary_frequencies.pop(channel.hz, None)
-            if restore:
-                self.permanent_frequencies.pop(channel.hz, None)
-            else:
+            if not restore:
                 skips = self.permanent_frequencies if permanent else self.temporary_frequencies
                 skips[channel.hz] = None
                 if len(skips) > FREQUENCY_SKIP_LIMIT:
                     del skips[next(iter(skips))]
-        if permanent or restore:
+        if permanent:
             self._save()
         self.lock_notice = 0 if restore else 2 if permanent else 1
-        self.lock_notice_until = now + 0.8
-        self.last_lock = (now, channel) if not restore and not permanent else None
-        if not (self.capture_hold if self.capture else self.hold) and channel == self.tuned:
+        self.lock_notice_until = 0 if restore else now + 0.8
+        self.last_lock = (now, channel) if not permanent and not restore else None
+        if not held and channel == self.tuned:
             self._drop_capture()
             if not self.hold:
                 self._advance()
@@ -508,12 +754,20 @@ class Scanner:
                                       if channel is None), 0)
             self.program_at = monotonic()
         elif key in ("up", "down") and self.program_bank:
-            self.program_slot = (self.program_slot + (1 if key == "up" else -1)) % SLOTS
+            slots = self.memories[self.program_bank]
+            self.program_slot = (self.program_slot + (1 if key == "up" else -1)) % len(slots)
             self.program_at = monotonic()
         elif key == "prog" and self.program_bank:
             self._write_slot()
         elif key == "hold":
             self.menu = None
+
+    def _store_slot(self, bank, slot, source):
+        channel = Channel(source.hz, source.modulation, bank, slot)
+        self.memories[bank][slot] = channel if source.hz else None
+        self.permanent_slots.discard((bank, slot))
+        self.temporary_slots.discard((bank, slot))
+        return channel
 
     def _write_slot(self):
         if self.program_locked:
@@ -521,11 +775,7 @@ class Scanner:
             self._tone("error")
             return
         bank, slot = self.program_bank, self.program_slot
-        source = self.program_source
-        channel = Channel(source.hz, source.modulation, bank, slot)
-        self.memories[bank][slot] = channel if source.hz else None
-        self.permanent_slots.discard((bank, slot))
-        self.temporary_slots.discard((bank, slot))
+        channel = self._store_slot(bank, slot, self.program_source)
         self.menu = None
         self._drop_capture()
         self._leave_only()
@@ -690,24 +940,35 @@ class Scanner:
             self._start_search(reset=True)
 
     def _clear_memory(self):
-        self.memories = {bank: [None] * SLOTS for bank in WRITABLE.values()}
+        for bank, memories in self.memories.items():
+            self.memories[bank] = [None] * len(memories)
+        self.favorite_names = [""] * FAVORITE_COUNT
+        self.archived_frn = [None] * SLOTS
+        self.archived_frn_locks.clear()
         self.permanent_frequencies.clear()
         self.temporary_frequencies.clear()
         self.permanent_slots.clear()
         self.temporary_slots.clear()
         self.program_locked = False
         self.hold = False
+        self.last_held = None
         self._rebuild_scan()
         self._save()
 
     def key(self, name, gesture="tap"):
+        name = KEY_ALIASES.get(name, name)
         if name not in KEYS or gesture not in ("tap", "long", "double"):
             raise ValueError("Invalid panel input")
         if not self.power:
             self._edit_clock(name, gesture)
             return
+        if name == "mute":
+            if gesture == "tap":
+                self.muted = not self.muted
+            return
         self._tone()
-        if self.capture and not self.capture_acknowledged:
+        if (self.capture and not self.capture_acknowledged and name != "scan"
+                and (name, gesture) != ("lock", "long")):
             self.capture_acknowledged = True
             return
         if name == "prog" and gesture == "long":
@@ -738,6 +999,8 @@ class Scanner:
             elif gesture == "tap":
                 delta = int(self.activity == "search" and bool(self.preview_until or self.current))
                 self._preview_band(delta)
+        elif name == "scan":
+            self._start_scan()
         elif name == "search":
             self._start_search(reset=bool(self.preview_until))
         elif name == "hold":
@@ -759,6 +1022,7 @@ class Scanner:
                     self._advance()
             else:
                 self.capture_hold = True
+                self.last_held = Channel(self.capture.hz, self.capture.modulation)
             return
         if not self.tuned:
             if self.close_mode != "only" and (self.scan_list or self.activity == "search"):
@@ -766,7 +1030,9 @@ class Scanner:
                 self._advance(manual=True)
             return
         self.hold = not self.hold
-        if not self.hold:
+        if self.hold:
+            self.last_held = Channel(self.tuned.hz, self.tuned.modulation)
+        else:
             self._drop_capture()
             if self.direct_frequency or not self.signal_open or self._lock_kind(self.current):
                 self._advance()
@@ -776,6 +1042,11 @@ class Scanner:
             self._preview_band(direction)
         elif self.close_mode == "only" and not self.capture:
             return
+        elif not self.capture and (
+            (self.current and self.current.bank == "FAV")
+            or (self.activity == "scan" and self.enabled == {"FAV"} and not self.current)
+        ):
+            self._step_favorite(direction)
         elif self.direct_frequency:
             self._frequency_step(direction, self.current.hz)
         elif self.hold:
@@ -902,14 +1173,15 @@ class Scanner:
         if self.menu:
             return self._menu_display(now)
         if self.preview_until:
-            return self.band.label, None
+            return "ALL" if self.full_search else self.band.label, None
         if self.capture and not self.capture_acknowledged:
             group = next(index for index, (_, lower, upper) in enumerate(CLOSE_GROUPS, 1)
                          if lower <= channel.hz <= upper)
             return f"b{group} Found", None
         if self.close_mode == "only" and not self.capture:
             return "-------", None
-        if self.activity == "scan" and not (self.hold or self.received_signal or self.capture):
+        if (self.activity == "scan" and self.enabled and channel
+                and not (self.hold or self.received_signal or self.capture)):
             return "SCAN", None
         if channel:
             number = channel.slot + 1 if channel.slot is not None else channel.preset_number
@@ -934,12 +1206,20 @@ class Scanner:
                 if display == "SCAN" and channel and channel.bank:
                     blink_bank = "CB" if channel.bank.startswith("CB") else channel.bank
             if channel and channel.hz:
-                upper.append("NFM" if channel.modulation == "FM" else channel.modulation)
+                if self.hold and channel.bank == "FAV" and "FAV" not in upper:
+                    upper.append("FAV")
+                if (self.activity == "scan" and not self.hold and not self.menu
+                        and channel.bank in ("AIR", "MRN") and {"AIR", "MRN"} <= self.enabled):
+                    upper.extend(("AM", "NFM"))
+                else:
+                    upper.append("NFM" if channel.modulation == "FM" else channel.modulation)
             if self.close_mode != "off":
                 lower.append("CLOSE")
             if self.close_mode != "only" and not self.direct_frequency:
-                lower.append("SCAN" if self.activity == "scan" else "SEARCH")
-                if self.activity == "search":
+                if self.activity == "scan" and self.enabled and channel:
+                    lower.append("SCAN")
+                elif self.activity == "search":
+                    lower.append("SEARCH")
                     lower.append("▲" if self.direction > 0 else "▼")
             if self.hold or self.capture_hold or self.menu == "program":
                 lower.append("HOLD")
@@ -951,6 +1231,8 @@ class Scanner:
             if lock:
                 lower.append("L/O")
         tune_hz = channel.hz if self.power and channel and channel.hz else None
+        active_favorite = (channel.slot + 1 if tune_hz is not None and channel.bank == "FAV"
+                           and channel.slot is not None and 0 <= channel.slot < FAVORITE_COUNT else None)
         return {
             "display": display,
             "channel": number,
@@ -960,15 +1242,25 @@ class Scanner:
             "blink": self.menu == "clock" or bool(self.capture and not self.capture_acknowledged),
             "close_blink": self.close_mode == "only",
             "scan_scroll": display == "SCAN",
+            "scan_active": display == "SCAN" and tune_hz is not None,
+            "search_active": bool(tune_hz and self.activity == "search" and not self.hold
+                                  and not self.capture and not self.received_signal and not self.menu
+                                  and self.notice_until <= now),
+            "search_full": self.activity == "search" and self.full_search,
             "backlight": self.power or self.menu in ("clock", "plan") or now < self.clock_light_until,
             "volume": self.volume,
+            "muted": self.muted,
             "squelch": self.squelch,
             "power": self.power,
             "can_tune": self.power and not self.menu,
             "tune_hz": tune_hz,
             "modulation": channel.modulation if channel else "FM",
+            "favorites": self._favorite_entries(),
+            "favorite_names": self.favorite_names.copy(),
+            "active_favorite": active_favorite,
+            "rds_enabled": self.rds_enabled,
             "squelch_db": self.squelch_db,
             "close_probe": list(self.probe_request) if self.probe_request else None,
-            "audio_open": self.audio_open and self.power and not self.menu and not self.preview_until,
+            "audio_open": self.audio_gate_open and not self.muted,
             "tone": dict(self.tone),
         }

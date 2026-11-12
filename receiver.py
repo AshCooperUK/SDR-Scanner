@@ -15,6 +15,8 @@ from time import monotonic
 import numpy as np
 from scipy import signal
 
+from rds import RdsDecoder
+
 
 SAMPLE_RATE = 24_000
 IQ_RATE = 2_400_000
@@ -28,6 +30,10 @@ TUNER_LIMIT = 1_750_000_000
 PROBE_FFT = 8192
 PROBE_HALF_WIDTH = 900_000
 PROBE_STRIDE = 1_600_000
+WATCH_HALF_WIDTH = {"AM": 7_000, "FM": 9_000, "WFM": 120_000}
+METER_NOISE_BANDWIDTH = {"AM": 7_400, "FM": 10_600, "WFM": 200_000}
+METER_SPECTRUM_INTERVAL = 4
+METER_MIN_EXCESS_DB = 5
 NFM_DEEMPHASIS_SECONDS = 200e-6
 WFM_DEEMPHASIS_SECONDS = 50e-6
 TUNER_GAIN_TARGET = 280  # Librtlsdr expresses gain in tenths of a dB.
@@ -77,6 +83,16 @@ def _decode_iq(buffer):
     interleaved -= 127.5
     interleaved *= 1.0 / 127.5
     return interleaved.view(np.complex64)
+
+
+def _center_for_frequency(hz, direct):
+    if hz + TUNER_OFFSET > TUNER_LIMIT or (direct and hz + TUNER_OFFSET >= DIRECT_LIMIT):
+        return hz - TUNER_OFFSET
+    return hz + TUNER_OFFSET
+
+
+def _dc_guard(mode):
+    return 120_000 if mode == "WFM" else 20_000
 
 
 class _IqStream:
@@ -171,6 +187,7 @@ class _IqStream:
 
 class _ChannelDecoder:
     def __init__(self):
+        self.rds = None
         narrow_decimation = signal.firwin(
             1101, 15_000, fs=IQ_RATE, window=("kaiser", 8.0)
         ).astype(np.float32)
@@ -204,13 +221,15 @@ class _ChannelDecoder:
         self.sample_indexes = np.arange(IQ_SAMPLES, dtype=np.float64)
         self.reset(0, "FM")
 
-    def reset(self, offset_hz, mode):
+    def reset(self, offset_hz, mode, keep_rds=False):
+        if self.rds is not None:
+            self.rds.reset(keep_metadata=keep_rds)
         channel_rate = WFM_CHANNEL_RATE if mode == "WFM" else CHANNEL_RATE
         self.channel_decimation = IQ_RATE // channel_rate
         self.audio_decimation = channel_rate // SAMPLE_RATE
         self.level_start = channel_rate // 400
-        deviation = 75_000 if mode == "WFM" else 2500
-        self.discriminator_scale = channel_rate / (2 * np.pi * deviation)
+        self.deviation = 75_000 if mode == "WFM" else 2500
+        self.discriminator_scale = channel_rate / (2 * np.pi * self.deviation)
         self.decimation_filter = self.decimation_filters[mode]
         history_blocks = (len(self.decimation_filter) - 2) // self.channel_decimation + 1
         self.history_size = history_blocks * self.channel_decimation
@@ -224,6 +243,7 @@ class _ChannelDecoder:
         self.mode = mode
         self.previous_iq = 0j
         self.am_carrier = None
+        self.block_offset_hz = None
 
     def decode(self, iq):
         translated = iq * self.mixer * np.complex64(self.mixer_phase)
@@ -257,7 +277,12 @@ class _ChannelDecoder:
             previous[1:] = channel[:-1]
             self.previous_iq = channel[-1]
             audio = np.angle(channel * np.conjugate(previous)) * self.discriminator_scale
+            # The carrier offset is the DC part of the discriminator output,
+            # before the audio filter removes it.
+            self.block_offset_hz = float(np.mean(audio[1:], dtype=np.float64)) * self.deviation
 
+        if self.mode == "WFM" and self.rds is not None:
+            self.rds.feed(audio)
         audio, self.audio_history = signal.sosfilt(self.audio_filter, audio, zi=self.audio_history)
         pcm = (np.clip(audio[::self.audio_decimation] * 0.65, -1.0, 1.0) * 32767).astype("<i2")
         return level, pcm.tobytes()
@@ -287,6 +312,12 @@ class Receiver:
         self._probe_pass = 0
         self._probe_window = np.hanning(PROBE_FFT)
         self._probe_offsets = np.fft.fftshift(np.fft.fftfreq(PROBE_FFT, 1 / IQ_RATE))
+        self._watch_iq = None
+        self._watch_responses = {}
+        self._meter_noise_bins = ((np.abs(self._probe_offsets) >= 20_000)
+                                  & (np.abs(self._probe_offsets) <= 800_000))
+        self._meter_offsets = deque(maxlen=15)
+        self._reset_tuning_measurement()
 
     def _call(self, name, *args):
         if not self._device:
@@ -336,12 +367,16 @@ class Receiver:
             self._headroom_blocks = 0
         return self._gain
 
+    def device_count(self):
+        """Return the number of RTL-SDR devices currently enumerated by libusb."""
+        if self._library is None:
+            self._library = _rtl_library()
+        return self._library.rtlsdr_get_device_count()
+
     def open(self):
         if self._device:
             return
-        if self._library is None:
-            self._library = _rtl_library()
-        if self.index >= self._library.rtlsdr_get_device_count():
+        if self.index >= self.device_count():
             raise ReceiverError("No RTL-SDR device is available")
         device = c.c_void_p()
         result = self._library.rtlsdr_open(c.byref(device), self.index)
@@ -370,9 +405,40 @@ class Receiver:
         self._direct = False
         self._tuning = None
         self._prepared = None
+        self._watch_iq = None
+        self._reset_tuning_measurement()
         self._gains = ()
         self._gain = None
         self._nominal_gain = None
+        if self._decoder.rds is not None:
+            self._decoder.rds.reset()
+
+    def set_rds_enabled(self, enabled):
+        if not enabled:
+            self._decoder.rds = None
+        elif self._decoder.rds is None:
+            self._decoder.rds = RdsDecoder(WFM_CHANNEL_RATE)
+
+    def rds_status(self):
+        if self._prepared and self._prepared[1] == "WFM" and self._decoder.rds is not None:
+            return self._decoder.rds.status()
+        return None
+
+    @property
+    def tuning_offset_hz(self):
+        """Estimated signed carrier offset from the selected frequency, when reliable."""
+        return self._tuning_offset_hz if self._prepared else None
+
+    @property
+    def tuning_snr_db(self):
+        """Selected-channel power above the estimated receiver noise floor."""
+        return self._tuning_snr_db if self._prepared else None
+
+    def _reset_tuning_measurement(self):
+        self._tuning_offset_hz = None
+        self._tuning_snr_db = None
+        self._meter_blocks_until_spectrum = 0
+        self._meter_offsets.clear()
 
     def _stop_stream(self):
         if self._stream is not None and not self._stream.stop():
@@ -389,34 +455,37 @@ class Receiver:
             raise ReceiverError("Tune the SDR before reading IQ")
         return self._stream.read()
 
-    def _set_center(self, center, direct):
-        if (center, direct) == (self._center, self._direct):
+    def _set_center(self, center, direct, *, restore_gain=None):
+        if self._stream is not None and (center, direct) == (self._center, self._direct):
             return
+        self._watch_iq = None
         self._stop_stream()
         if direct != self._direct:
             self._call("set_direct_sampling", 2 if direct else 0)
+            self._direct = direct
             if not direct:
                 self._set_gain()
+                if restore_gain in self._gains and restore_gain != self._gain:
+                    self._apply_gain(restore_gain)
         self._call("set_center_freq", center)
         self._start_stream()
         self._center = center
-        self._direct = direct
         self._prepared = None
 
     def tune(self, hz, mode):
         hz = int(hz)
         if mode not in ("AM", "FM", "WFM") or not 100_000 <= hz <= TUNER_LIMIT:
             raise ReceiverError("Frequency or modulation is outside the SDR receiver configuration")
+        if self._tuning != (hz, mode):
+            self._reset_tuning_measurement()
         direct = hz < DIRECT_LIMIT
-        dc_guard = 120_000 if mode == "WFM" else 20_000
-        if self._center is None or self._direct != direct or not dc_guard <= abs(hz - self._center) <= 800_000:
+        if (self._center is None or self._direct != direct
+                or not _dc_guard(mode) <= abs(hz - self._center) <= 800_000):
             # Moving the carrier away from tuner DC avoids false squelch hits.
-            center = hz + TUNER_OFFSET if hz + TUNER_OFFSET <= TUNER_LIMIT else hz - TUNER_OFFSET
-            if direct and center >= DIRECT_LIMIT:
-                center = hz - TUNER_OFFSET
-            self._set_center(center, direct)
+            self._set_center(_center_for_frequency(hz, direct), direct)
         if self._prepared != (hz, mode, self._center):
-            self._decoder.reset(hz - self._center, mode)
+            self._watch_iq = None
+            self._decoder.reset(hz - self._center, mode, keep_rds=self._tuning == (hz, mode))
             self._prepared = hz, mode, self._center
             self._last_sequence = None
             self._stream.discard_pending()
@@ -439,9 +508,109 @@ class Receiver:
         if gain_changed or (self._last_sequence is not None and sequence != self._last_sequence + 1):
             # A new stream or missing input invalidates the DSP history.
             hz, mode = self._tuning
-            self._decoder.reset(hz - self._center, mode)
+            self._decoder.reset(hz - self._center, mode, keep_rds=True)
         self._last_sequence = sequence
-        return self._decoder.decode(_decode_iq(raw))
+        self._watch_iq = _decode_iq(raw)
+        level, pcm = self._decoder.decode(self._watch_iq)
+        self._measure_tuning(level)
+        return level, pcm
+
+    def _measure_tuning(self, level):
+        hz, mode = self._tuning
+        offset = hz - self._center
+        if self._meter_blocks_until_spectrum == 0:
+            spectrum = self._watch_spectrum(self._watch_iq)
+            relative = self._probe_offsets - offset
+            noise_bins = self._meter_noise_bins & (np.abs(relative) > WATCH_HALF_WIDTH[mode])
+            noise = np.median(spectrum[noise_bins]) * (METER_NOISE_BANDWIDTH[mode] * PROBE_FFT / IQ_RATE)
+            self._tuning_snr_db = float(level - 10 * np.log10(max(noise, 1e-15)))
+            self._meter_blocks_until_spectrum = METER_SPECTRUM_INTERVAL
+            if mode == "AM":
+                self._tuning_offset_hz = self._am_offset(spectrum, relative)
+        self._meter_blocks_until_spectrum -= 1
+
+        if self._tuning_snr_db < METER_MIN_EXCESS_DB:
+            self._meter_offsets.clear()
+            self._tuning_offset_hz = None
+        elif mode != "AM":
+            self._meter_offsets.append(self._decoder.block_offset_hz)
+            if len(self._meter_offsets) >= (6 if mode == "WFM" else 4):
+                self._tuning_offset_hz = sum(self._meter_offsets) / len(self._meter_offsets)
+
+    @staticmethod
+    def _am_offset(spectrum, relative):
+        # Broadcast and voice AM retain a narrow carrier, even when their
+        # sidebands are asymmetric. Interpolate the Hann-windowed peak.
+        start, stop = np.searchsorted(relative, [-4_500, 4_500])
+        peak = start + np.argmax(spectrum[start:stop])
+        window = spectrum[peak - 1:peak + 2]
+        if window.sum() < 0.25 * spectrum[start:stop].sum():
+            return None
+        left, middle, right = np.log(np.maximum(window, 1e-15))
+        curvature = left - 2 * middle + right
+        bin_offset = np.clip(0.5 * (left - right) / curvature, -0.5, 0.5) if curvature < 0 else 0
+        return float(relative[peak] + bin_offset * IQ_RATE / PROBE_FFT)
+
+    def _watch_spectrum(self, iq):
+        windows = iq[:3 * PROBE_FFT].reshape(3, PROBE_FFT)
+        spectrum = np.fft.fftshift(np.fft.fft(windows * self._probe_window, axis=1), axes=1)
+        window_energy = PROBE_FFT * np.sum(self._probe_window ** 2)
+        return np.mean(np.abs(spectrum) ** 2, axis=0) / window_energy
+
+    def _watch_level(self, power, offset, mode):
+        response = self._watch_responses.get(mode)
+        if response is None:
+            frequencies, weights = signal.freqz(self._decoder.decimation_filters[mode],
+                                               worN=PROBE_FFT, fs=IQ_RATE)
+            stop = np.searchsorted(frequencies, WATCH_HALF_WIDTH[mode], side="right") + 1
+            frequencies, weights = frequencies[:stop], weights[:stop]
+            if mode != "WFM":
+                _, channel_weights = signal.freqz(self._decoder.filters[mode], worN=frequencies,
+                                                  fs=CHANNEL_RATE)
+                weights *= channel_weights
+            response = frequencies, np.abs(weights) ** 2
+            self._watch_responses[mode] = response
+
+        half_width = WATCH_HALF_WIDTH[mode]
+        left, right = np.searchsorted(self._probe_offsets, [offset - half_width, offset + half_width])
+        weights = np.interp(np.abs(self._probe_offsets[left:right] - offset), *response)
+        channel_power = np.dot(power[left:right], weights)
+        return float(10 * np.log10(max(channel_power, 1e-15)))
+
+    def watch_levels(self, targets):
+        """Measure covered channels from the latest primary audio block without retuning."""
+        if self._watch_iq is None:
+            return {}
+        covered = []
+        for hz, mode in targets:
+            offset = abs(hz - self._center)
+            if (mode in WATCH_HALF_WIDTH and 100_000 <= hz <= TUNER_LIMIT
+                    and (hz < DIRECT_LIMIT) == self._direct and _dc_guard(mode) <= offset <= 800_000
+                    and offset + WATCH_HALF_WIDTH[mode] <= PROBE_HALF_WIDTH):
+                covered.append((hz, mode))
+        if not covered:
+            return {}
+        spectrum = self._watch_spectrum(self._watch_iq)
+        return {(hz, mode): self._watch_level(spectrum, hz - self._center, mode)
+                for hz, mode in covered}
+
+    def watch_probe(self, target):
+        """Check one remote channel, then restore the previous audio capture window."""
+        hz, mode = target
+        if mode not in WATCH_HALF_WIDTH or not 100_000 <= hz <= TUNER_LIMIT:
+            return None
+        direct = hz < DIRECT_LIMIT
+        center = _center_for_frequency(hz, direct)
+        previous = self._center, self._direct
+        previous_gain = self._gain
+        try:
+            self._set_center(center, direct)
+            _, raw = self._read_iq()  # Stream startup has already discarded settling samples.
+            spectrum = self._watch_spectrum(_decode_iq(raw))
+            return self._watch_level(spectrum, hz - center, mode)
+        finally:
+            if self._tuning is not None and previous[0] is not None:
+                self._set_center(*previous, restore_gain=previous_gain)
 
     def _probe_peak(self, iq, center, low, high):
         windows = iq[:3 * PROBE_FFT].reshape(3, PROBE_FFT)

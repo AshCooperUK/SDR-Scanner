@@ -84,16 +84,16 @@ GERMAN_CHANGES = {
 GERMAN_BANDS = tuple(replace(band, **GERMAN_CHANGES.get(index, {}))
                      for index, band in enumerate(BANDS))
 
-BANKS = ("PVT", "EMG", "FRN", "PMR", "AIR", "MRN", "CBAM", "CBFM")
+BANKS = ("PVT", "FAV", "PMR", "AIR", "MRN", "CBAM", "CBFM")
 BANK_KEYS = {
     "private": ("PVT",),
-    "emg": ("EMG",),
-    "frn": ("FRN", "PMR"),
+    "fav": ("FAV",),
+    "pmr": ("PMR",),
     "air": ("AIR", "MRN"),
     "cb": ("CBAM", "CBFM"),
 }
-WRITABLE = {"private": "PVT", "emg": "EMG", "frn": "FRN"}
-FULL_LOCKOUT = {"PVT", "EMG", "FRN", "PMR", "MRN"}
+WRITABLE = {"private": "PVT", "fav": "FAV"}
+FULL_LOCKOUT = {"PVT", "FAV", "PMR", "MRN"}
 SLOTS = 100
 GENERAL_STEPS = (0, 5_000, 6_250, 10_000, 12_500)
 AIR_STEPS = (AIR_STEP, 12_500)
@@ -106,8 +106,6 @@ CLOSE_GROUPS = (
     ("b5 800", 806_000_000, 960_000_000),
 )
 
-FREENET = (149_025_000, 149_037_500, 149_050_000, 149_087_500,
-           149_100_000, 149_112_500)
 PMR = tuple(range(446_006_250, 446_093_751, 12_500))
 
 # One carrier per legacy international marine channel. Duplex entries use
@@ -125,15 +123,11 @@ def _marine_frequency(number):
     return ship if number in _MARINE_SIMPLEX else ship + 4_600_000
 
 
-def factory_banks(plan, air_step):
+def factory_banks(air_step):
     air = BANDS[AIR_INDEX]
-    # Plan 1's factory EMG frequencies were not published by Uniden.
-    german_emg = range(84_015_000, 87_295_001, 20_000) if plan == 2 else ()
     return {
         "PVT": (),
-        "EMG": tuple(Channel(hz, "FM", "EMG") for hz in german_emg),
-        "FRN": tuple(Channel(hz, "FM", "FRN", preset_number=index)
-                     for index, hz in enumerate(FREENET, 1)),
+        "FAV": (),
         "PMR": tuple(Channel(hz, "FM", "PMR", preset_number=index)
                      for index, hz in enumerate(PMR, 1)),
         "AIR": tuple(Channel(air.frequency(index, air_step), "AM", "AIR")

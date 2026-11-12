@@ -3,46 +3,112 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#fff">
+  <meta name="theme-color" content="#252720">
   <title>Scanner</title>
+  <link rel="icon" href="ashcooperuk-avatar.png" type="image/png" sizes="128x128">
   <link rel="stylesheet" href="panel.css">
   <script src="panel.js" type="module"></script>
 </head>
 <body>
   <main class="radio" aria-label="Scanner front panel">
-    <div class="photo-plane">
-      <img class="panel-photo" src="panel.png" alt="" draggable="false" width="1629" height="965">
+    <div class="upper-panel">
+      <button type="button" class="key" data-key="hold" style="--x:99;--y:230;--w:145;--h:96;--sprite-y:254"><span class="face-label">Hold</span></button>
+      <button type="button" class="key" data-key="up" style="--x:278;--y:230;--w:138;--h:100;--sprite-y:251"><span class="face-label">Up</span></button>
+      <button type="button" class="key" data-key="down" style="--x:454;--y:230;--w:143;--h:100;--sprite-y:251"><span class="face-label">Down</span></button>
+      <button type="button" class="key" data-key="mute" aria-pressed="false" style="--x:98;--y:381;--w:147;--h:69;--sprite-y:389"><span class="face-label">Mute</span></button>
+      <button type="button" class="key" data-key="fav" style="--x:275;--y:381;--w:148;--h:69;--sprite-y:389"><span class="face-label">FAV</span></button>
+      <button type="button" class="key" data-key="pmr" style="--x:450;--y:381;--w:151;--h:69;--sprite-y:389"><span class="face-label">PMR 446</span></button>
+      <button type="button" class="key" data-key="close" style="--x:98;--y:511;--w:149;--h:73;--sprite-y:491"><span class="face-label">Close Call</span></button>
+      <button type="button" class="key" data-key="air" style="--x:275;--y:511;--w:149;--h:73;--sprite-y:491"><span class="face-label">Air/Marine</span></button>
+      <button type="button" class="key" data-key="cb" style="--x:450;--y:511;--w:152;--h:73;--sprite-y:491"><span class="face-label">CB AM/FM</span></button>
+      <button type="button" class="key" data-key="search" style="--x:660;--y:513;--w:134;--h:98;--sprite-y:493"><span class="face-label">Search</span></button>
+      <button type="button" class="key" data-key="lock" style="--x:834;--y:515;--w:135;--h:97;--sprite-y:495"><span class="face-label">L/O</span></button>
+      <button type="button" class="key" data-key="band" style="--x:1015;--y:515;--w:133;--h:97;--sprite-y:495"><span class="face-label">Band/Step</span></button>
+      <button type="button" class="key" data-key="prog" style="--x:1188;--y:514;--w:135;--h:98;--sprite-y:494"><span class="face-label">Prog</span></button>
 
-      <button type="button" class="key" data-key="hold" aria-label="Hold" style="--x:99;--y:254;--w:145;--h:96"></button>
-      <button type="button" class="key" data-key="up" aria-label="Up" style="--x:278;--y:251;--w:138;--h:100"></button>
-      <button type="button" class="key" data-key="down" aria-label="Down" style="--x:454;--y:251;--w:143;--h:100"></button>
-      <button type="button" class="key" data-key="private" aria-label="Private" style="--x:98;--y:389;--w:147;--h:69"></button>
-      <button type="button" class="key" data-key="emg" aria-label="EMG" style="--x:275;--y:389;--w:148;--h:69"></button>
-      <button type="button" class="key" data-key="frn" aria-label="FRN/PMR" style="--x:450;--y:389;--w:151;--h:69"></button>
-      <button type="button" class="key" data-key="close" aria-label="Close Call" style="--x:98;--y:491;--w:149;--h:73"></button>
-      <button type="button" class="key" data-key="air" aria-label="Air/Marine" style="--x:275;--y:491;--w:149;--h:73"></button>
-      <button type="button" class="key" data-key="cb" aria-label="CB AM/FM" style="--x:450;--y:491;--w:152;--h:73"></button>
-      <button type="button" class="key" data-key="search" aria-label="Search" style="--x:660;--y:493;--w:134;--h:98"></button>
-      <button type="button" class="key" data-key="lock" aria-label="L/O" style="--x:834;--y:495;--w:135;--h:97"></button>
-      <button type="button" class="key" data-key="band" aria-label="Band/Step" style="--x:1015;--y:495;--w:133;--h:97"></button>
-      <button type="button" class="key" data-key="prog" aria-label="Prog" style="--x:1188;--y:494;--w:135;--h:98"></button>
+      <div class="dial" data-knob="squelch" role="slider" tabindex="0" aria-label="Squelch" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="--x:1405;--y:230;--w:164;--h:164;--cap-x:1413;--cap-y:238;--cap-size:148">
+        <span class="face-label" aria-hidden="true">Squelch</span>
+      </div>
+      <div class="dial" data-knob="volume" role="slider" tabindex="0" aria-label="Volume/Clock" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Clock standby" style="--x:1405;--y:442;--w:164;--h:164;--cap-x:1413;--cap-y:450;--cap-size:148">
+        <span class="face-label" aria-hidden="true">Volume</span>
+      </div>
 
-      <div class="dial" data-knob="squelch" role="slider" tabindex="0" aria-label="SQ" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="--x:1405;--y:210;--w:164;--h:164;--cap-x:1413;--cap-y:218;--cap-size:148"></div>
-      <div class="dial" data-knob="volume" role="slider" tabindex="0" aria-label="Volume/Clock" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Clock standby" style="--x:1405;--y:442;--w:164;--h:164;--cap-x:1413;--cap-y:450;--cap-size:148"></div>
-
-      <div id="lcd" class="lcd" role="img" tabindex="0" aria-label="Scanner display" aria-description="Scroll to tune, or type a frequency in MHz and press Enter.">
-        <div class="lcd-banks" aria-hidden="true">
-          <span data-lcd="PVT">PVT</span><span data-lcd="EMG">EMG</span><span data-lcd="FRN">FRN</span><span data-lcd="PMR">PMR</span><span data-lcd="AIR">AIR</span><span data-lcd="MRN">MRN</span><span data-lcd="CB">CB</span><span data-lcd="AM">AM</span><span data-lcd="NFM">NFM</span>
+      <div id="lcd" class="lcd" role="group" tabindex="0" aria-label="Scanner display" aria-description="Scroll to tune, or type a frequency in MHz and press Enter.">
+        <div class="lcd-content">
+          <div class="lcd-banks" aria-hidden="true">
+            <span data-lcd="PVT">PVT</span><span data-lcd="FAV">FAV</span><span data-lcd="PMR">PMR</span><span data-lcd="AIR">AIR</span><span data-lcd="MRN">MRN</span><span data-lcd="CB">CB</span><span data-lcd="AM">AM</span><span data-lcd="NFM">NFM</span>
+          </div>
+          <div class="lcd-readout" aria-hidden="true">
+            <div class="lcd-channel"><span data-lcd="CH">CH</span><div id="channel"></div></div>
+            <div id="display"></div>
+          </div>
+          <div id="rds-readout" class="lcd-rds" aria-hidden="true" hidden>
+            <span id="rds-station" class="lcd-line" hidden><span></span></span>
+            <span id="rds-text" class="lcd-line" hidden><span id="rds-copy"></span></span>
+          </div>
+          <input id="favorite-name" class="lcd-editor" type="text" maxlength="80"
+            aria-label="Favourite name" autocomplete="off" spellcheck="false" hidden>
+          <div class="lcd-status" aria-hidden="true">
+            <span class="close-icon" data-lcd="CLOSE">⊕</span><span data-lcd="HOLD">HOLD</span><span data-lcd="SCAN">SCAN</span><span data-lcd="SEARCH">SEARCH</span><span data-lcd="▲">▲</span><span data-lcd="▼">▼</span><span data-lcd="T">T</span><span data-lcd="L/O">L/O</span>
+          </div>
         </div>
-        <div class="lcd-readout" aria-hidden="true">
-          <div class="lcd-channel"><span data-lcd="CH">CH</span><div id="channel"></div></div>
-          <div id="display"></div>
-        </div>
-        <div class="lcd-status" aria-hidden="true">
-          <span class="close-icon" data-lcd="CLOSE">⊕</span><span data-lcd="HOLD">HOLD</span><span data-lcd="SCAN">SCAN</span><span data-lcd="SEARCH">SEARCH</span><span data-lcd="▲">▲</span><span data-lcd="▼">▼</span><span data-lcd="T">T</span><span data-lcd="L/O">L/O</span>
+        <div id="signal-meter" class="signal-meter" role="meter" aria-label="Signal strength"
+          aria-valuemin="-95" aria-valuemax="-20" aria-valuenow="-95" hidden>
+          <span data-signal-bar></span><span data-signal-bar></span><span data-signal-bar></span>
+          <span data-signal-bar></span><span data-signal-bar></span><span data-signal-bar></span>
+          <span data-signal-bar></span>
         </div>
       </div>
     </div>
+    <div class="extension">
+      <div id="favorite-bank" class="favorite-bank" role="group" aria-label="Favourite frequencies"></div>
+      <div class="settings-bank" role="group" aria-label="Scanner settings">
+        <button type="button" id="rds-toggle" class="extension-button setting-button" data-setting="rds" aria-pressed="false">
+          <span class="button-label">RDS</span><span class="button-cap" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="extension-button setting-button" data-key="scan">
+          <span class="button-label">SCAN</span><span class="button-cap" aria-hidden="true"></span>
+        </button>
+        <button type="button" id="watch-toggle" class="extension-button setting-button" data-setting="watch" aria-pressed="false">
+          <span class="button-label">WATCH</span><span class="button-cap" aria-hidden="true"></span>
+        </button>
+        <button type="button" id="record-toggle" class="extension-button setting-button" data-key="record" aria-pressed="false">
+          <span class="button-label">RECORD</span><span class="button-cap" aria-hidden="true"></span>
+        </button>
+        <button type="button" id="play-last" class="extension-button setting-button" data-key="play-last" aria-pressed="false">
+          <span class="button-label">PLAY LAST</span><span class="button-cap" aria-hidden="true"></span>
+        </button>
+      </div>
+    </div>
   </main>
+  <footer class="profile-footer">
+    <a class="github-profile" href="https://github.com/AshCooperUK" target="_blank" rel="noopener noreferrer"
+      aria-label="AshCooperUK on GitHub" title="AshCooperUK on GitHub">
+      <img class="github-avatar" src="https://github.com/AshCooperUK.png?size=96"
+        width="96" height="96" alt="" referrerpolicy="no-referrer">
+      <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <path d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656"/>
+      </svg>
+    </a>
+  </footer>
+  <audio id="last-recording" preload="none" loop hidden></audio>
+  <dialog id="record-folder-dialog" class="folder-dialog" aria-labelledby="record-folder-title">
+    <form method="dialog">
+      <h2 id="record-folder-title">Recording folder</h2>
+      <label for="record-folder-path">Path on the scanner server</label>
+      <div class="folder-location">
+        <button id="record-folder-up" type="button">Up</button>
+        <input id="record-folder-path" type="text" maxlength="1024" autocomplete="off" spellcheck="false" autofocus>
+        <button id="record-folder-open" type="button">Open</button>
+      </div>
+      <ul id="record-folder-list" aria-label="Subfolders"></ul>
+      <p id="record-folder-status" role="status"></p>
+      <div class="folder-actions">
+        <button value="cancel">Cancel</button>
+        <button id="record-folder-select" type="button">Choose folder</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="panel-tooltip" role="tooltip" hidden></div>
 </body>
 </html>
