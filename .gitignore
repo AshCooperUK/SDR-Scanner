@@ -1,0 +1,6 @@
+__pycache__/
+.scanner-state.json
+.scanner-state.json.tmp
+/recordings/
+/releases/
+/research_notes/

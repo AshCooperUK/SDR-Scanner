@@ -1,0 +1,323 @@
+:root {
+  color-scheme: light;
+  font-family: Arial, sans-serif;
+  background: #fff;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  min-block-size: 100vh;
+  min-block-size: 100svh;
+  margin: 0;
+}
+
+.radio {
+  position: relative;
+  width: min(100%, 76rem, 230svh);
+  aspect-ratio: 1629 / 653;
+  overflow: hidden;
+}
+
+.photo-plane {
+  position: absolute;
+  inset: 0 0 auto;
+  width: 100%;
+  aspect-ratio: 1629 / 965;
+  container-type: inline-size;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.panel-photo {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.key,
+.dial {
+  position: absolute;
+  left: calc(var(--x) / 1629 * 100%);
+  top: calc(var(--y) / 965 * 100%);
+  width: calc(var(--w) / 1629 * 100%);
+  height: calc(var(--h) / 965 * 100%);
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  color: transparent;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.key {
+  cursor: pointer;
+}
+
+.key[data-key="up"],
+.key[data-key="down"],
+.key[data-key="private"],
+.key[data-key="emg"],
+.key[data-key="frn"],
+.key[data-key="close"],
+.key[data-key="air"],
+.key[data-key="cb"] {
+  border-radius: 26% / 50%;
+}
+
+.key.is-pressed {
+  background: rgb(0 0 0 / 28%);
+  box-shadow: inset 0 .35cqw .5cqw rgb(0 0 0 / 46%);
+}
+
+.key:focus-visible,
+.dial:focus-visible,
+.lcd:focus-visible {
+  outline: max(2px, .16cqw) solid #ffb753;
+  outline-offset: 1px;
+}
+
+.dial {
+  cursor: grab;
+}
+
+.dial.is-dragging {
+  cursor: grabbing;
+}
+
+.dial::after {
+  position: absolute;
+  top: calc((var(--cap-y) - var(--y)) / var(--h) * 100%);
+  left: calc((var(--cap-x) - var(--x)) / var(--w) * 100%);
+  width: calc(var(--cap-size) / var(--w) * 100%);
+  height: calc(var(--cap-size) / var(--h) * 100%);
+  content: "";
+  border-radius: 50%;
+  background-image: url("panel.png");
+  background-size: calc(1629 / var(--cap-size) * 100%) calc(965 / var(--cap-size) * 100%);
+  background-position: calc(var(--cap-x) / (1629 - var(--cap-size)) * 100%) calc(var(--cap-y) / (965 - var(--cap-size)) * 100%);
+  transform: rotate(var(--rotation, 0deg));
+  pointer-events: none;
+}
+
+.lcd {
+  position: absolute;
+  left: calc(697 / 1629 * 100%);
+  top: calc(248 / 965 * 100%);
+  width: calc(621 / 1629 * 100%);
+  height: calc(185 / 965 * 100%);
+  box-sizing: border-box;
+  overflow: hidden;
+  border-radius: 18% / 50%;
+  color: #271502;
+  cursor: text;
+}
+
+.lcd.is-unlit {
+  color: #131007;
+  background: rgb(12 11 6 / 61%);
+}
+
+.lcd-banks,
+.lcd-status {
+  position: absolute;
+  inset-inline: 10% 9.5%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 16%;
+  white-space: nowrap;
+  font-size: 1.56cqw;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -.055cqw;
+}
+
+.lcd-banks {
+  top: 10%;
+}
+
+.lcd-status {
+  bottom: 9%;
+}
+
+.lcd-status .close-icon {
+  font-size: 1.85cqw;
+}
+
+.lcd-status [data-lcd="▲"],
+.lcd-status [data-lcd="▼"] {
+  font-size: 1.12cqw;
+}
+
+[data-lcd] {
+  opacity: 0;
+}
+
+[data-lcd].is-visible {
+  opacity: 1;
+}
+
+.lcd-readout {
+  position: absolute;
+  inset: 30% 13.5% 27% 11%;
+  display: grid;
+  grid-template-columns: 18% 82%;
+  align-items: end;
+}
+
+.lcd-channel {
+  display: flex;
+  flex-direction: column;
+  justify-content: end;
+  align-items: center;
+  gap: 4%;
+  height: 100%;
+  font-size: 1.1cqw;
+  font-weight: 700;
+}
+
+#channel,
+#display {
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  gap: .28cqw;
+}
+
+#channel {
+  width: 100%;
+  height: 68%;
+  gap: .15cqw;
+}
+
+#display {
+  position: relative;
+  height: 100%;
+}
+
+#display.is-clock {
+  margin-inline-start: -20%;
+}
+
+#display.is-scrolling {
+  animation: scan-scroll 2.25s linear infinite;
+}
+
+.is-blinking {
+  animation: lcd-blink 1s steps(1, end) infinite;
+}
+
+.digit {
+  position: relative;
+  height: 100%;
+  width: 12%;
+  min-width: 0;
+  max-width: 3cqw;
+}
+
+#channel .digit {
+  width: 37%;
+  max-width: 1.8cqw;
+}
+
+.digit-dot {
+  align-self: end;
+  flex: 0 0 .55cqw;
+  height: .55cqw;
+  margin: 0 -.12cqw .08cqw;
+  background: currentColor;
+}
+
+.digit-colon {
+  position: relative;
+  flex: 0 0 .63cqw;
+}
+
+.digit-colon::before,
+.digit-colon::after {
+  position: absolute;
+  width: .61cqw;
+  height: .61cqw;
+  background: currentColor;
+  content: "";
+}
+
+.digit-colon::before {
+  top: 28%;
+}
+
+.digit-colon::after {
+  bottom: 28%;
+}
+
+.digit-text {
+  align-self: center;
+  font-size: 3.3cqw;
+  line-height: 1;
+  font-family: ui-monospace, monospace;
+  font-weight: 700;
+}
+
+.segment {
+  position: absolute;
+  background: currentColor;
+  opacity: .035;
+}
+
+.segment.is-on {
+  opacity: .96;
+}
+
+.segment-a,
+.segment-g,
+.segment-d {
+  left: 9%;
+  width: 82%;
+  height: 9%;
+  clip-path: polygon(12% 0, 88% 0, 100% 50%, 88% 100%, 12% 100%, 0 50%);
+}
+
+.segment-a { top: 0; }
+.segment-g { top: 45.5%; }
+.segment-d { bottom: 0; }
+
+.segment-f,
+.segment-b,
+.segment-e,
+.segment-c {
+  width: 17%;
+  height: 43%;
+  clip-path: polygon(50% 0, 100% 12%, 100% 88%, 50% 100%, 0 88%, 0 12%);
+}
+
+.segment-f,
+.segment-b { top: 5%; }
+
+.segment-e,
+.segment-c { bottom: 5%; }
+
+.segment-f,
+.segment-e { left: 0; }
+
+.segment-b,
+.segment-c { right: 0; }
+
+@keyframes lcd-blink {
+  50% { opacity: 0; }
+}
+
+@keyframes scan-scroll {
+  from { transform: translateX(70%); }
+  to { transform: translateX(-88%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #display.is-scrolling,
+  .is-blinking {
+    animation: none;
+  }
+}
