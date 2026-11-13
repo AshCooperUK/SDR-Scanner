@@ -26,6 +26,8 @@ from access_pin import ACCESS_SECONDS, PIN_PATTERN, REMOTE_AUTHORITY, AccessConf
 from bandplan import BANK_KEYS
 from dab import BAND_III, SERVICE_ID, DabError, DabReceiver
 from discovery import DISCOVERY_URL, MAX_HITS, Discovery, wave_audio
+from dmr import DmrState, valid_dmr_action
+from dmr_decoder import DmrDecoder, DmrDecoderError
 from folder_picker import browse_folders, select_folder
 from radio_pool import RadioPool
 from receiver import SAMPLE_RATE, Receiver, ReceiverError
@@ -39,7 +41,7 @@ from tone_search import normalize_tone_filter
 
 
 ROOT = Path(__file__).resolve().parent
-ASSETS = frozenset({"index.html", "panel.css", "panel.js", "panel.png", "field-background.webp", "workbench.webp",
+ASSETS = frozenset({"index.html", "panel.css", "panel.js", "dmr-panel.css", "dmr-panel.js", "panel.png", "field-background.webp", "workbench.webp",
                     "waterfall.js", "pcm-buffer.js", "pcm-worklet.js", "ashcooperuk-avatar.png"})
 SILENCE = bytes(960)
 FREQUENCY_ENTRY = re.compile(r"[0-9]{1,4}(?:\.[0-9]{0,6})?")
@@ -57,6 +59,8 @@ WATCH_ONLY_DWELL = 0.5
 WATCH_ONLY_STALE_SECONDS = 2 * FAVORITE_COUNT * WATCH_ONLY_DWELL
 WATCH_RDS_GRACE = 4.2
 WATCH_RECEIVER_RETRY = 2.0
+DMR_SQUELCH_HANG = 0.09  # Bridge the gaps between TDMA bursts.
+DMR_SMS_HISTORY = 24
 WATCH_SECONDARY_START_GRACE = 0.5
 WATCH_EXIT_KEYS = {*BANK_KEYS, "band", "close", "down", "scan", "search", "sideband", "up"}
 DAB_ARROWS = {"up", "down"}
@@ -433,6 +437,14 @@ class WatchDwell:
 class ScannerRuntime:
     def __init__(self, state_path, *, receiver_index=0, watch_available=None):
         self.scanner = Scanner(state_path)
+        self.dmr = DmrState(self.scanner.state_path.with_suffix(".dmr.json"))
+        self._dmr_error = None
+        self._dmr_action_error = None
+        self._dmr_messages = deque(maxlen=DMR_SMS_HISTORY)
+        self._dmr_message_id = 0
+        self._dmr_audio = False
+        self._dmr_rf_until = 0.0
+        self._dmr_started_from_standby = False
         self.receiver_index = receiver_index
         self.lock = threading.RLock()
         self.wake = threading.Event()
@@ -537,6 +549,8 @@ class ScannerRuntime:
 
     def resume_dab(self, station, volume):
         with self.lock:
+            if self.dmr.enabled:
+                self.act({"dmr": "toggle", "enabled": False})
             if self.act({"knob": "volume", "value": volume}, start_favorites=False) is None:
                 return
             if not self.dab_enabled or self._dab_browse_favorites:
@@ -545,6 +559,13 @@ class ScannerRuntime:
                 self._recall_dab_favorite(None, {"block": station[0], "sid": station[1]})
             self.wake.set()
             self._watch_wake.set()
+
+    def resume_dmr(self, hz, volume):
+        with self.lock:
+            self.act({"dmr": "toggle", "enabled": True})
+            self.act({"knob": "volume", "value": volume})
+            if hz is not None:
+                self.act({"dmr": "tune", "hz": hz})
 
     def _dab_favorite_slot_for(self, matches):
         return self._dab_favorite_slot if self._dab_favorite_slot in matches else next(iter(matches), None)
@@ -612,8 +633,21 @@ class ScannerRuntime:
     def state(self, *, parked=False, parked_backlight=False):
         with self.lock:
             state = self.scanner.snapshot(parked=parked, parked_backlight=parked_backlight)
-            dab_enabled = self.dab_enabled and state["power"]
-            watch_only = self.watch_only and state["power"] and not dab_enabled
+            dmr_enabled = self.dmr.enabled and not (parked and self.scanner.power)
+            dab_enabled = self.dab_enabled and state["power"] and not dmr_enabled
+            watch_only = self.watch_only and state["power"] and not (dab_enabled or dmr_enabled)
+            state["dmr_enabled"] = dmr_enabled
+            state["dmr"] = None
+            if dmr_enabled:
+                dmr = self.dmr.snapshot()
+                state["dmr"] = {**dmr, "action_error": self._dmr_action_error,
+                                 "messages": [] if parked else list(self._dmr_messages),
+                                 "error": self._dmr_action_error or self._dmr_error or dmr.get("error")}
+                state.update(tune_hz=dmr["hz"] if state["power"] else None, modulation="DMR",
+                             audio_open=state["power"] and self._dmr_audio and not state["muted"],
+                             can_tune=False, close_probe=None, active_favorite=None,
+                             scan_active=state["power"] and dmr["mode"] == "scan",
+                             search_active=state["power"] and dmr["mode"] == "search")
             if watch_only:
                 state.update(display="-------", channel=None, upper=[], lower=[], blink_bank=None,
                              blink=False, close_blink=False, scan_scroll=False, scan_active=False,
@@ -633,9 +667,9 @@ class ScannerRuntime:
             state["discovery_enabled"] = self.discovery.enabled and not parked
             state["discovery_current"] = self.discovery.current if state["power"] and not parked else None
             state["replay_available"] = self.discovery.replay_available and not parked
-            rds = self._rds_for(state)
+            rds = self._rds_for(state) if not dmr_enabled else None
             state["rds"] = dict(rds) if rds else None
-            state["watch_enabled"] = self.watch_enabled and not parked and not dab_enabled
+            state["watch_enabled"] = self.watch_enabled and not parked and not (dab_enabled or dmr_enabled)
             state["watch_only"] = watch_only
             state["watch_channel"] = None
             state["watch_active"] = []
@@ -649,9 +683,9 @@ class ScannerRuntime:
                 state["watch_active"] = [slot for slot, (signal, expires) in sorted(self._watch_activity.items())
                                          if expires > now and targets.get(slot) == signal]
             state["dab_enabled"] = dab_enabled
-            state["tone_enabled"] = self.tone_enabled and state["power"] and not (dab_enabled or watch_only)
+            state["tone_enabled"] = self.tone_enabled and state["power"] and not (dab_enabled or watch_only or dmr_enabled)
             tone = self.tone_result
-            if dab_enabled or watch_only:
+            if dab_enabled or watch_only or dmr_enabled:
                 state.update(tone_filter=None, tone_matched=None)
             state["tone_searching"] = bool((state["tone_enabled"] or state["tone_filter"])
                                            and state["modulation"] == "FM" and state["tune_hz"] is not None
@@ -684,6 +718,8 @@ class ScannerRuntime:
                     return None
                 self.discovery.control(action["discovery"])
                 return self.state()
+            if "dmr" in action or self.dmr.enabled:
+                return self._act_dmr(action, parked=parked, parked_backlight=parked_backlight)
             before = self.scanner.snapshot()
             before_tune_revision = self.scanner.tune_revision
             tone_filter_saved = None
@@ -831,6 +867,68 @@ class ScannerRuntime:
             if tone_filter_saved is not None:
                 state["tone_filter_saved"] = tone_filter_saved
             return state
+
+    def _dmr_boundary(self):
+        self._dmr_audio = False
+        self._dmr_rf_until = 0.0
+        self.signal = self.waterfall = None
+        self.discard_audio()
+        self.recording.boundary()
+        self.discovery.boundary()
+
+    def _act_dmr(self, action, *, parked, parked_backlight):
+        was_enabled, revision = self.dmr.enabled, self.dmr.revision
+        was_power = self.scanner.power
+        if command := action.get("dmr"):
+            if command != "toggle" and not (self.dmr.enabled and was_power and not parked):
+                return self.state(parked=parked, parked_backlight=parked_backlight)
+            if command == "delete_sms":
+                identity = action["id"], action["time_ms"]
+                self._dmr_messages = deque(
+                    (message for message in self._dmr_messages if (message["id"], message["time_ms"]) != identity),
+                    maxlen=DMR_SMS_HISTORY,
+                )
+                self._dmr_action_error = self.dmr.notice = None
+                return self.state()
+            try:
+                self.dmr.act(action)
+            except OSError:
+                self._dmr_action_error = "Could not save DMR favourites."
+            except ValueError as error:
+                self._dmr_action_error = str(error)
+            else:
+                self._dmr_action_error = None
+                if self.dmr.enabled != was_enabled:
+                    self._dmr_error = None
+        elif knob := action.get("knob"):
+            self.scanner.knob(knob, action["value"], start_favorites=lambda: None)
+            if not was_power and self.scanner.power:
+                self._dmr_started_from_standby = True
+            if was_power and not self.scanner.power:
+                self.dmr.power_off()
+                self._dab_epoch += 1
+                self._dab_mode_generation += 1
+                if self.dab_enabled:
+                    self._dab_status = {}
+        elif action.get("key") == "mute":
+            self.scanner.key("mute", action.get("gesture", "tap"))
+        elif action.get("record") == "toggle" and was_power:
+            self.recording.act(action, None, audio_open=False)
+        if self.dmr.enabled != was_enabled:
+            self._dab_epoch += 1
+            self._dab_mode_generation += 1
+            self.scanner._clear_signal()
+            self.rds = self.rds_target = self.tone_result = None
+            self._clear_watch()
+            if not self.dmr.enabled:
+                if self.scanner.power and self._dmr_started_from_standby:
+                    self._start_favorites()
+                self._dmr_started_from_standby = False
+        if self.dmr.enabled != was_enabled or self.dmr.revision != revision or self.scanner.power != was_power:
+            self._dmr_boundary()
+        self.wake.set()
+        self._watch_wake.set()
+        return self.state(parked=parked, parked_backlight=parked_backlight)
 
     def _set_dab(self, enabled):
         self.scanner.cancel_dab_program()
@@ -1114,7 +1212,7 @@ class ScannerRuntime:
                 self._next_watch_probe = 0.0
 
     def _secondary_watch_requested(self):
-        return (self.watch_enabled and not (self.watch_only or self.dab_enabled)
+        return (self.watch_enabled and not (self.watch_only or self.dab_enabled or self.dmr.enabled)
                 and self.scanner.power and self.receiver_status == "ready"
                 and not self.stopped.is_set())
 
@@ -1250,6 +1348,39 @@ class ScannerRuntime:
         self.wake.wait(seconds)
         self.wake.clear()
 
+    def _receive_dmr(self, wanted, revision, epoch, level, status, pcm, messages=()):
+        with self.lock:
+            if (self._receiver_reopen or not (self.dmr.enabled and self.scanner.power)
+                    or revision != self.dmr.revision or epoch != self._dab_epoch):
+                return
+            for message in messages:
+                self._dmr_message_id += 1
+                received = {**message, "id": self._dmr_message_id,
+                            "hz": wanted[0], "time_ms": time.time_ns() // 1_000_000}
+                self._dmr_messages.appendleft(received)
+                self.discovery.receive_sms(received, revision=revision,
+                                           signal_dbfs=level if math.isfinite(level) else None)
+            self.signal = (wanted, level, level, None) if math.isfinite(level) else None
+            now = time.monotonic()
+            if level >= self.scanner.squelch_db:
+                self._dmr_rf_until = now + DMR_SQUELCH_HANG
+            gate = self.dmr.receive(status if now < self._dmr_rf_until else {"sync": False}, now)
+            if not gate:
+                if self._dmr_audio:
+                    self._dmr_boundary()
+                    self.signal = (wanted, level, level, None) if math.isfinite(level) else None
+                return
+            self._dmr_audio = True
+            if pcm:
+                entry = self.dmr.entry
+                name = entry["name"] if entry else None
+                tuned = RecordingTarget(wanted[0], "DMR", station_name=name)
+                self.recording.receive(tuned, pcm)
+                self.discovery.receive(pcm, channel=wanted, revision=revision, signal_dbfs=level,
+                                       station_name=name, dmr=self.dmr.call)
+                if not self.scanner.muted:
+                    self.publish(pcm)
+
     def run(self):
         receiver = Receiver(index=self.receiver_index) if self.receiver_index else Receiver()
         dab = None
@@ -1261,11 +1392,15 @@ class ScannerRuntime:
         tone_revision = None
         rds_since = None
         retry_at = 0.0
+        decoder = None
+        decoder_target = None
+        decoder_retry_at = 0.0
         try:
             while not self.stopped.is_set():
                 with self.lock:
                     reopen = self._receiver_reopen
                     mode_generation = self._dab_mode_generation
+                    dmr_enabled = self.dmr.enabled and self.scanner.power
                     if reopen:
                         self._receiver_reopen = False
                         self.receiver_status = "standby"
@@ -1274,27 +1409,45 @@ class ScannerRuntime:
                         self.waterfall = None
                         self.tone_result = None
                         self._dab_status = {}
+                        self.dmr.stop_signal()
+                        self._dmr_audio = False
+                        self._dmr_rf_until = 0.0
                         self.discard_audio()
                         self._clear_watch()
                         self._watch_wake.set()
                         self.recording.boundary()
                         self.discovery.boundary()
                     else:
-                        dab_enabled = self.dab_enabled and self.scanner.power
+                        dab_enabled = self.dab_enabled and self.scanner.power and not dmr_enabled
                         dab_epoch = self._dab_epoch
-                        watch_only = self.watch_only and self.scanner.power and not dab_enabled
+                        watch_only = self.watch_only and self.scanner.power and not (dab_enabled or dmr_enabled)
                         watch_mode_epoch = self._watch_mode_epoch
-                        if not (watch_only or dab_enabled):
+                        if dmr_enabled:
+                            revision = self.dmr.revision
+                            self.dmr.tick()
+                            if self.dmr.revision != revision:
+                                self._dmr_boundary()
+                            dmr_revision = self.dmr.revision
+                            dmr_hz = self.dmr.hz
+                            dmr_entry = self.dmr.entry or {}
+                        elif not (watch_only or dab_enabled):
                             self.scanner.tick()
                         state = self.scanner.snapshot()
                         tune_revision = self.scanner.tune_revision
                         decode_tone = (state["modulation"] == "FM" and self.scanner.signal_open
                                        and not self.scanner.menu
                                        and (self.tone_enabled or state["tone_filter"] or self.discovery.enabled))
-                        probe = self.scanner.take_close_probe() if connected and not (watch_only or dab_enabled) else None
-                        if not dab_enabled and (watch_only or not self.scanner.audio_gate_open):
+                        probe = self.scanner.take_close_probe() if connected and not (watch_only or dab_enabled or dmr_enabled) else None
+                        if not (dab_enabled or dmr_enabled) and (watch_only or not self.scanner.audio_gate_open):
                             self.recording.boundary()
                             self.discovery.boundary()
+
+                if decoder is not None and (reopen or not dmr_enabled):
+                    decoder.close()
+                    decoder = None
+                    decoder_target = None
+                if not dmr_enabled:
+                    decoder_retry_at = 0.0
 
                 if mode_generation != dab_generation:
                     if dab is not None:
@@ -1434,6 +1587,49 @@ class ScannerRuntime:
                             self._watch_wake.set()
                         LOG.info("USB SDR %d opened", self.receiver_index + 1)
 
+                    if dmr_enabled:
+                        if not dmr_hz or time.monotonic() < decoder_retry_at:
+                            self.wait(0.05)
+                            continue
+                        wanted = (dmr_hz, "DMR")
+                        identity = (wanted, dmr_revision, dab_epoch)
+                        if decoder is not None and decoder_target != identity:
+                            decoder.close()
+                            decoder = None
+                        try:
+                            new_decoder = decoder is None
+                            if decoder is None:
+                                decoder = DmrDecoder(**{key: dmr_entry.get(key)
+                                                        for key in ("slot", "color_code", "talkgroup")})
+                                decoder_target = identity
+                                with self.lock:
+                                    self._dmr_error = None
+                            if wanted != tuned:
+                                receiver.set_rds_enabled(False)
+                                if getattr(receiver, "tone_search_active", False):
+                                    receiver.set_tone_search(False)
+                                receiver.tune(*wanted)
+                                tuned = wanted
+                                rds_since = None
+                            if new_decoder:
+                                with self.lock:
+                                    if dmr_revision == self.dmr.revision and dab_epoch == self._dab_epoch:
+                                        self.dmr.begin_dwell()
+                            level, discriminator = receiver.read()
+                            status, pcm = decoder.process(discriminator)
+                            self._receive_dmr(wanted, dmr_revision, dab_epoch, level, status, pcm,
+                                              decoder.take_messages())
+                        except DmrDecoderError as error:
+                            if decoder is not None:
+                                decoder.close()
+                                decoder = None
+                            with self.lock:
+                                self._dmr_error = str(error)
+                                self.dmr.stop_signal()
+                                self._dmr_boundary()
+                            decoder_retry_at = time.monotonic() + 2
+                        continue
+
                     if probe:
                         hit = receiver.probe(probe, windows=3)
                         if hit is not None:
@@ -1479,7 +1675,7 @@ class ScannerRuntime:
                     tone = receiver.tone_status() if decode_tone else None
                     with self.lock:
                         current = self.scanner.snapshot()
-                        if (self._receiver_reopen or watch_mode_epoch != self._watch_mode_epoch
+                        if (self._receiver_reopen or self.dmr.enabled or watch_mode_epoch != self._watch_mode_epoch
                                 or dab_epoch != self._dab_epoch
                                 or not current["power"] or target(current) != wanted
                                 or tune_revision != self.scanner.tune_revision):
@@ -1515,6 +1711,10 @@ class ScannerRuntime:
                                     allow_probe=primary == wanted and not tone_carrier, audible=audible, rds_ready=rds_ready)
                 except ReceiverError as exc:
                     LOG.warning("USB SDR unavailable: %s", exc)
+                    if decoder is not None:
+                        decoder.close()
+                        decoder = None
+                        decoder_target = None
                     receiver.close()
                     connected = False
                     tuned = None
@@ -1528,9 +1728,14 @@ class ScannerRuntime:
                         self.rds_target = None
                         self.tone_result = None
                         self._clear_watch()
+                        self.dmr.stop_signal()
+                        self._dmr_audio = False
+                        self._dmr_rf_until = 0.0
                         self.recording.boundary()
                         self.discovery.boundary()
         finally:
+            if decoder is not None:
+                decoder.close()
             if dab is not None:
                 dab.close()
             receiver.close()
@@ -1551,6 +1756,12 @@ class ScannerRuntime:
 def valid_action(action):
     if not isinstance(action, dict):
         return False
+    if "dmr" in action:
+        if action["dmr"] == "delete_sms":
+            return (action.keys() == {"dmr", "id", "time_ms"}
+                    and all(type(action[key]) is int and 0 < action[key] < (1 << 53)
+                            for key in ("id", "time_ms")))
+        return valid_dmr_action(action)
     if "discovery" in action:
         return set(action) == {"discovery"} and action["discovery"] in ("open", "toggle")
     if "record" in action:

@@ -7,6 +7,7 @@
   <title>SDr Scanner</title>
   <link rel="icon" href="ashcooperuk-avatar.png" type="image/png" sizes="128x128">
   <link rel="stylesheet" href="panel.css">
+  <link rel="stylesheet" href="dmr-panel.css">
   <script src="panel.js" type="module"></script>
 </head>
 <body>
@@ -18,6 +19,7 @@
         <button type="button" id="slim-search" class="key" data-key="search" style="--x:660;--w:134;--h:98;--sprite-y:493"><span class="face-label">Search</span></button>
         <button type="button" class="key" data-key="up" style="--x:278;--y:0;--w:138;--h:100;--sprite-y:251"><span class="face-label">Up</span></button>
         <button type="button" class="key" data-key="down" style="--x:454;--y:0;--w:143;--h:100;--sprite-y:251"><span class="face-label">Down</span></button>
+        <button type="button" id="dmr-slim-toggle" class="key" data-dmr-mode="on" aria-controls="dmr-face" style="--x:1188;--w:135;--h:98;--sprite-y:494"><span class="face-label">DMR</span></button>
         <button type="button" id="dab-toggle" class="key" data-setting="dab" aria-pressed="false" style="--x:98;--y:151;--w:147;--h:69;--sprite-y:389"><span class="face-label">DAB</span></button>
         <button type="button" class="key" data-key="fav" style="--x:275;--y:151;--w:148;--h:69;--sprite-y:389"><span class="face-label">FAV</span></button>
         <button type="button" class="key" data-key="pmr" style="--x:450;--y:151;--w:151;--h:69;--sprite-y:389"><span class="face-label">PMR 446</span></button>
@@ -98,6 +100,7 @@
         <button type="button" class="key" data-key="lock" style="--x:834;--w:135;--h:97;--sprite-y:495"><span class="face-label">L/O</span></button>
         <button type="button" class="key" data-key="band" style="--x:1015;--w:133;--h:97;--sprite-y:495"><span class="face-label">Band/Step</span></button>
         <button type="button" class="key" data-key="prog" style="--x:1188;--w:135;--h:98;--sprite-y:494"><span class="face-label">Prog</span></button>
+        <button type="button" id="dmr-toggle" class="key" data-dmr-mode="on" aria-controls="dmr-face" style="--x:1188;--w:135;--h:98;--sprite-y:494"><span class="face-label">DMR</span></button>
         <button type="button" class="key" data-key="save-vol" style="--x:1188;--w:135;--h:98;--sprite-y:494"><span class="face-label">Save Vol</span></button>
       </div>
     </div>
@@ -139,8 +142,139 @@
         </button>
       </div>
     </div>
+    <section id="dmr-face" class="dmr-face" aria-label="DMR scanner front panel" hidden>
+      <header class="dmr-face-title"><span>SDr Scanner</span><span>DMR MODE</span></header>
+      <div class="dmr-dials" aria-label="DMR dials">
+        <div class="dmr-dial-control"><span>TUNE</span><button type="button" class="dmr-dial" data-dmr-dial="tune" aria-label="Tune and function" aria-pressed="false" title="Turn to step. Press to arm FUNC."><i></i></button><span>PUSH FUNC</span></div>
+        <div class="dmr-dial-control"><span>VOLUME</span><button type="button" class="dmr-dial" data-dmr-dial="volume" aria-label="Volume and power" title="Turn to adjust volume. Press to turn the receiver on or off."><i></i></button><span>POWER</span></div>
+        <div class="dmr-dial-control"><span>SQUELCH</span><button type="button" class="dmr-dial" data-dmr-dial="squelch" aria-label="Squelch and menu" aria-controls="dmr-lcd-menu" aria-expanded="false" title="Turn to adjust squelch. Press for menu or back."><i></i></button><span>PUSH MENU</span></div>
+      </div>
+      <div class="dmr-display-area">
+        <div class="dmr-lcd" role="group" aria-label="Detailed DMR display">
+          <div class="dmr-status-strip"><strong data-dmr-readout="protocol">DMR</strong><time data-dmr-readout="clock"></time><span>VOL <b data-dmr-readout="volume">00</b></span><span>SQL <b data-dmr-readout="squelch">00</b></span><span id="dmr-sms-indicator" class="dmr-sms-indicator" aria-label="New DMR SMS received" hidden>SMS</span><span class="dmr-sync" data-dmr-readout="sync">STANDBY</span><span class="dmr-bars" role="meter" aria-label="DMR signal strength" aria-valuemin="0" aria-valuemax="4" aria-valuenow="0"><i></i><i></i><i></i><i></i></span></div>
+          <div class="dmr-identity dmr-system"><span>SYSTEM</span><strong data-dmr-readout="system">—</strong><b data-dmr-readout="system_hold"></b></div>
+          <div class="dmr-identity dmr-dept"><span>DEPT</span><strong data-dmr-readout="department">—</strong><b data-dmr-readout="department_hold"></b></div>
+          <div class="dmr-identity dmr-channel"><span>CHANNEL</span><strong data-dmr-readout="channel">—</strong><b data-dmr-readout="channel_hold"></b></div>
+          <div class="dmr-details">
+            <div class="dmr-frequency"><span>RECEIVE FREQUENCY</span><strong><span data-dmr-readout="frequency">—</span> <small>MHz</small></strong><b data-dmr-readout="activity"></b></div>
+            <dl class="dmr-metadata"><div><dt>COLOUR CODE</dt><dd data-dmr-readout="color_code">—</dd></div><div><dt>TIME SLOT</dt><dd data-dmr-readout="slot">—</dd></div><div><dt>TALKGROUP</dt><dd data-dmr-readout="talkgroup">—</dd></div><div><dt>RADIO ID</dt><dd data-dmr-readout="unit_id">—</dd></div></dl>
+          </div>
+          <div class="dmr-engineering"><span data-dmr-readout="rf">RF —</span><span data-dmr-readout="errors">DECODER ERR —</span><strong data-dmr-readout="voice"></strong></div>
+          <section id="dmr-lcd-menu" class="dmr-lcd-menu" aria-label="DMR settings" hidden>
+            <section id="dmr-menu" aria-labelledby="dmr-menu-title" hidden>
+              <h2 id="dmr-menu-title">DMR Menu</h2>
+              <div class="dmr-menu-list">
+                <button type="button" data-dmr-menu="favorites">Favourites</button>
+                <button type="button" data-dmr-menu="entry">Program a channel</button>
+                <button type="button" data-dmr-menu="search">Search range</button>
+                <button type="button" data-dmr-menu="sms">SMS</button>
+                <button type="button" data-dmr-menu="clear-avoids">Clear avoids</button>
+              </div>
+            </section>
+            <section id="dmr-favorites" aria-labelledby="dmr-favorites-title" hidden>
+              <h2 id="dmr-favorites-title">DMR Favourites</h2>
+              <div class="dmr-menu-list">
+                <button type="button" data-dmr-menu="entry">Add channel</button>
+                <p id="dmr-empty-favorites">No saved DMR channels.</p>
+                <ul id="dmr-favorite-list"></ul>
+              </div>
+            </section>
+            <section id="dmr-sms" aria-labelledby="dmr-sms-title" hidden>
+              <h2 id="dmr-sms-title">SMS Inbox</h2>
+              <div class="dmr-menu-list">
+                <p id="dmr-empty-sms">No DMR messages received.</p>
+                <ul id="dmr-sms-list"></ul>
+              </div>
+            </section>
+            <section id="dmr-message" aria-labelledby="dmr-message-title" hidden>
+              <h2 id="dmr-message-title">SMS Message</h2>
+              <div class="dmr-sms-detail" tabindex="0">
+                <p id="dmr-message-address"></p>
+                <p id="dmr-message-reception"></p>
+                <p id="dmr-message-text"></p>
+              </div>
+            </section>
+            <section id="dmr-entry" aria-labelledby="dmr-entry-title" hidden>
+              <form id="dmr-entry-form" class="dmr-lcd-form" novalidate>
+                <h2 id="dmr-entry-title">Program DMR Channel</h2>
+                <div class="dmr-lcd-fields">
+                  <label>Channel name <input name="name" maxlength="64" autocomplete="off"></label>
+                  <label>Receive frequency (MHz) <input name="frequency" inputmode="decimal" autocomplete="off" required></label>
+                  <label>System <input name="system" maxlength="64" autocomplete="off"></label>
+                  <label>Department <input name="department" maxlength="64" autocomplete="off"></label>
+                  <label>Colour code <input name="color_code" inputmode="numeric" autocomplete="off" maxlength="2" placeholder="Any"></label>
+                  <div class="dmr-choice">
+                    <span id="dmr-slot-label">Time slot</span>
+                    <input name="slot" type="hidden" value="">
+                    <button id="dmr-slot-choice" data-dmr-choice="slot" type="button" aria-labelledby="dmr-slot-label dmr-slot-choice">Any</button>
+                  </div>
+                  <label>Talkgroup <input name="talkgroup" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="Any"></label>
+                  <button type="submit" class="dmr-form-submit" tabindex="-1">Save</button>
+                </div>
+                <p class="dmr-form-feedback" role="status" hidden></p>
+              </form>
+            </section>
+            <section id="dmr-search" aria-labelledby="dmr-search-title" hidden>
+              <form id="dmr-search-form" class="dmr-lcd-form" novalidate>
+                <h2 id="dmr-search-title">DMR Search Range</h2>
+                <div class="dmr-lcd-fields">
+                  <label>Lower frequency (MHz) <input name="lower" inputmode="decimal" autocomplete="off" required></label>
+                  <label>Upper frequency (MHz) <input name="upper" inputmode="decimal" autocomplete="off" required></label>
+                  <div class="dmr-choice">
+                    <span id="dmr-step-label">Step (kHz)</span>
+                    <input name="step" type="hidden" value="12500">
+                    <button id="dmr-step-choice" data-dmr-choice="step" type="button" aria-labelledby="dmr-step-label dmr-step-choice">12.5</button>
+                  </div>
+                  <button type="submit" class="dmr-form-submit" tabindex="-1">Search</button>
+                </div>
+                <p class="dmr-form-feedback" role="status" hidden></p>
+              </form>
+            </section>
+            <section id="dmr-confirm" aria-labelledby="dmr-confirm-title" hidden>
+              <h2 id="dmr-confirm-title"></h2>
+              <div class="dmr-menu-confirm">
+                <p id="dmr-confirm-message"></p>
+                <p id="dmr-confirm-feedback" class="dmr-form-feedback" role="status" hidden></p>
+              </div>
+            </section>
+          </section>
+          <div class="dmr-soft-labels" aria-label="Display shortcuts">
+            <button type="button" data-dmr-soft="0" tabindex="-1">SYSTEM</button>
+            <button type="button" data-dmr-soft="1" tabindex="-1">DEPT</button>
+            <button type="button" data-dmr-soft="2" tabindex="-1">CHAN</button>
+          </div>
+        </div>
+        <div class="dmr-soft-keys" aria-label="Display soft keys">
+          <button type="button" data-dmr-soft="0" aria-label="System hold" aria-pressed="false"></button>
+          <button type="button" data-dmr-soft="1" aria-label="Department hold" aria-pressed="false"></button>
+          <button type="button" data-dmr-soft="2" aria-label="Channel hold" aria-pressed="false"></button>
+        </div>
+      </div>
+      <div class="dmr-operating-keys">
+        <div class="dmr-keypad" aria-label="DMR frequency keypad">
+          <button type="button" data-dmr-digit="1">1</button><button type="button" data-dmr-digit="2">2</button><button type="button" data-dmr-digit="3">3</button>
+          <button type="button" data-dmr-digit="4">4</button><button type="button" data-dmr-digit="5">5</button><button type="button" data-dmr-digit="6">6</button>
+          <button type="button" data-dmr-digit="7">7</button><button type="button" data-dmr-digit="8">8</button><button type="button" data-dmr-digit="9">9</button>
+          <button type="button" data-dmr-digit="." title="Enter a decimal point or clear the entry">. / NO</button><button type="button" data-dmr-digit="0">0</button><button type="button" data-dmr-command="enter" title="Tune to the entered frequency">E / YES</button>
+        </div>
+        <div class="dmr-nav" aria-label="DMR receiver controls">
+          <button type="button" data-dmr-command="scan" title="Scan saved DMR channels">SCAN</button>
+          <button type="button" data-dmr-command="search" title="Start or stop the DMR sweep. FUNC then SEARCH edits the range.">SEARCH</button>
+          <button type="button" data-dmr-command="avoid" title="Temporarily avoid the current selection. FUNC then AVOID makes it permanent.">AVOID</button>
+          <button type="button" data-dmr-command="replay" title="Replay recent audio. FUNC then REPLAY toggles recording.">REPLAY / REC</button>
+        </div>
+      </div>
+      <div class="dmr-bottom" aria-label="DMR panel controls">
+        <button type="button" id="dmr-return" data-dmr-mode="off" aria-pressed="true" title="Return to the previous analogue or DAB mode">DMR</button>
+        <button type="button" data-dmr-command="fav" title="Open saved DMR channels">FAV</button>
+        <button type="button" data-dmr-command="discovery" aria-expanded="false" aria-controls="discovery-pad">DISCOVERY</button>
+        <button type="button" data-dmr-command="play-last" aria-pressed="false" title="Play or stop the latest recording">PLAY LAST</button>
+        <button type="button" data-dmr-command="mute" aria-pressed="false" title="Mute or restore audio for this browser">MUTE</button>
+      </div>
+      <p id="dmr-feedback" class="dmr-feedback" role="status"></p>
+    </section>
   </main>
-  <aside id="discovery-pad" class="discovery-pad" aria-labelledby="discovery-title" hidden>
+  <aside id="discovery-pad" class="discovery-pad is-unlit" aria-labelledby="discovery-title" hidden>
     <div class="discovery-screen">
       <div class="discovery-lcd" aria-hidden="true"></div>
       <header class="discovery-heading">
@@ -163,14 +297,20 @@
         <table>
           <colgroup>
             <col class="discovery-time-column"><col class="discovery-frequency-column">
-            <col class="discovery-mode-column"><col>
+            <col class="discovery-mode-column discovery-analogue-column"><col class="discovery-analogue-column">
+            <col class="discovery-dmr-column discovery-dmr-code"><col class="discovery-dmr-column discovery-dmr-slot"><col class="discovery-dmr-column discovery-dmr-group">
+            <col class="discovery-dmr-column discovery-unit-id">
             <col span="2" class="discovery-action-column">
           </colgroup>
           <thead>
             <tr>
               <th scope="col">Time</th><th scope="col">MHz</th>
-              <th scope="col" aria-label="Mode" title="Mode">M</th>
-              <th scope="col" aria-label="Tone" title="Tone">T</th>
+              <th class="discovery-analogue-column" scope="col" aria-label="Mode" title="Mode">M</th>
+              <th class="discovery-analogue-column" scope="col" aria-label="Tone" title="Tone">T</th>
+              <th class="discovery-dmr-column" scope="col" aria-label="Colour code" title="Colour code">CC</th>
+              <th class="discovery-dmr-column" scope="col" aria-label="Time slot" title="Time slot">TS</th>
+              <th class="discovery-dmr-column" scope="col" aria-label="Talkgroup ID or SMS recipient" title="Talkgroup ID or SMS recipient">TGID</th>
+              <th class="discovery-dmr-column discovery-unit-id" scope="col" title="Source radio ID">RADIO ID</th>
               <th scope="col"><span class="discovery-action-label">Play</span></th>
               <th scope="col"><span class="discovery-action-label">Rec</span></th>
             </tr>

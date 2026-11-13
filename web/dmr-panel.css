@@ -1,0 +1,827 @@
+/* Keep the existing radio/discovery grid and chassis sizing in both modes. */
+.radio.is-dmr .upper-panel > *,
+.radio.is-dmr > .extension,
+.dmr-face[hidden],
+#dmr-slim-toggle {
+  display: none;
+}
+
+.is-pin-entry [data-dmr-mode="on"] {
+  pointer-events: none;
+}
+
+.dmr-face {
+  position: absolute;
+  inset: 9% 4% 3.5%;
+  display: grid;
+  grid-template: "title title" 3.8% "dials display" minmax(0, 1fr)
+                 "keys keys" 21% "status status" 3.8% "buttons buttons" 8%
+                 / 15% minmax(0, 1fr);
+  gap: 1.65% 2.6%;
+  container-type: inline-size;
+  color: #e8e9e6;
+  font-family: Arial, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.radio.is-dmr .upper-panel {
+  z-index: -1;
+}
+
+.dmr-face-title {
+  grid-area: title;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #d0d0ca;
+  font: 700 clamp(.7rem, 2cqw, 1.08rem)/1 Arial, sans-serif;
+  letter-spacing: .035em;
+}
+
+.dmr-face-title span:last-child {
+  color: #b3c8cc;
+  font-size: .78em;
+  letter-spacing: .12em;
+}
+
+.dmr-dials {
+  grid-area: dials;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-evenly;
+  gap: .45rem;
+}
+
+.dmr-dial-control {
+  display: grid;
+  justify-items: center;
+  gap: clamp(3px, .75cqw, 8px);
+  color: #e8e9e6;
+  font: 700 clamp(7px, 1.5cqw, 13px)/1.1 Arial, sans-serif;
+  letter-spacing: .035em;
+  white-space: nowrap;
+}
+
+.dmr-dial-control > span:last-child {
+  color: #aeafaa;
+  font-size: .8em;
+  letter-spacing: .09em;
+}
+
+.dmr-dial {
+  position: relative;
+  width: clamp(34px, 10cqw, 88px);
+  aspect-ratio: 1;
+  border: 2px solid #090b0a;
+  border-radius: 50%;
+  background: repeating-conic-gradient(#232626 0deg 4deg, #101212 4deg 7deg);
+  box-shadow: 0 3px 5px #000b, inset 0 0 0 1px #454845;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.dmr-dial:not([data-dmr-dial="tune"]) {
+  width: clamp(27px, 7.6cqw, 68px);
+}
+
+.dmr-dial i {
+  position: absolute;
+  inset: 9%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 23%, #474d4e, #282c2d 48%, #181b1c 78%);
+  box-shadow: inset 1px 2px 2px #d1e5eb34, inset -1px -3px 3px #090b0c;
+  transform: rotate(var(--dmr-angle, 0deg));
+}
+
+.dmr-dial i::after {
+  position: absolute;
+  top: 7%;
+  left: 47%;
+  width: 6%;
+  height: 25%;
+  border-radius: 1px;
+  background: #da4d47;
+  content: "";
+}
+
+.dmr-dial[data-dmr-dial="tune"] i::after {
+  background: #d4dad9;
+}
+
+.dmr-dial[aria-pressed="true"] i::after {
+  background: #8be3f4;
+  box-shadow: 0 0 5px #8be3f4;
+}
+
+.dmr-display-area {
+  grid-area: display;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 8%;
+  gap: 1.5%;
+  min-width: 0;
+}
+
+.dmr-lcd {
+  display: grid;
+  grid-template-rows: 8% repeat(3, 13%) minmax(0, 1fr) 7% 9%;
+  gap: 1.2%;
+  min-width: 0;
+  padding: clamp(4px, 1.2cqw, 12px);
+  overflow: hidden;
+  border: 2px solid #0b0e12;
+  border-radius: 4px;
+  background: #080e13;
+  box-shadow: 0 0 0 1px #565555, inset 0 0 12px #000c, 0 5px 9px #0008;
+  color: #e4eef9;
+  font-variant-numeric: tabular-nums;
+}
+
+.dmr-lcd.is-dark {
+  opacity: .24;
+}
+
+.dmr-status-strip,
+.dmr-engineering {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 2%;
+  font: 700 clamp(7px, 1.5cqw, 13px)/1 Arial, sans-serif;
+  letter-spacing: .03em;
+  white-space: nowrap;
+}
+
+.dmr-status-strip {
+  border-bottom: 1px solid #405961;
+  padding: 0 1% 2px;
+}
+
+.dmr-status-strip strong {
+  color: #a0f79b;
+}
+
+.dmr-sms-indicator {
+  color: #ffdc85;
+}
+
+.dmr-status-strip time,
+.dmr-sync {
+  color: #b7cee0;
+}
+
+.dmr-sync {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dmr-bars {
+  display: flex;
+  align-items: end;
+  gap: 2px;
+  height: 80%;
+}
+
+.dmr-bars i {
+  width: clamp(2px, .68cqw, 6px);
+  background: #3d596d;
+}
+
+.dmr-bars i.is-lit { background: #8be3f4; }
+.dmr-bars i:nth-child(1) { height: 34%; }
+.dmr-bars i:nth-child(2) { height: 57%; }
+.dmr-bars i:nth-child(3) { height: 79%; }
+.dmr-bars i:nth-child(4) { height: 100%; }
+
+.dmr-identity {
+  display: grid;
+  grid-template-columns: 17% minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: 0;
+  gap: 2%;
+  padding-inline: 2%;
+  border: 1px solid #ffffff12;
+}
+
+.dmr-identity > :is(span, b) {
+  font: 700 clamp(6px, 1.38cqw, 12px)/1 Arial, sans-serif;
+  letter-spacing: .06em;
+}
+
+.dmr-identity strong {
+  overflow: hidden;
+  font-size: clamp(10px, 2.4cqw, 22px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dmr-system { background: #211518; color: #fa806a; }
+.dmr-dept { background: #251d16; color: #ffa76c; }
+.dmr-channel { background: #292315; color: #ffdc77; }
+.dmr-channel strong { font-size: clamp(11px, 2.8cqw, 25px); }
+
+.dmr-details {
+  display: grid;
+  grid-template-columns: 1.14fr .86fr;
+  min-height: 0;
+  min-width: 0;
+  padding: 1.55% 2%;
+  background: #13141e;
+}
+
+.dmr-frequency {
+  display: grid;
+  align-content: center;
+  gap: clamp(2px, .7cqw, 7px);
+  min-width: 0;
+  border-right: 1px solid #343043;
+  white-space: nowrap;
+}
+
+.dmr-frequency > span,
+.dmr-metadata dt {
+  color: #c0a8c2;
+  font: 700 clamp(6px, 1.25cqw, 11px)/1.06 Arial, sans-serif;
+  letter-spacing: .055em;
+}
+
+.dmr-frequency strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #f1f8fe;
+  font: 700 clamp(12px, 4.25cqw, 37px)/1 Arial, sans-serif;
+  letter-spacing: .02em;
+}
+
+.dmr-frequency small {
+  font-size: .41em;
+  color: #aed2e6;
+}
+
+.dmr-frequency b {
+  overflow: hidden;
+  color: #a9d2eb;
+  font: 700 clamp(6px, 1.36cqw, 12px)/1.2 Arial, sans-serif;
+  text-overflow: ellipsis;
+}
+
+.dmr-metadata {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: center;
+  gap: 9% 4%;
+  min-width: 0;
+  margin: 0;
+  padding-left: 6%;
+}
+
+.dmr-metadata dd {
+  margin: .25em 0 0;
+  color: #eed6f7;
+  font: 700 clamp(9px, 2.12cqw, 18px)/1.05 var(--lcd-text-font);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dmr-engineering {
+  justify-content: space-between;
+  color: #bdd8ef;
+  font-family: var(--lcd-text-font);
+  font-size: clamp(6px, 1.35cqw, 12px);
+}
+
+.dmr-engineering strong {
+  color: #baf5a8;
+}
+
+.dmr-soft-labels,
+.dmr-soft-keys {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .7%;
+}
+
+.dmr-soft-labels button {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(#d8edf0, #9dbec7);
+  padding: 0;
+  border: 0;
+  border-top: 1px solid #f6ffff;
+  color: #142532;
+  font: 700 clamp(7px, 1.55cqw, 13px)/1 Arial, sans-serif;
+  letter-spacing: .075em;
+}
+
+.dmr-soft-labels button.is-held {
+  background: linear-gradient(#ffdf90, #dbac52);
+  border-color: #ffeeb7;
+  color: #342413;
+}
+
+.dmr-soft-keys {
+  justify-items: center;
+  align-items: start;
+  padding-inline: 2%;
+}
+
+.dmr-soft-keys button,
+.dmr-keypad button {
+  border: 1px solid #0a0b0b;
+  border-radius: 5px;
+  background: linear-gradient(#373838, #252626);
+  box-shadow: inset 0 1px 2px #ffffff25, 0 2px 3px #000a;
+}
+
+.dmr-soft-keys button {
+  width: 62%;
+  height: 84%;
+  min-height: 15px;
+}
+
+.dmr-operating-keys {
+  grid-area: keys;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, .94fr);
+  gap: 5%;
+  min-height: 0;
+  padding-top: 1.4%;
+  border-top: 1px solid #141514;
+  box-shadow: 0 -1px #ffffff0e;
+}
+
+.dmr-keypad,
+.dmr-nav,
+.dmr-bottom {
+  display: grid;
+  gap: clamp(3px, .85cqw, 8px);
+}
+
+.dmr-keypad {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.dmr-keypad button {
+  color: #e7e8e4;
+  font: 700 clamp(8px, 1.68cqw, 15px)/1 Arial, sans-serif;
+  letter-spacing: .035em;
+}
+
+.dmr-keypad button:last-child { color: #c7e6ad; }
+.dmr-keypad button[data-dmr-digit="."] { color: #e7b8aa; }
+
+.dmr-nav {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dmr-bottom {
+  grid-area: buttons;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-top: 1px solid #141514;
+  box-shadow: 0 -1px #ffffff0e;
+  padding-top: 1%;
+}
+
+.dmr-face button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.dmr-face button:not(.dmr-dial) {
+  cursor: pointer;
+}
+
+.dmr-face button:focus-visible {
+  outline: 2px solid #ffb753;
+  outline-offset: 1px;
+}
+
+.dmr-face button:active:not(:disabled) {
+  filter: brightness(.78);
+}
+
+.dmr-face button:disabled {
+  opacity: .58;
+  cursor: default;
+}
+
+.dmr-nav button,
+.dmr-bottom button {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: clamp(2px, .7cqw, 6px);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #e8e9e6;
+  font: 700 clamp(7px, 1.4cqw, 12px)/1 Arial, sans-serif;
+  letter-spacing: .025em;
+  white-space: nowrap;
+}
+
+.dmr-nav button::after,
+.dmr-bottom button::after {
+  width: clamp(23px, 6.5cqw, 54px);
+  aspect-ratio: 1.9;
+  border: 2px solid #101010;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at 37% 28%, #474846, #313231 68%);
+  box-shadow: inset 0 0 0 1px #5a5c57, 0 2px 4px #000b;
+  content: "";
+}
+
+.dmr-nav button::after {
+  width: clamp(36px, 10cqw, 90px);
+  aspect-ratio: 3;
+}
+
+.dmr-bottom :is([aria-pressed="true"], [aria-expanded="true"])::after,
+.dmr-nav [aria-pressed="true"]::after {
+  background: radial-gradient(circle at center, #ffd399 0 2px, #cc803e 3px, transparent 5px),
+    radial-gradient(ellipse at 37% 28%, #474846, #313231 68%);
+}
+
+.dmr-feedback {
+  grid-area: status;
+  align-self: center;
+  overflow: hidden;
+  margin: 0;
+  color: #ffcb91;
+  font: 700 clamp(7px, 1.45cqw, 12px)/1.2 Arial, sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dmr-lcd.is-menu-open > :is(.dmr-identity, .dmr-details, .dmr-engineering),
+.dmr-lcd-menu[hidden],
+.dmr-lcd-menu > [hidden],
+.dmr-lcd-menu p[hidden] {
+  display: none;
+}
+
+.dmr-lcd-menu {
+  display: grid;
+  grid-area: 2 / 1 / 7;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #304654;
+  background: #101924;
+  color: #e4eef9;
+  font: 400 clamp(11px, 2.04cqw, 17px)/1.25 Arial, sans-serif;
+}
+
+.dmr-lcd-menu > section,
+.dmr-lcd-form {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.dmr-lcd-form {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.dmr-lcd-menu h2 {
+  margin: 0;
+  padding: .38em .6em;
+  background: #253742;
+  color: #c6e9ee;
+  font-size: 1.05em;
+  letter-spacing: .055em;
+  text-transform: uppercase;
+}
+
+.dmr-menu-list,
+.dmr-lcd-fields,
+.dmr-menu-confirm,
+.dmr-sms-detail {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #405d6c #18242d;
+}
+
+.dmr-menu-list {
+  align-content: start;
+  display: grid;
+  padding: .3em;
+  gap: .26em;
+}
+
+.dmr-menu-list p,
+.dmr-menu-confirm p {
+  margin: .5em .38em;
+}
+
+.dmr-menu-list button {
+  padding: .32em .5em;
+  min-height: 1.75em;
+  min-width: 0;
+  text-align: left;
+  border: 1px solid #485a6b;
+  border-radius: 1px;
+  background: #182631;
+  color: #e4eef9;
+  font: inherit;
+}
+
+.dmr-menu-list button:is(.is-selected, :hover) {
+  background: #314f60;
+  color: #fff;
+}
+
+.dmr-menu-list button.is-selected {
+  border-color: #9bd9ea;
+  box-shadow: inset 2px 0 #9bd9ea;
+}
+
+#dmr-favorite-list,
+#dmr-sms-list {
+  display: grid;
+  gap: .26em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#dmr-sms-list button {
+  display: grid;
+  gap: .1em;
+  width: 100%;
+}
+
+#dmr-sms-list button span {
+  overflow: hidden;
+  color: #bcd4e4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dmr-sms-detail {
+  padding: .5em .65em;
+}
+
+.dmr-sms-detail:focus-visible {
+  outline: 1px solid #8ad9ec;
+  outline-offset: -1px;
+}
+
+.dmr-sms-detail p {
+  margin: 0 0 .6em;
+  overflow-wrap: anywhere;
+}
+
+#dmr-message-address {
+  font-weight: 700;
+}
+
+#dmr-message-reception {
+  color: #bcd4e4;
+  font-size: .85em;
+}
+
+#dmr-message-text {
+  white-space: pre-wrap;
+}
+
+.dmr-favorite-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: .3em;
+}
+
+.dmr-favorite-row [data-dmr-favorite="recall"] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dmr-lcd-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  padding: .38em .52em;
+  gap: .38em .65em;
+}
+
+.dmr-lcd-fields :is(label, .dmr-choice) {
+  display: grid;
+  align-content: start;
+  gap: .16em;
+  color: #bcd4e4;
+  font-size: .86em;
+}
+
+.dmr-lcd-fields :is(input:not([type="hidden"]), [data-dmr-choice]) {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 1.6em;
+  padding: .12em .3em;
+  background: #09111a;
+  color: #e4eef9;
+  border: 1px solid #526d81;
+  border-radius: 1px;
+  font: inherit;
+}
+
+.dmr-lcd-fields :is(input, [data-dmr-choice]):is(.is-selected, :focus-visible) {
+  outline: 1px solid #8ad9ec;
+}
+
+.dmr-choice button {
+  position: relative;
+  text-align: left;
+}
+
+.dmr-choice button::after {
+  position: absolute;
+  right: .35em;
+  color: #9bd9ea;
+  content: "↻";
+}
+
+.dmr-lcd-menu .dmr-form-submit {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.dmr-form-feedback {
+  margin: 0;
+  padding: .18em .5em;
+  color: #ffcb91;
+  background: #252420;
+  font-size: .85em;
+}
+
+.dmr-menu-confirm {
+  display: grid;
+  align-content: start;
+  padding: .35em .5em;
+}
+
+@media (max-width: 960px) and (pointer: coarse) {
+  .radio.is-mobile-slim:not(.is-pin-entry) #dmr-slim-toggle {
+    display: grid;
+  }
+
+  .radio.is-mobile-slim:not(.is-pin-entry) .left-controls {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .radio.is-dmr {
+    display: block;
+    min-height: 360px;
+  }
+
+  .dmr-face {
+    inset: 2% 3% 1%;
+    grid-template: "title" 3% "display" minmax(0, 3.2fr) "dials" minmax(0, 1fr)
+                   "keys" minmax(0, 2.2fr) "status" 3% "buttons" minmax(0, .7fr) / 1fr;
+    gap: 1.5%;
+  }
+
+  .dmr-dials {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    justify-items: center;
+  }
+
+  .dmr-dial,
+  .dmr-dial:not([data-dmr-dial="tune"]) {
+    width: min(11cqw, 8.25dvh);
+  }
+
+  .dmr-nav button,
+  .dmr-bottom button,
+  .dmr-keypad button {
+    font-size: clamp(8px, 2.45cqw, 12px);
+  }
+
+  .dmr-lcd-menu {
+    font-size: clamp(12px, 3.4cqw, 15px);
+  }
+
+  .dmr-menu-list button {
+    min-height: 2.1em;
+  }
+
+  .dmr-lcd-fields :is(input, [data-dmr-choice]) {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 960px) and (pointer: coarse) and (orientation: landscape) {
+  .dmr-face {
+    grid-template: "title title" 4% "display keys" minmax(0, 1fr) "dials keys" 25%
+                   "status buttons" 12% / minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 3%;
+  }
+  .dmr-dial,
+  .dmr-dial:not([data-dmr-dial="tune"]) {
+    width: min(10cqw, 12dvh);
+  }
+  .dmr-dial-control {
+    font-size: clamp(7px, 1.7dvh, 12px);
+  }
+}
+
+.dmr-mode .discovery-screen {
+  --discovery-action-width: clamp(1.75rem, 7.5cqw, 2.45rem);
+}
+
+.dmr-mode .discovery-lcd {
+  inset-inline-end: calc(2 * var(--discovery-action-width) + .25rem);
+}
+
+.dmr-mode .discovery-frequency-column {
+  width: 11ch;
+}
+
+.dmr-mode #discovery-current-mode {
+  display: inline;
+  align-self: center;
+  height: auto;
+  margin-inline-start: .2em;
+  font-size: .86em;
+}
+
+.dmr-mode #discovery-current-tone {
+  display: none;
+}
+
+.dmr-mode .discovery-pages {
+  font-size: clamp(.49rem, min(2.4cqw, .88vw), .83rem);
+}
+
+.dmr-mode .discovery-pages :is(th, td):nth-child(4) {
+  padding-inline-end: .15rem;
+}
+
+.dmr-mode .discovery-hit-cap {
+  width: min(78%, 1.65rem, calc((100cqh - 2px) * 147 / 69));
+}
+
+body:not(.dmr-mode) .discovery-dmr-column,
+.dmr-mode .discovery-analogue-column {
+  display: none;
+}
+
+.dmr-mode .discovery-dmr-code,
+.dmr-mode .discovery-dmr-slot {
+  width: 2.75ch;
+}
+
+.dmr-mode col.discovery-dmr-group {
+  width: 9ch;
+}
+
+.dmr-mode :is(th, td).discovery-unit-id {
+  padding-inline-end: .38rem;
+}
+
+.discovery-sms-label {
+  display: block;
+  font-size: .88em;
+  line-height: 1.05;
+}
+
+@media (max-width: 350px) {
+  .dmr-mode .discovery-screen {
+    --discovery-action-width: 1.55rem;
+  }
+
+  .dmr-mode .discovery-pages th:nth-last-child(-n+2) {
+    font-size: .55rem;
+  }
+}
+
+@media (max-width: 319px) {
+  .dmr-mode .discovery-pages {
+    font-size: .43rem;
+  }
+}
+
+@media (min-width: 961px) and (min-height: 580px) {
+  .dmr-mode .discovery-title {
+    inset: -1.8rem auto auto 0;
+    width: auto;
+    height: auto;
+    margin: 0;
+    clip-path: none;
+    color: #d0d0ca;
+    font: 700 clamp(.7rem, 3.1cqw, 1.08rem)/1 Arial, sans-serif;
+    letter-spacing: .035em;
+  }
+}

@@ -28,6 +28,8 @@ class DiscoveryHit:
     tone: dict | None
     dab_sid: str | None
     station_name: str | None
+    dmr: dict | None = None
+    sms_target_id: int | None = None
 
 
 class Discovery:
@@ -50,7 +52,12 @@ class Discovery:
     @property
     def current(self):
         hit = self._active
-        return {"hz": hit.hz, "mode": hit.mode, "tone": hit.tone} if hit else None
+        if hit is None:
+            return None
+        current = {"hz": hit.hz, "mode": hit.mode, "tone": hit.tone}
+        if hit.dmr is not None:
+            current["dmr"] = hit.dmr
+        return current
 
     def control(self, command):
         if command == "open" and self.started:
@@ -63,7 +70,7 @@ class Discovery:
         self._active = None
 
     def receive(self, pcm, *, channel=None, revision=0, signal_dbfs=None, tone=None,
-                dab_sid=None, station_name=None):
+                dab_sid=None, station_name=None, dmr=None):
         if not pcm:
             self.boundary()
             return
@@ -82,11 +89,13 @@ class Discovery:
         if not (self.enabled and channel):
             self.boundary()
             return
+        if dmr is not None:
+            dmr = {key: dmr.get(key) for key in ("color_code", "slot", "talkgroup", "unit_id")}
         active = self._active
         if (active is None or (active.hz, active.mode) != channel
-                or active.revision != revision or active.dab_sid != dab_sid):
+                or active.revision != revision or active.dab_sid != dab_sid or active.dmr != dmr):
             active = DiscoveryHit(self._next_id, time_ns() // 1_000_000, *channel, revision,
-                                  start, self._end, signal_dbfs, tone, dab_sid, station_name)
+                                  start, self._end, signal_dbfs, tone, dab_sid, station_name, dmr)
             self._next_id += 1
             self._hits.appendleft(active)
             self._active = active
@@ -96,6 +105,17 @@ class Discovery:
                 active.tone = tone
             if signal_dbfs is not None:
                 active.signal_dbfs = signal_dbfs if active.signal_dbfs is None else max(active.signal_dbfs, signal_dbfs)
+
+    def receive_sms(self, message, *, revision=0, signal_dbfs=None):
+        if not self.enabled:
+            return
+        dmr = {"color_code": message.get("color_code"), "slot": message.get("slot"),
+               "talkgroup": None, "unit_id": message["source_id"]}
+        self._hits.appendleft(DiscoveryHit(
+            self._next_id, message["time_ms"], message["hz"], "DMR", revision,
+            self._end, self._end, signal_dbfs, None, None, None, dmr, message["target_id"],
+        ))
+        self._next_id += 1
 
     def status(self):
         bytes_per_second = self.sample_rate * SAMPLE_BYTES
@@ -109,10 +129,13 @@ class Discovery:
                 "hz": hit.hz,
                 "mode": hit.mode,
                 "tone": hit.tone,
+                "dmr": hit.dmr,
                 "signal_dbfs": hit.signal_dbfs,
                 "duration_ms": round((hit.end - hit.start) * 1000 / bytes_per_second),
-                "playable": hit.end > self._start,
-                "recordable": hit.end - max(hit.start, self._start) >= MIN_CLIP_SECONDS * bytes_per_second,
+                "playable": hit.sms_target_id is None and hit.end > self._start,
+                "recordable": hit.sms_target_id is None
+                    and hit.end - max(hit.start, self._start) >= MIN_CLIP_SECONDS * bytes_per_second,
+                **({"sms": {"target_id": hit.sms_target_id}} if hit.sms_target_id is not None else {}),
             } for hit in self._hits],
         }
 
@@ -123,7 +146,7 @@ class Discovery:
         if hit_id is None:
             return tuple(self._audio)
         hit = self.hit(hit_id)
-        if hit is None or hit.end <= self._start:
+        if hit is None or hit.sms_target_id is not None or hit.end <= self._start:
             return ()
         chunks = []
         position = self._start

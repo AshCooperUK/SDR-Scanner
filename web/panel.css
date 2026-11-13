@@ -350,6 +350,37 @@ body {
   pointer-events: none;
 }
 
+.discovery-pad.is-muted .discovery-lcd {
+  filter: brightness(.1);
+}
+
+.discovery-pad.is-muted .discovery-heading,
+.discovery-pad.is-muted :is(.discovery-toolbar, .discovery-pages) {
+  color: #a57644;
+}
+
+.discovery-pad.is-muted :is(#discovery-status, #discovery-page-number) {
+  color: inherit;
+}
+
+.discovery-pad.is-muted :is(.discovery-toolbar, .discovery-pages :is(th, td):not(:nth-last-child(-n+2))) {
+  border-bottom-color: #503016;
+}
+
+.discovery-pad.is-unlit .discovery-lcd {
+  background: #14110c;
+  box-shadow: inset 0 0 0 1px #30281b, inset 0 0 .45rem #000b, 0 0 0 .16cqw #100d08;
+}
+
+.discovery-pad.is-unlit :is(.discovery-toolbar, .discovery-pages :is(th, td):not(:nth-last-child(-n+2))) {
+  color: transparent;
+  border-bottom-color: #30271b;
+}
+
+.discovery-pad.is-unlit .discovery-toolbar > * {
+  visibility: hidden;
+}
+
 .discovery-open::before {
   position: fixed;
   z-index: 10;
@@ -537,17 +568,17 @@ body {
   border-bottom: 1px solid #572b0426;
 }
 
-.discovery-pages td:nth-child(n+5) {
+.discovery-pages td:nth-last-child(-n+2) {
   position: relative;
 }
 
-.discovery-pages :is(th, td):nth-child(n+5) {
+.discovery-pages :is(th, td):nth-last-child(-n+2) {
   padding-inline: var(--discovery-action-offset) 0;
   border-color: transparent;
   text-align: center;
 }
 
-.discovery-pages th:nth-child(n+5) {
+.discovery-pages th:nth-last-child(-n+2) {
   color: #f1f1ee;
   font-size: clamp(.6rem, 2.45cqw, .76rem);
   letter-spacing: .015em;
@@ -626,7 +657,7 @@ body {
     font-size: .625rem;
   }
 
-  .discovery-pages th:nth-child(n+5) {
+  .discovery-pages th:nth-last-child(-n+2) {
     font-size: .65rem;
   }
 }
@@ -1189,7 +1220,7 @@ body {
   position: absolute;
   inset: calc(975 / var(--upper-height) * 100%) 3.9% auto;
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   justify-items: center;
   pointer-events: none;
 }
@@ -1224,8 +1255,7 @@ body {
   pointer-events: auto;
 }
 
-.lcd,
-.discovery-lcd {
+:is(.lcd, .discovery-lcd) {
   box-sizing: border-box;
   overflow: hidden;
   border-radius: .3cqw;
@@ -1784,8 +1814,8 @@ body {
     position: relative;
     inset: auto;
     grid-area: search;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
-    --face-label-size: clamp(6px, 2.15cqw, 11px);
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    --face-label-size: clamp(6px, 1.9cqw, 11px);
     border-top: 1px solid #090a09;
     box-shadow: inset 0 1px #ffffff12;
     padding-top: 3px;

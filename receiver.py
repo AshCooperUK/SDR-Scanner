@@ -38,9 +38,9 @@ SSB_MODES = frozenset(("USB", "LSB"))
 SSB_LOW_HZ = 300
 SSB_HIGH_HZ = 3_000
 SSB_GAIN_DECAY = np.exp(-IQ_SAMPLES / (IQ_RATE * .5))
-WATCH_HALF_WIDTH = {"AM": 7_000, "FM": 9_000, "WFM": 120_000, "USB": 3_600, "LSB": 3_600}
+WATCH_HALF_WIDTH = {"AM": 7_000, "FM": 9_000, "WFM": 120_000, "USB": 3_600, "LSB": 3_600, "DMR": 8_000}
 METER_NOISE_BANDWIDTH = {"AM": 7_400, "FM": 10_600, "WFM": 200_000,
-                         "USB": SSB_HIGH_HZ - SSB_LOW_HZ, "LSB": SSB_HIGH_HZ - SSB_LOW_HZ}
+                         "USB": SSB_HIGH_HZ - SSB_LOW_HZ, "LSB": SSB_HIGH_HZ - SSB_LOW_HZ, "DMR": 15_000}
 METER_SPECTRUM_INTERVAL = 4
 METER_MIN_EXCESS_DB = 5
 NFM_DEEMPHASIS_SECONDS = 200e-6
@@ -213,6 +213,7 @@ class _ChannelDecoder:
             "FM": narrow_decimation,
             "USB": narrow_decimation,
             "LSB": narrow_decimation,
+            "DMR": narrow_decimation,
             "WFM": signal.firwin(641, 104_000, fs=IQ_RATE, window=("kaiser", 8.0)).astype(np.float32),
         }
         # Move a low-pass FIR away from zero to isolate one sideband in
@@ -226,6 +227,7 @@ class _ChannelDecoder:
         self.filters = {
             "AM": signal.firwin(121, 3700, fs=CHANNEL_RATE).astype(np.float32),
             "FM": signal.firwin(121, 5300, fs=CHANNEL_RATE).astype(np.float32),
+            "DMR": signal.firwin(121, 7500, fs=CHANNEL_RATE).astype(np.float32),
             "USB": usb,
             "LSB": np.conjugate(usb),
             "WFM": np.ones(1, dtype=np.float32),  # The wide decimator already selects the station.
@@ -320,6 +322,11 @@ class _ChannelDecoder:
             # before the audio filter removes it.
             self.block_offset_hz = float(np.mean(audio[1:], dtype=np.float64)) * self.deviation
 
+        if self.mode == "DMR":
+            # The decoder needs 48 kHz discriminator samples with the 4FSK
+            # symbols intact. Voice filtering and audio resampling come later.
+            pcm = np.clip(audio * (44_000 / self.discriminator_scale), -32767, 32767)
+            return level, pcm.astype("<i2").tobytes()
         if self.mode == "WFM" and self.rds is not None:
             self.rds.feed(audio)
         if self.mode == "FM" and self.tone_search is not None:
@@ -564,7 +571,7 @@ class Receiver:
         self._tuning = hz, mode
 
     def read(self):
-        """Return (channel dBFS, a 24 kHz mono PCM block)."""
+        """Return channel dBFS and PCM, at 48 kHz for DMR or 24 kHz for voice."""
         if self._tuning is None:
             raise ReceiverError("Tune the SDR before reading audio")
         if self._prepared is None:
@@ -635,7 +642,7 @@ class Receiver:
         if self._tuning_snr_db < METER_MIN_EXCESS_DB:
             self._meter_offsets.clear()
             self._tuning_offset_hz = None
-        elif mode in ("FM", "WFM"):
+        elif mode in ("FM", "WFM", "DMR"):
             self._meter_offsets.append(self._decoder.block_offset_hz)
             if len(self._meter_offsets) >= (6 if mode == "WFM" else 4):
                 self._tuning_offset_hz = sum(self._meter_offsets) / len(self._meter_offsets)

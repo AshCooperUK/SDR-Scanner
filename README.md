@@ -9,6 +9,7 @@ SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can
 ## Features
 
 - **Receive DAB and DAB+ digital radio.** Hold **DAB** to scan Band III, then browse the discovered station list with **UP** and **DOWN**. See station names and scrolling text, save exact stations, and resume the last station after switching modes or restarting. DAB uses the [optional headless decoder](#install-the-optional-dab-decoder).
+- **Receive conventional DMR voice and text.** Use the colour display for call metadata and incoming SMS. Save filtered DMR channels, log calls and replay clear audio. DMR uses the [optional DSD-neo decoder](#install-the-optional-dmr-decoder).
 - **Listen to broadcast FM with RDS.** Tune wide FM and display the station name and RadioText when the broadcaster transmits them. Use the LCD digits for fine tuning and copy frequencies in MHz.
 - **Scan AM airband, marine VHF, PMR446 and CB radio.** Scan presets or search **100 kHz to 1.75 GHz** with compatible hardware. Use adjustable squelch, a signal meter, temporary and permanent lockouts, and Close Call for strong nearby signals.
 - **Save and watch favourites.** Store 124 analogue channels or DAB stations with 24 front-panel shortcuts. Use **WATCH** to check analogue favourites for activity, using a spare SDR when available.
@@ -29,6 +30,8 @@ SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can
 - [RDS and Watch](#rds-and-watch)
 - [DAB and DAB+](#dab-and-dab)
 - [Install the optional DAB decoder](#install-the-optional-dab-decoder)
+- [Conventional DMR](#conventional-dmr)
+- [Install the optional DMR decoder](#install-the-optional-dmr-decoder)
 - [Recording and playback](#recording-and-playback)
 - [Discovery Log and instant replay](#discovery-log-and-instant-replay)
 - [Close Call](#close-call)
@@ -58,7 +61,7 @@ git clone --branch v5.0.1 --depth 1 https://github.com/AshCooperUK/SDR-Scanner.g
 cd SDR-Scanner
 ```
 
-The commands above install the stable release. To use the current source with the features documented here, clone `main` using `git clone --branch main --depth 1 https://github.com/AshCooperUK/SDR-Scanner.git`, then follow the same installation steps.
+The commands above install the stable release. For DMR, clone `main` using `git clone --branch main --depth 1 https://github.com/AshCooperUK/SDR-Scanner.git`, then follow the same installation steps and [install the DMR decoder](#install-the-optional-dmr-decoder).
 
 The `rtl-sdr` package supplies the receiver tools, library and USB device rules. If APT cannot find it on Ubuntu, run `sudo apt install --no-install-recommends software-properties-common`, then `sudo add-apt-repository universe` and retry the installation. [Ubuntu package](https://packages.ubuntu.com/jammy/rtl-sdr) · [Debian package](https://packages.debian.org/bookworm/rtl-sdr)
 
@@ -157,6 +160,7 @@ Hover over a control for its tooltip. **Tab** moves keyboard focus, and **Space*
 | **TONE** | Tap to toggle CTCSS and DCS identification. Hold, then tap a saved narrow-FM **F01–F24** slot to set its tone squelch. |
 | **BAND/STEP** | Tap to select a search range. Hold for about a second during Search to edit step sizes. It also backs out of Close Call setup or cancels a clock edit. |
 | **PROG** | Starts or confirms memory programming. Hold for about 2½ seconds to toggle Program Lock in radio mode or set the clock in standby. Double-tap in standby on the scanner host to set the remote PIN. It also confirms step, band-plan and Close Call settings. |
+| **DMR** | Immediately right of **PROG**. Opens the conventional DMR face. Tap **DMR** on that face to return to analogue or DAB. On a phone, the button is available from the slim panel. |
 | **SAVE VOL** | Saves listening volume, Audio Boost, the listening squelch threshold and volume offset for the tuned channel in this browser. The saved volume also sets the default when powering on in a new tab. Hold or right-click to edit the offset in dB. |
 | **F01–F24** | Tap to recall, hold for about a second to save an analogue frequency or DAB station, and right-click to name it. Middle-click temporarily locks out an analogue slot. |
 | **ADV** | On a phone, switches between the slim panel and the full panel. The slim panel opens by default with the enlarged LCD, **HOLD**, **SEARCH**, **UP**, **DOWN**, the three dials and a numeric keypad. **L/O** is beside **0 - .**. Open the full panel for the waterfall and all 24 favourite buttons. |
@@ -344,6 +348,56 @@ sudo apt install --no-install-recommends build-essential cmake xxd \
 ```
 
 The build installs the decoder to `~/.local/share/sdr-scanner/bin/welle-cli`. Power on the panel and hold **DAB** to discover your first stations. If the LCD shows `Err`, hover over **DAB** for the decoder message.
+
+## Conventional DMR
+
+1. Use the `main` branch and install the DMR decoder on the computer with the RTL-SDR attached. Open **DMR** beside **PROG**, then turn up **VOLUME** if the radio is in standby.
+2. Enter the receive frequency in MHz and press **E / YES**. On a keyboard, type the frequency and press **Enter**. The display shows **CC** (colour code), **TS** (time slot), **TGID** (talkgroup) and **UNIT ID** once a call provides those fields. Squelch and the selected filters determine when clear voice plays.
+3. Press the **SQUELCH** dial to open the menu on the radio's LCD, then select **Program a channel** to save the frequency and name. Set a colour code, slot or talkgroup to restrict reception. Leave a filter blank to accept any value. **FAV** lists the saved DMR channels. Use **SYSTEM** or **DEPT** to limit a scan to the selected favourite's group, and press the same key again to release that limit. **SCAN** checks the saved channels.
+4. Press **FUNC → SEARCH** to set a frequency range and step. **SEARCH** starts the sweep. Press it again to hold the current frequency.
+5. Use **DISCOVERY** to see previous DMR calls with their frequency, colour code, time slot, talkgroup and source radio ID. **REPLAY / REC** replays recent audio. **FUNC → REPLAY / REC** arms recording. **AVOID** skips the current selection temporarily, and **FUNC → AVOID** saves the skip. Use the menu to clear avoids.
+6. Press **DMR** to return to the previous scanner mode. DMR favourites are stored on the scanner host, separately from the analogue and DAB favourites and the CHIRP image.
+
+This mode receives clear conventional DMR voice, one call at a time. Trunked-system control-channel following and encrypted voice playback are outside its scope. Scan and search need a live DMR transmission with enough dwell time to decode it.
+
+For handheld-to-scanner simplex testing, tune to the handheld's TX frequency and leave **Time slot** set to **Any**. Some direct-mode calls carry no verified slot number. The LCD leaves the slot blank while playing those calls.
+
+### Receive DMR SMS
+
+1. Open **DMR** and hold on the frequency carrying the text. For a direct test, use the handheld's transmit frequency and leave **Time slot** on **Any**.
+2. On the handheld, select **DMR Standard** text messaging if it offers a format choice and send a short, clear test message to another radio ID.
+3. Press **SQUELCH → SMS** on the scanner. Select a message to see its text, sender, destination and receive frequency.
+4. To remove a message from the receiver's inbox, open it and press **DELETE**, then **YES**.
+
+The scanner keeps the latest 24 decoded messages for each receiver in memory until the service restarts. The RTL-SDR receives compatible, unencrypted messages and has no transmit capability. The scanner must hear the full radio packet. [FreeDMR SMS format guide](https://www.freedmr.uk/index.php/sms-messages/)
+
+While Discovery logging is enabled, it also records the time, frequency, sender and recipient IDs, and any known colour code or slot for each received SMS. Message text stays in the inbox.
+
+### Install the optional DMR decoder
+
+On 64-bit Intel or AMD Ubuntu or Debian, install `curl` with `sudo apt install --no-install-recommends curl`. Run the following as the user who runs the scanner service. The release bundle is extracted so the decoder can run without a GUI or a FUSE mount. [DSD-neo v2.12.1 release](https://github.com/arancormonk/dsd-neo/releases/tag/v2.12.1)
+
+```bash
+(
+  set -eu
+  dmr_work_dir=$(mktemp -d)
+  trap 'rm -rf -- "$dmr_work_dir"' EXIT
+  dmr_data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/sdr-scanner"
+  cd "$dmr_work_dir"
+  curl -fL -o dsd-neo.AppImage \
+    https://github.com/arancormonk/dsd-neo/releases/download/v2.12.1/dsd-neo-linux-x86_64-portable-v2.12.1.AppImage
+  printf '%s  %s\n' 3110c5bcf8572789d57dd96ef09c351a61e2d1b1a4cf156ac542b0b3e73053a6 dsd-neo.AppImage | sha256sum -c -
+  chmod +x dsd-neo.AppImage
+  ./dsd-neo.AppImage --appimage-extract > /dev/null
+  mkdir -p "$dmr_data_dir/bin"
+  if [ ! -e "$dmr_data_dir/dsd-neo-2.12.1" ]; then
+    mv squashfs-root "$dmr_data_dir/dsd-neo-2.12.1"
+  fi
+  ln -sfn "$dmr_data_dir/dsd-neo-2.12.1/AppRun" "$dmr_data_dir/bin/dsd-neo"
+)
+```
+
+For other architectures, install a suitable DSD-neo 2.12.1 build and put `dsd-neo` on the scanner service's `PATH`, or set `SDR_SCANNER_DMR_DECODER` in its environment to the executable's full path. [DSD-neo source and build instructions](https://github.com/arancormonk/dsd-neo/tree/v2.12.1)
 
 ## Recording and playback
 

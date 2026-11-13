@@ -1,5 +1,6 @@
 import { PcmBuffer } from "./pcm-buffer.js";
 import { Waterfall } from "./waterfall.js";
+import { createDmrPanel } from "./dmr-panel.js";
 
 const radio = document.querySelector(".radio");
 const mobileAdvancedToggle = document.querySelector("#mobile-advanced-toggle");
@@ -1056,11 +1057,22 @@ function renderRds(next, entering) {
   showRadioText(radioText);
 }
 
-function resetRadioInteraction() {
+function resetRadioInteraction(keepDiscovery = false) {
   disconnectAudio();
   waterfall.update(null);
   if (replayRequest) stopReplay();
-  closeDiscovery(false);
+  if (keepDiscovery && !discoveryPad.hidden) {
+    clearTimeout(discoveryRefresh);
+    discoveryRequest?.abort();
+    discoveryRequest = undefined;
+    discoveryEntries = [];
+    discoveryPage = 0;
+    discoveryPageHead = undefined;
+    discoveryRows = "";
+    renderDiscoveryPage();
+  } else {
+    closeDiscovery(false);
+  }
   discoverySaves.clear();
   replayMessage = "";
   discoveryMessage = "";
@@ -1087,16 +1099,61 @@ function resetRadioInteraction() {
   }
 }
 
+const dmrPanel = createDmrPanel({
+  onMode: enabled => postAction({ dmr: "toggle", enabled }),
+  onCommand: (command, value) => {
+    if (command === "discovery") return toggleDiscovery(document.querySelector('[data-dmr-command="discovery"]'));
+    if (command === "replay") return toggleInstantReplay();
+    if (command === "play-last") return toggleReplay();
+    if (command === "record") return postAction({ record: "toggle" });
+    if (command === "mute") return postAction({ key: "mute" });
+    if (command === "delete_sms") return postAction({ dmr: command, id: value.id, time_ms: value.time_ms });
+    if (command === "volume" || command === "squelch") {
+      if (command === "volume") {
+        listenerVolume = value || undefined;
+        void enableAudio();
+        updateAudioGain();
+      }
+      return postAction({ knob: command, value });
+    }
+    const fields = { tune: "hz", step: "direction", hold: "scope", avoid: "permanent",
+      save: "entry", recall: "id", delete: "id" };
+    return postAction({ dmr: command, ...(fields[command] ? { [fields[command]]: value }
+      : command === "search" && value ? value : {}) });
+  },
+});
+
 function render(next) {
   if (typeof next.display !== "string") return;
   const previous = state;
   state = next;
   const parked = next.radio_id === null;
   if (previous.radio_id !== undefined && next.radio_id !== previous.radio_id) {
-    resetRadioInteraction();
+    resetRadioInteraction(!pinMode);
   } else if (next.record_folder !== previous.record_folder) {
     discoverySaves.clear();
     updateDiscoveryHitControls();
+  }
+  dmrPanel.render({ ...next, volume: next.power ? listenerVolume ?? next.volume : 0,
+    discovery_open: !discoveryPad.hidden, replay_active: replaySource === "instant",
+    play_last_active: replaySource === "saved", pin_mode: Boolean(pinMode) });
+  if (Boolean(previous.dmr) !== Boolean(next.dmr)) {
+    cancelKeypadTune();
+    frequencyEntry = "";
+    discoveryRows = "";
+    discoveryPage = 0;
+    discoveryPageHead = undefined;
+    renderDiscoveryPage();
+    if (next.dmr && !mobilePanel.matches && discoveryPad.hidden && !pinMode) {
+      void toggleDiscovery();
+    } else if (!discoveryPad.hidden) {
+      void refreshDiscovery();
+    }
+  }
+  if (next.power && !discoveryPad.hidden
+      && (!previous.power || previous.radio_id !== next.radio_id)) {
+    if (!next.discovery_started && !discoveryBusy) void postAction({ discovery: "open" });
+    void refreshDiscovery();
   }
   if (!next.power) {
     choosingToneFavorite = false;
@@ -1284,20 +1341,25 @@ const discoveryTime = new Intl.DateTimeFormat(undefined, {
 });
 
 function updateDiscoveryControls() {
+  dmrPanel.setPlayback({ discovery: !discoveryPad.hidden });
+  discoveryPad.classList.toggle("is-unlit", !state.power);
+  discoveryPad.classList.toggle("is-muted", Boolean(state.power && state.muted));
+  updateDiscoveryHitControls();
   const logging = Boolean(state.discovery_enabled);
   discoveryLogToggle.setAttribute("aria-pressed", String(Boolean(state.discovery_started && !logging)));
   discoveryLogToggle.disabled = !state.power || discoveryBusy;
   const status = discoveryMessage || (!state.power ? "Power on to log reception."
     : discoveryLoadError ? "Could not load the log. Retrying…"
-      : logging ? "Logging received audio." : "Logging is paused.");
+      : logging ? state.dmr ? "Logging DMR calls and SMS." : "Logging received audio." : "Logging is paused.");
   if (discoveryStatus.textContent !== status) discoveryStatus.textContent = status;
   const current = state.discovery_current;
-  discoveryCurrent.hidden = !current;
+  discoveryCurrent.hidden = !state.power || !current;
   const frequency = current ? formatMHz(current.hz).replace(/ MHz$/, "") : "";
   const mode = current?.mode === "FM" ? "NFM" : current?.mode ?? "";
   const tone = formatTone(current?.tone).replace(/^CTCSS /, "");
   drawDigits(discoveryCurrentHz, frequency);
-  drawDigits(discoveryCurrentMode, mode);
+  if (mode === "DMR") discoveryCurrentMode.textContent = mode;
+  else drawDigits(discoveryCurrentMode, mode);
   drawDigits(discoveryCurrentTone, tone);
   if (current) {
     const label = [`${frequency} MHz`, mode, tone].filter(Boolean).join(", ");
@@ -1306,6 +1368,7 @@ function updateDiscoveryControls() {
 }
 
 function updateReplayControls() {
+  dmrPanel.setPlayback({ replay: replaySource === "instant", last: replaySource === "saved" });
   playLast.setAttribute("aria-pressed", String(replaySource === "saved"));
   instantReplay.setAttribute("aria-pressed", String(replaySource === "instant"));
   discoveryMobileReplay.setAttribute("aria-pressed", String(replaySource === "instant"));
@@ -1316,14 +1379,14 @@ function updateDiscoveryHitControls() {
   for (const button of discoveryHits.querySelectorAll("[data-discovery-hit]")) {
     const playing = Number(button.dataset.discoveryHit) === replaySource;
     button.setAttribute("aria-pressed", String(playing));
-    button.disabled = !playing && button.dataset.playable !== "true";
+    button.disabled = !state.power || !playing && button.dataset.playable !== "true";
     button.title = playing ? "Stop playback" : button.disabled ? "Audio is no longer in the replay buffer" : "Play this hit";
   }
   for (const button of discoveryHits.querySelectorAll("[data-discovery-record]")) {
     const save = discoverySaves.get(Number(button.dataset.discoveryRecord));
     button.dataset.saved = String(Boolean(save?.filename));
     button.setAttribute("aria-busy", String(Boolean(save?.pending)));
-    button.disabled = Boolean(save?.pending) || button.dataset.recordable !== "true";
+    button.disabled = !state.power || Boolean(save?.pending) || button.dataset.recordable !== "true";
     if (save?.filename) button.title = `Saved as ${save.filename}`;
     else if (save?.pending) button.title = "Saving this hit";
     else if (button.disabled) button.title = button.dataset.playable === "true"
@@ -1338,7 +1401,8 @@ function renderDiscoveryHits(hits) {
     const frequency = formatMHz(hit.hz).replace(/ MHz$/, "");
     const mode = hit.mode === "FM" ? "NFM" : hit.mode;
     const tone = formatTone(hit.tone).replace(/^CTCSS /, "");
-    return { id: hit.id, time, frequency, mode, tone, playable: hit.playable, recordable: hit.recordable };
+    return { id: hit.id, time, frequency, mode, tone, dmr: hit.dmr, sms: hit.sms,
+      playable: hit.playable, recordable: hit.recordable };
   });
   const retained = new Set(discoveryEntries.map(entry => entry.id));
   for (const id of discoverySaves.keys()) {
@@ -1348,7 +1412,8 @@ function renderDiscoveryHits(hits) {
 }
 
 function renderDiscoveryPage() {
-  let entries = discoveryEntries;
+  const digital = Boolean(state.dmr);
+  let entries = discoveryEntries.filter(entry => (entry.mode === "DMR") === digital);
   if (discoveryPageHead !== undefined) {
     // Keep older pages stable as newly received hits are added at the top.
     const first = entries.findIndex(entry => entry.id <= discoveryPageHead);
@@ -1368,7 +1433,7 @@ function renderDiscoveryPage() {
 
   const start = discoveryPage * discoveryPageSize;
   const rows = entries.slice(start, start + discoveryPageSize);
-  const signature = JSON.stringify(rows);
+  const signature = JSON.stringify([digital, rows]);
   if (signature === discoveryRows) return;
   discoveryRows = signature;
   const { discoveryHit: focusedPlay, discoveryRecord: focusedRecord } = document.activeElement?.dataset ?? {};
@@ -1379,20 +1444,36 @@ function renderDiscoveryPage() {
       row.className = "is-empty";
       row.setAttribute("aria-hidden", "true");
     }
-    for (const text of entry ? [entry.time, entry.frequency, entry.mode, entry.tone || "—"] : ["", "", "", ""]) {
-      row.insertCell().textContent = text;
+    const fields = entry ? [entry.time, entry.frequency, entry.mode, entry.tone || "—",
+      entry.dmr?.color_code ?? "—", entry.dmr?.slot ?? "—", entry.sms?.target_id ?? entry.dmr?.talkgroup ?? "—",
+      entry.dmr?.unit_id ?? "—"] : Array(8).fill("");
+    for (const [index, text] of fields.entries()) {
+      const cell = row.insertCell();
+      if (index >= 2) cell.className = index <= 3 ? "discovery-analogue-column" : "discovery-dmr-column";
+      if (index === 7) cell.classList.add("discovery-unit-id");
+      cell.textContent = text;
+      if (index === 6 && entry?.sms) {
+        const label = document.createElement("span");
+        label.className = "discovery-sms-label";
+        label.textContent = "SMS TO";
+        cell.prepend(label);
+      }
     }
     for (const [key, action] of [["discoveryHit", "Play"], ["discoveryRecord", "Save"]]) {
       const button = document.createElement("button");
       const cap = document.createElement("span");
       button.type = "button";
-      if (entry) {
+      if (entry && !entry.sms) {
         button.dataset[key] = String(entry.id);
         button.dataset.playable = String(entry.playable);
         if (key === "discoveryRecord") button.dataset.recordable = String(entry.recordable);
         button.setAttribute("aria-label", `${action} hit at ${entry.time} on ${entry.frequency} MHz`);
       } else {
         button.disabled = true;
+        if (entry?.sms) {
+          button.title = "SMS has no audio";
+          button.setAttribute("aria-label", `${action} SMS unavailable`);
+        }
       }
       cap.className = "discovery-hit-cap";
       cap.setAttribute("aria-hidden", "true");
@@ -1466,6 +1547,7 @@ function closeDiscovery(restoreFocus = true) {
   discoveryRequest?.abort();
   discoveryRequest = undefined;
   discoveryPad.hidden = true;
+  dmrPanel.setPlayback({ discovery: false });
   document.body.classList.remove("discovery-open");
   discoveryToggle.setAttribute("aria-expanded", "false");
   playLast.removeAttribute("aria-expanded");
@@ -1509,7 +1591,7 @@ discoveryPageUp.addEventListener("click", () => {
   renderDiscoveryPage();
 });
 discoveryPageDown.addEventListener("click", () => {
-  if (!discoveryPage) discoveryPageHead = discoveryEntries[0]?.id;
+  if (!discoveryPage) discoveryPageHead = discoveryEntries.find(entry => (entry.mode === "DMR") === Boolean(state.dmr))?.id;
   discoveryPage += 1;
   renderDiscoveryPage();
 });
@@ -1784,12 +1866,14 @@ window.addEventListener("keydown", (event) => {
     setToneFavoriteChoice(false);
     return;
   }
+  if (dmrPanel.active && dmrPanel.handleKey(event)) return;
   if (event.key === "Escape" && !discoveryPad.hidden && !frequencyEntry && !editingFavorite
-      && !recordFolderDialog.open && !volumeOffsetDialog?.open && !toneFilterDialog.open) {
+      && !document.querySelector("dialog[open]")) {
     event.preventDefault();
     closeDiscovery();
     return;
   }
+  if (dmrPanel.active) return;
   const slim = radio.classList.contains("is-mobile-slim");
   if (recordFolderDialog.open || volumeOffsetDialog?.open || toneFilterDialog.open || !discoveryPad.hidden || !canEnterFrequency()
       || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;

@@ -299,9 +299,14 @@ class RadioPool:
         state = source.state()
         if not state["power"]:
             return
+        if state.get("dmr_enabled"):
+            destination.resume_dmr(state.get("tune_hz"), volume)
+            return
         if state.get("dab_enabled"):
             destination.resume_dab(source.dab_handoff_station(), volume)
             return
+        if destination.state().get("dmr_enabled"):
+            destination.act({"dmr": "toggle", "enabled": False})
         destination.act({"knob": "volume", "value": volume})
         if "HOLD" in state.get("lower", ()) and state.get("tune_hz"):
             mhz, hz = divmod(state["tune_hz"], 1_000_000)
