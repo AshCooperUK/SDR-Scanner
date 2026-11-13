@@ -12,6 +12,7 @@ from bandplan import (
     FULL_LOCKOUT, GENERAL_STEPS, GERMAN_BANDS, SLOTS, WRITABLE, Channel,
     factory_banks,
 )
+from dab import BAND_III, SERVICE_ID
 
 KEYS = {*BANK_KEYS, "hold", "up", "down", "mute", "close", "scan", "search", "lock", "band", "prog"}
 KEY_ALIASES = {"frn": "pmr", "emg": "fav"}
@@ -28,6 +29,7 @@ MANUAL_MAX_HZ = 1_750_000_000
 FULL_SEARCH_STEP_HZ = 12_500
 FAVORITE_COUNT = 24
 FAVORITE_NAME_LIMIT = 80
+DAB_FREQUENCIES = dict(BAND_III)
 
 
 def normalize_favorite_name(name):
@@ -37,6 +39,39 @@ def normalize_favorite_name(name):
     if any(category(character) in ("Cc", "Cs", "Zl", "Zp") for character in name):
         return None
     return name
+
+
+def _normalize_dab_station(station):
+    if not isinstance(station, (list, tuple)) or len(station) != 2:
+        return None
+    block, sid = station
+    if (not isinstance(block, str) or block not in DAB_FREQUENCIES
+            or not isinstance(sid, str) or not SERVICE_ID.fullmatch(sid)):
+        return None
+    service_id = int(sid, 16)
+    return (block, f"0x{service_id:04x}") if service_id else None
+
+
+def _normalize_dab_blocks(blocks, station):
+    known = {block for block in blocks if isinstance(block, str) and block in DAB_FREQUENCIES}
+    if station:
+        known.add(station[0])
+    return tuple(block for block in DAB_FREQUENCIES if block in known)
+
+
+def _normalize_dab_service_counts(counts, blocks):
+    if not isinstance(counts, dict):
+        return {}
+    return {block: count for block in blocks
+            if type(count := counts.get(block)) is int and 0 < count <= 65535}
+
+
+def _normalize_dab_favorite(block, sid, hz, name):
+    station = _normalize_dab_station((block, sid))
+    if station is None or type(hz) is not int or DAB_FREQUENCIES[block] != hz:
+        return None
+    return {"block": block, "sid": station[1], "hz": hz,
+            "name": normalize_favorite_name(name) or ""}
 
 
 def format_frequency(hz):
@@ -101,6 +136,7 @@ class Scanner:
         self.program_bank = None
         self.program_slot = 0
         self.program_at = 0
+        self.dab_program_source = None
         self.tone = {"id": 0, "count": 0, "kind": "key"}
         self._build_factory()
 
@@ -135,6 +171,16 @@ class Scanner:
     @property
     def tuned(self):
         return self.capture or self.current
+
+    @property
+    def dab_programming(self):
+        return self.menu == "program" and self.dab_program_source is not None
+
+    @property
+    def dab_program_slot(self):
+        if self.dab_programming and self.program_bank == "FAV":
+            return self.program_slot + 1
+        return None
 
     def _load(self):
         try:
@@ -191,6 +237,23 @@ class Scanner:
                 if (type(hz) is int and MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ
                         and mode in ("AM", "FM", "WFM")):
                     self.memories["FAV"][index] = Channel(hz, mode, "FAV", index)
+        favorite_slots = len(self.memories["FAV"])
+        self.dab_favorites = [None] * favorite_slots
+        dab_favorites = raw.get("dab_favorites")
+        if isinstance(dab_favorites, list):
+            for index, entry in enumerate(dab_favorites[:favorite_slots]):
+                if not isinstance(entry, dict):
+                    continue
+                favorite = _normalize_dab_favorite(entry.get("block"), entry.get("sid"),
+                                                   entry.get("hz"), entry.get("name"))
+                if favorite:
+                    self.dab_favorites[index] = favorite
+                    self.memories["FAV"][index] = None
+        self.dab_last_station = _normalize_dab_station(raw.get("dab_last_station"))
+        dab_known_blocks = raw.get("dab_known_blocks")
+        self.dab_known_blocks = _normalize_dab_blocks(
+            dab_known_blocks if isinstance(dab_known_blocks, list) else (), self.dab_last_station)
+        self.dab_service_counts = _normalize_dab_service_counts(raw.get("dab_service_counts"), self.dab_known_blocks)
         frequencies = raw.get("permanent_frequencies")
         self.permanent_frequencies = {}
         if isinstance(frequencies, list):
@@ -255,6 +318,10 @@ class Scanner:
             "program_locked": self.program_locked,
             "rds_enabled": self.rds_enabled,
             "favorites": self._favorite_entries(),
+            "dab_favorites": self.dab_favorites,
+            "dab_last_station": self.dab_last_station,
+            "dab_known_blocks": self.dab_known_blocks,
+            "dab_service_counts": self.dab_service_counts,
             "favorite_names": self.favorite_names,
             "permanent_frequencies": list(self.permanent_frequencies),
             "permanent_slots": sorted(locks),
@@ -286,6 +353,60 @@ class Scanner:
         return [{"hz": entry.hz, "mode": entry.modulation} if entry else None
                 for entry in self.memories["FAV"][:FAVORITE_COUNT]]
 
+    def remember_dab(self, station, blocks, service_counts=None):
+        """Persist the last playable service and observed multiplex data when they change."""
+        normalized_station = _normalize_dab_station(station)
+        if station is not None and normalized_station is None:
+            raise ValueError("Invalid DAB station")
+        if (not isinstance(blocks, (list, tuple, set, frozenset))
+                or any(not isinstance(block, str) or block not in DAB_FREQUENCIES for block in blocks)):
+            raise ValueError("Invalid DAB blocks")
+        known = _normalize_dab_blocks(blocks, normalized_station)
+        counts = _normalize_dab_service_counts(
+            self.dab_service_counts if service_counts is None else service_counts, known)
+        previous = self.dab_last_station, self.dab_known_blocks, self.dab_service_counts
+        if previous == (normalized_station, known, counts):
+            return False
+        self.dab_last_station, self.dab_known_blocks, self.dab_service_counts = normalized_station, known, counts
+        try:
+            self._save()
+        except OSError:
+            self.dab_last_station, self.dab_known_blocks, self.dab_service_counts = previous
+            raise
+        return True
+
+    def get_dab_favorite(self, number):
+        if type(number) is not int or not 1 <= number <= len(self.dab_favorites):
+            raise ValueError("Invalid favourite number")
+        entry = self.dab_favorites[number - 1]
+        return entry.copy() if entry else None
+
+    def save_dab_favorite(self, number, *, block, sid, hz, name=""):
+        if type(number) is not int or not 1 <= number <= len(self.dab_favorites):
+            raise ValueError("Invalid favourite number")
+        favorite = _normalize_dab_favorite(block, sid, hz, name)
+        if favorite is None:
+            raise ValueError("Invalid DAB favourite")
+        if not self.power or self.menu:
+            return False
+        self._save_dab_slot(number - 1, favorite)
+        self._tone()
+        return True
+
+    def _save_dab_slot(self, index, favorite):
+        previous = self.dab_favorites[index]
+        label = favorite["name"]
+        if previous and (previous["block"], previous["sid"]) == (favorite["block"], favorite["sid"]):
+            favorite = favorite.copy()
+            favorite["name"] = favorite["name"] or previous["name"]
+            if index < FAVORITE_COUNT:
+                label = self.favorite_names[index]
+        self._persist_slot("FAV", index, None, dab=favorite, favorite_name=label)
+        current = self.current
+        if current and current.bank == "FAV" and current.slot == index:
+            self._retune(Channel(current.hz, current.modulation), direct=self.hold or self.direct_frequency)
+        self._rebuild_scan()
+
     def rename_favorite(self, number, name):
         name = normalize_favorite_name(name)
         if type(number) is not int or not 1 <= number <= FAVORITE_COUNT or name is None:
@@ -302,7 +423,7 @@ class Scanner:
             raise
 
     def favorite(self, number, gesture, *, rds_ps=None):
-        if type(number) is not int or not 1 <= number <= FAVORITE_COUNT or gesture not in ("tap", "long"):
+        if type(number) is not int or not 1 <= number <= FAVORITE_COUNT or gesture not in ("tap", "long", "lock"):
             raise ValueError("Invalid favourite action")
         if not self.power or self.menu:
             return
@@ -319,29 +440,22 @@ class Scanner:
             entry = self.memories["FAV"][index]
             if not entry:
                 return
+            if gesture == "lock":
+                if self._lock_kind(entry):
+                    return False
+                self.temporary_slots.add(("FAV", index))
+                self.lock_notice = 1
+                self.lock_notice_until = monotonic() + 0.8
+                return True
             self._hold_channel(entry)
         self._tone()
 
     def _save_favorite(self, index, channel, rds_ps):
-        entries = self.memories["FAV"]
-        previous = entries[index]
-        previous_name = self.favorite_names[index]
-        identity = ("FAV", index)
-        permanent = identity in self.permanent_slots
-        temporary = identity in self.temporary_slots
-        if not previous_name or (previous and previous.hz != channel.hz):
-            self.favorite_names[index] = normalize_favorite_name(rds_ps) or ""
-        self._store_slot("FAV", index, channel)
-        try:
-            self._save()
-        except OSError:
-            entries[index] = previous
-            self.favorite_names[index] = previous_name
-            if permanent:
-                self.permanent_slots.add(identity)
-            if temporary:
-                self.temporary_slots.add(identity)
-            raise
+        previous = self.memories["FAV"][index]
+        label = self.favorite_names[index]
+        if not label or self.dab_favorites[index] or (previous and previous.hz != channel.hz):
+            label = normalize_favorite_name(rds_ps) or ""
+        self._persist_slot("FAV", index, channel, favorite_name=label)
         self._rebuild_scan()
 
     def toggle_rds(self):
@@ -669,17 +783,20 @@ class Scanner:
             self.permanent_slots, self.permanent_frequencies = saved_slots, saved_frequencies
             raise
 
-    def _clear_lockouts(self, channel):
-        permanent = self._lock_kind(channel) == 2
-        had_locks = permanent or bool(self.temporary_slots or self.temporary_frequencies)
-        if permanent:
-            self._unlock_permanent(channel)
+    def clear_temporary_lockouts(self):
+        had_locks = bool(self.temporary_slots or self.temporary_frequencies)
         self.temporary_slots.clear()
         self.temporary_frequencies.clear()
         self.lock_notice = 0
         self.lock_notice_until = 0
         self.last_lock = None
-        if had_locks:
+        return had_locks
+
+    def _clear_lockouts(self, channel):
+        permanent = self._lock_kind(channel) == 2
+        if permanent:
+            self._unlock_permanent(channel)
+        if self.clear_temporary_lockouts() or permanent:
             self._tone(count=2)
 
     def _lock(self, gesture):
@@ -734,10 +851,52 @@ class Scanner:
             self._tone("error")
             return
         self.preview_until = 0
+        self.dab_program_source = None
         self.program_source = self.tuned or Channel(0, "FM")
         self.program_bank = None
         self.menu = "program"
         self.audio_open = False
+
+    def begin_dab_program(self, *, block, sid, hz, name=""):
+        favorite = _normalize_dab_favorite(block, sid, hz, name)
+        if favorite is None:
+            raise ValueError("Invalid DAB favourite")
+        if not self.power or self.menu:
+            return False
+        self._tone()
+        self._begin_program()
+        if self.menu != "program":
+            return False
+        self.dab_program_source = favorite
+        return True
+
+    def cancel_dab_program(self):
+        if self.dab_programming:
+            self.menu = None
+        self.dab_program_source = None
+
+    def dab_program_key(self, key, gesture="tap"):
+        key = KEY_ALIASES.get(key, key)
+        if not self.dab_programming or key not in ("fav", "up", "down", "hold", "prog"):
+            return None
+        if key == "prog" and gesture == "long":
+            self.key(key, gesture)
+            return None
+        self._tone()
+        if key == "hold":
+            self.cancel_dab_program()
+        elif key == "prog" and self.dab_program_slot is not None:
+            if self.program_locked:
+                self._show("Pg.L")
+                self._tone("error")
+                return None
+            slot = self.program_slot
+            self._save_dab_slot(slot, self.dab_program_source)
+            self.cancel_dab_program()
+            return slot + 1
+        else:
+            self._program(key, gesture)
+        return None
 
     def _program(self, key, gesture):
         if key == "lock" and gesture == "long" and not self.program_bank:
@@ -750,8 +909,8 @@ class Scanner:
                 return
             self.program_bank = bank
             slots = self.memories[bank]
-            self.program_slot = next((index for index, channel in enumerate(slots)
-                                      if channel is None), 0)
+            self.program_slot = next((index for index in range(len(slots))
+                                      if not self._slot_hz(bank, index)), 0)
             self.program_at = monotonic()
         elif key in ("up", "down") and self.program_bank:
             slots = self.memories[self.program_bank]
@@ -762,11 +921,46 @@ class Scanner:
         elif key == "hold":
             self.menu = None
 
-    def _store_slot(self, bank, slot, source):
-        channel = Channel(source.hz, source.modulation, bank, slot)
-        self.memories[bank][slot] = channel if source.hz else None
-        self.permanent_slots.discard((bank, slot))
-        self.temporary_slots.discard((bank, slot))
+    def _slot_hz(self, bank, slot):
+        channel = self.memories[bank][slot]
+        if channel:
+            return channel.hz
+        if bank == "FAV" and self.dab_favorites[slot]:
+            return self.dab_favorites[slot]["hz"]
+        return 0
+
+    def _persist_slot(self, bank, slot, source, *, dab=None, favorite_name=None):
+        entries = self.memories[bank]
+        previous = entries[slot]
+        identity = (bank, slot)
+        permanent = identity in self.permanent_slots
+        temporary = identity in self.temporary_slots
+        favorite_bank = bank == "FAV"
+        direct_favorite = favorite_bank and slot < FAVORITE_COUNT
+        if favorite_bank:
+            previous_dab = self.dab_favorites[slot]
+            self.dab_favorites[slot] = dab
+        if direct_favorite:
+            previous_name = self.favorite_names[slot]
+            if favorite_name is not None or previous_dab:
+                self.favorite_names[slot] = favorite_name or ""
+        channel = Channel(source.hz, source.modulation, bank, slot) if source else None
+        entries[slot] = channel if channel and channel.hz else None
+        self.permanent_slots.discard(identity)
+        self.temporary_slots.discard(identity)
+        try:
+            self._save()
+        except OSError:
+            entries[slot] = previous
+            if favorite_bank:
+                self.dab_favorites[slot] = previous_dab
+            if direct_favorite:
+                self.favorite_names[slot] = previous_name
+            if permanent:
+                self.permanent_slots.add(identity)
+            if temporary:
+                self.temporary_slots.add(identity)
+            raise
         return channel
 
     def _write_slot(self):
@@ -775,7 +969,7 @@ class Scanner:
             self._tone("error")
             return
         bank, slot = self.program_bank, self.program_slot
-        channel = self._store_slot(bank, slot, self.program_source)
+        channel = self._persist_slot(bank, slot, self.program_source)
         self.menu = None
         self._drop_capture()
         self._leave_only()
@@ -784,7 +978,6 @@ class Scanner:
         self.enabled.add(bank)
         self._retune(channel)
         self._rebuild_scan()
-        self._save()
 
     def _edit_steps(self, key, gesture):
         if key == "prog":
@@ -919,6 +1112,7 @@ class Scanner:
         self.volume = value
         if self.power == was_on:
             return
+        self.cancel_dab_program()
         self.menu = None
         self.preview_until = 0
         self.probe_request = None
@@ -942,6 +1136,7 @@ class Scanner:
     def _clear_memory(self):
         for bank, memories in self.memories.items():
             self.memories[bank] = [None] * len(memories)
+        self.dab_favorites = [None] * len(self.memories["FAV"])
         self.favorite_names = [""] * FAVORITE_COUNT
         self.archived_frn = [None] * SLOTS
         self.archived_frn_locks.clear()
@@ -1149,9 +1344,10 @@ class Scanner:
     def _menu_display(self, now):
         if self.menu == "program":
             if not self.program_bank or int((now - self.program_at) / 0.7) % 2:
-                return format_frequency(self.program_source.hz), None
-            channel = self.memories[self.program_bank][self.program_slot]
-            return format_frequency(channel.hz if channel else 0), self.program_slot + 1
+                hz = self.dab_program_source["hz"] if self.dab_programming else self.program_source.hz
+                return format_frequency(hz), None
+            hz = self._slot_hz(self.program_bank, self.program_slot)
+            return format_frequency(hz), self.program_slot + 1
         if self.menu == "step_general":
             return STEP_LABELS[self.pending_step], None
         if self.menu == "step_air":
@@ -1188,15 +1384,22 @@ class Scanner:
             return format_frequency(channel.hz), number
         return "-------", None
 
-    def snapshot(self):
+    def snapshot(self, *, parked=False, parked_backlight=False):
         """Current LCD and tuner state, with fresh containers for the HTTP layer."""
         now = monotonic()
-        channel = self.tuned
-        display, number = self._display(now)
+        power = self.power and not parked
+        channel = None if parked else self.tuned
+        clock_backlight = self.menu in ("clock", "plan") or now < self.clock_light_until
+        if parked:
+            display, number = self._clock_display(), None
+            backlight = parked_backlight or (not self.power and clock_backlight)
+        else:
+            display, number = self._display(now)
+            backlight = power or clock_backlight
         upper = []
         lower = []
         blink_bank = None
-        if self.power:
+        if power:
             if (self.activity == "scan" and self.close_mode != "only") or self.menu == "program":
                 upper = [bank for bank in BANKS if bank in self.enabled and bank not in ("CBAM", "CBFM")]
                 if self.enabled.intersection({"CBAM", "CBFM"}):
@@ -1230,7 +1433,7 @@ class Scanner:
                 lower.append("T")
             if lock:
                 lower.append("L/O")
-        tune_hz = channel.hz if self.power and channel and channel.hz else None
+        tune_hz = channel.hz if power and channel and channel.hz else None
         active_favorite = (channel.slot + 1 if tune_hz is not None and channel.bank == "FAV"
                            and channel.slot is not None and 0 <= channel.slot < FAVORITE_COUNT else None)
         return {
@@ -1239,28 +1442,30 @@ class Scanner:
             "upper": upper,
             "lower": lower,
             "blink_bank": blink_bank,
-            "blink": self.menu == "clock" or bool(self.capture and not self.capture_acknowledged),
-            "close_blink": self.close_mode == "only",
+            "blink": self.menu == "clock" or bool(not parked and self.capture and not self.capture_acknowledged),
+            "close_blink": not parked and self.close_mode == "only",
             "scan_scroll": display == "SCAN",
             "scan_active": display == "SCAN" and tune_hz is not None,
             "search_active": bool(tune_hz and self.activity == "search" and not self.hold
                                   and not self.capture and not self.received_signal and not self.menu
                                   and self.notice_until <= now),
-            "search_full": self.activity == "search" and self.full_search,
-            "backlight": self.power or self.menu in ("clock", "plan") or now < self.clock_light_until,
-            "volume": self.volume,
-            "muted": self.muted,
+            "search_full": not parked and self.activity == "search" and self.full_search,
+            "backlight": backlight,
+            "volume": 0.0 if parked else self.volume,
+            "muted": self.muted and not parked,
             "squelch": self.squelch,
-            "power": self.power,
-            "can_tune": self.power and not self.menu,
+            "power": power,
+            "can_tune": power and not self.menu,
             "tune_hz": tune_hz,
             "modulation": channel.modulation if channel else "FM",
             "favorites": self._favorite_entries(),
+            "dab_favorites": [entry.copy() if entry else None for entry in self.dab_favorites],
+            "dab_station_count": sum(self.dab_service_counts.values()),
             "favorite_names": self.favorite_names.copy(),
             "active_favorite": active_favorite,
-            "rds_enabled": self.rds_enabled,
+            "rds_enabled": self.rds_enabled and not parked,
             "squelch_db": self.squelch_db,
-            "close_probe": list(self.probe_request) if self.probe_request else None,
-            "audio_open": self.audio_gate_open and not self.muted,
+            "close_probe": list(self.probe_request) if not parked and self.probe_request else None,
+            "audio_open": power and self.audio_gate_open and not self.muted,
             "tone": dict(self.tone),
         }

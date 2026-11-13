@@ -594,8 +594,8 @@ class Receiver:
         return {(hz, mode): self._watch_level(spectrum, hz - self._center, mode)
                 for hz, mode in covered}
 
-    def watch_probe(self, target):
-        """Check one remote channel, then restore the previous audio capture window."""
+    def watch_probe(self, target, *, restore=True):
+        """Check one channel, optionally leaving the capture window on it."""
         hz, mode = target
         if mode not in WATCH_HALF_WIDTH or not 100_000 <= hz <= TUNER_LIMIT:
             return None
@@ -603,13 +603,15 @@ class Receiver:
         center = _center_for_frequency(hz, direct)
         previous = self._center, self._direct
         previous_gain = self._gain
+        if not restore:
+            self._tuning = self._prepared = self._watch_iq = None
         try:
             self._set_center(center, direct)
             _, raw = self._read_iq()  # Stream startup has already discarded settling samples.
             spectrum = self._watch_spectrum(_decode_iq(raw))
             return self._watch_level(spectrum, hz - center, mode)
         finally:
-            if self._tuning is not None and previous[0] is not None:
+            if restore and self._tuning is not None and previous[0] is not None:
                 self._set_center(*previous, restore_gain=previous_gain)
 
     def _probe_peak(self, iq, center, low, high):

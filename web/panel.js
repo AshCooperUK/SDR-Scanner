@@ -8,6 +8,7 @@ const display = document.querySelector("#display");
 const channel = document.querySelector("#channel");
 const legends = document.querySelectorAll("[data-lcd]");
 const rdsToggle = document.querySelector("#rds-toggle");
+const dabToggle = document.querySelector("#dab-toggle");
 const watchToggle = document.querySelector("#watch-toggle");
 const recordToggle = document.querySelector("#record-toggle");
 const playLast = document.querySelector("#play-last");
@@ -19,7 +20,7 @@ const recordFolderStatus = document.querySelector("#record-folder-status");
 const recordFolderUp = document.querySelector("#record-folder-up");
 const recordFolderOpen = document.querySelector("#record-folder-open");
 const recordFolderSelect = document.querySelector("#record-folder-select");
-const settings = document.querySelectorAll("[data-setting]");
+const settings = document.querySelectorAll('[data-setting]:not([data-setting="dab"])');
 const rdsReadout = document.querySelector("#rds-readout");
 const favoriteNameEditor = document.querySelector("#favorite-name");
 const muteKey = document.querySelector('[data-key="mute"]');
@@ -40,7 +41,7 @@ const favorites = Array.from({ length: 24 }, (_, index) => {
   return button;
 });
 document.querySelector("#favorite-bank").append(...favorites);
-const keys = [...document.querySelectorAll("[data-key]"), ...favorites];
+const keys = [...document.querySelectorAll("[data-key]"), ...favorites, dabToggle];
 const dials = new Map();
 const presses = new Map();
 const audioRate = 24000;
@@ -50,6 +51,8 @@ const wheelQuietPeriod = 110;
 const wheelPixelThreshold = 48;
 const wheelDetentPixels = 80;
 const wheelDetentInterval = 32;
+const frequencyReadout = /^[0-9]{1,4}\.[0-9]{1,6}$/;
+let scannerSession = newScannerSession();
 
 const segmentMap = {
   "0": "abcdef", "1": "bc", "2": "abdeg", "3": "abcdg", "4": "bcfg",
@@ -71,6 +74,28 @@ const legendAliases = {
   "DOWN": "▼",
 };
 
+const legendNames = {
+  PVT: "Private",
+  FAV: "Favourites",
+  PMR: "PMR 446",
+  AIR: "Airband",
+  MRN: "Marine",
+  CB: "CB Radio",
+  AM: "AM",
+  NFM: "Narrow FM",
+  WFM: "Wide FM",
+  DAB: "DAB",
+  CH: "Channel",
+  CLOSE: "Close Call",
+  HOLD: "Hold",
+  SCAN: "Scan",
+  SEARCH: "Search",
+  "▲": "Search Up",
+  "▼": "Search Down",
+  T: "Temporary Lockout",
+  "L/O": "Lockout",
+};
+
 const controlHelp = {
   hold: "Pause or resume scanning on the current frequency.",
   up: "Hold the next saved favourite in FAV mode. Elsewhere, step or search up.",
@@ -88,9 +113,10 @@ const controlHelp = {
   prog: "Program a memory. Hold to toggle Program Lock.",
   squelch: "Set how strong a signal must be to open audio. Scroll for 0.5 dB steps.",
   volume: "Click to switch between radio and clock. Drag or scroll to adjust volume.",
-  rds: "Toggle station name and text from broadcast FM stations that send RDS.",
-  watch: "Watch F01–F24 for signals above squelch. A flashing amber LED marks activity.",
-  record: "Tap to arm or stop recording. Right-click to choose a folder. Hold to delete recordings for the tuned frequency.",
+  rds: "Toggle station names and text from FM RDS and DAB.",
+  dab: "Tap to switch between DAB and analogue. Hold to rescan for local DAB stations.",
+  watch: "Tap to watch F01–F24. Hold to enter or leave dedicated monitoring. A flashing amber LED marks activity.",
+  record: "Tap to arm or stop recording. Right-click to choose a folder. Hold to delete recordings for the tuned station or frequency.",
   "play-last": "Loop the latest saved recording. Tap again to return to live audio.",
 };
 
@@ -98,6 +124,8 @@ let state = { display: "", power: false, volume: 0, squelch: 0, backlight: false
 let actionTail = Promise.resolve();
 let pendingActions = 0;
 let actionVersion = 0;
+let pageActive = true;
+let awaitingState = false;
 let frequencyEntry = "";
 let editingFavorite = 0;
 let wheelGesture;
@@ -155,6 +183,18 @@ function canTune() {
   return state.can_tune ?? state.power;
 }
 
+function newScannerSession() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)),
+    byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function sessionUrl(path, radioId) {
+  const url = new URL(path, window.location.href);
+  url.searchParams.set("session", scannerSession);
+  if (Number.isInteger(radioId)) url.searchParams.set("radio", String(radioId));
+  return url.pathname + url.search;
+}
+
 function formatMHz(hz) {
   return `${(hz / 1000000).toFixed(6).replace(/0{1,2}$/, "")} MHz`;
 }
@@ -176,31 +216,49 @@ function signalDescription(next) {
 
 function tooltipMessage(target) {
   if (target === signalMeter) return signalDescription(state);
+  const legend = target.dataset.lcd;
+  if (legend !== undefined) {
+    if (!target.classList.contains("is-visible")) return "";
+    return legendNames[legend === "NFM" ? target.textContent : legend] ?? "";
+  }
   if (target === lcd) {
     if (frequencyEntry || editingFavorite) return "";
-    if (Number.isInteger(state.tune_hz) && (state.scan_active || state.search_active)) {
-      return formatMHz(state.tune_hz);
+    const watched = state.watch_only && state.watch_channel;
+    if (Number.isInteger(watched?.slot) && Number.isInteger(watched?.hz)) {
+      return `F${String(watched.slot).padStart(2, "0")} · ${formatMHz(watched.hz)}`;
     }
-    return rdsMessage;
+    const frequency = Number.isInteger(state.tune_hz) ? formatMHz(state.tune_hz) : "";
+    return [frequency, rdsMessage].filter(Boolean).join(" · ");
   }
   if (target.dataset.favorite !== undefined) {
     const index = Number(target.dataset.favorite) - 1;
-    const favorite = state.favorites?.[index];
-    const name = state.favorite_names?.[index];
-    const use = favorite ? `${formatMHz(favorite.hz)} · Tap to recall or hold to replace.`
-      : "Hold to save the tuned frequency.";
+    const dabFavorite = state.dab_favorites?.[index];
+    const favorite = dabFavorite ?? state.favorites?.[index];
+    const name = state.favorite_names?.[index] || dabFavorite?.name;
+    const mode = dabFavorite ? ` · DAB ${dabFavorite.block}` : "";
+    const saveHint = state.dab_enabled ? "Hold to save the selected DAB station." : "Hold to save the tuned frequency.";
+    const use = favorite ? `${formatMHz(favorite.hz)}${mode} · Tap to recall or hold to replace.` : saveHint;
     const watching = state.watch_active?.includes(index + 1) ? "WATCH detected a signal." : "";
     return [name, use, "Right-click to name.", watching].filter(Boolean).join(" · ");
   }
   const control = target.dataset.setting ?? target.dataset.key ?? target.dataset.knob;
+  if (control === "squelch" && Number.isFinite(state.squelch_db)) {
+    const level = state.squelch === 0 ? "Squelch open." : `Squelch threshold ${state.squelch_db.toFixed(1)} dBFS.`;
+    return `${level} ${controlHelp.squelch}`;
+  }
   if (control === "record") {
     return [controlHelp.record, state.record_message].filter(Boolean).join(" · ");
   }
   if (control === "play-last") {
     return [controlHelp[control], replayMessage].filter(Boolean).join(" · ");
   }
+  if (control === "dab") {
+    const stations = state.dab_station_count ?? 0;
+    const count = `${stations} DAB ${stations === 1 ? "station" : "stations"} discovered.`;
+    return `${count} ${state.dab_error || controlHelp.dab}`;
+  }
   if (control === "watch" && state.watch_receiver) {
-    const receiver = state.watch_receiver === "secondary" ? "Using the second SDR." : "Using the main SDR.";
+    const receiver = state.watch_receiver === "secondary" ? "Using a spare SDR." : "Using this panel’s SDR.";
     return controlHelp.watch + " " + receiver;
   }
   return controlHelp[control] ?? "";
@@ -237,7 +295,7 @@ function positionTooltip() {
   tooltip.style.top = `${Math.max(8, Math.min(innerHeight - height - 8, top < 8 ? anchor.bottom + 8 : top))}px`;
 }
 
-for (const target of [lcd, signalMeter, ...keys, ...document.querySelectorAll("[data-knob]"), ...settings]) {
+for (const target of [lcd, signalMeter, ...legends, ...keys, ...document.querySelectorAll("[data-knob]"), ...settings]) {
   target.addEventListener("pointerenter", (event) => {
     if (event.pointerType === "touch") return;
     hoveredTooltipTarget = target;
@@ -245,7 +303,8 @@ for (const target of [lcd, signalMeter, ...keys, ...document.querySelectorAll("[
   });
   target.addEventListener("pointerleave", (event) => {
     if (hoveredTooltipTarget === target) {
-      hoveredTooltipTarget = target === signalMeter && lcd.contains(event.relatedTarget) ? lcd : undefined;
+      const staysInLcd = target !== lcd && lcd.contains(target) && lcd.contains(event.relatedTarget);
+      hoveredTooltipTarget = staysInLcd ? lcd : undefined;
     }
     updateTooltip();
   });
@@ -306,6 +365,7 @@ function tunedFavoriteName(next) {
   const names = next.favorite_names;
   if (!names || !Number.isInteger(next.tune_hz)) return "";
   if (Number.isInteger(next.active_favorite)) return names[next.active_favorite - 1] ?? "";
+  if (next.dab_enabled) return "";
   const match = next.favorites?.findIndex((entry, index) => entry?.hz === next.tune_hz && names[index]);
   return names[match] ?? "";
 }
@@ -317,18 +377,45 @@ function renderRds(next, entering) {
   const pi = Number.isInteger(rds?.pi) ? rds.pi.toString(16).toUpperCase().padStart(4, "0") : rds?.pi;
   const station = favoriteName || rds?.ps?.trim() || (pi && !rds.text ? `PI ${pi}` : "");
   const text = rds?.text?.trim() ?? "";
-  const nowPlaying = text && (/^now playing\b/i.test(text) ? text : `Now Playing: ${text}`);
-  rdsMessage = [station, nowPlaying].filter(Boolean).join(" · ");
+  const radioText = text && (next.dab_enabled || /^now playing\b/i.test(text) ? text : `Now Playing: ${text}`);
+  rdsMessage = [station, radioText].filter(Boolean).join(" · ");
   rdsReadout.hidden = !rdsMessage;
   rdsToggle.setAttribute("aria-pressed", String(Boolean(next.rds_enabled)));
   showStation(station);
-  showRadioText(nowPlaying);
+  showRadioText(radioText);
+}
+
+function resetRadioInteraction() {
+  disconnectAudio();
+  if (replayRequest) stopReplay();
+  replayMessage = "";
+  lastToneId = undefined;
+  frequencyEntry = "";
+  editingFavorite = 0;
+  favoriteNameEditor.hidden = true;
+  if (recordFolderDialog.open) recordFolderDialog.close();
+  recordingDirectory = undefined;
+  folderRequest += 1;
+  wheelGesture = undefined;
+  clearTimeout(lockTimer);
+  lockTimer = undefined;
+  for (const id of presses.keys()) endPress(id, true);
+  for (const dial of dials.values()) {
+    dial.drag = null;
+    dial.pending = null;
+    dial.element.classList.remove("is-dragging");
+  }
 }
 
 function render(next) {
   if (typeof next.display !== "string") return;
   const previous = state;
   state = next;
+  const parked = next.radio_id === null;
+  if (previous.radio_id !== undefined && next.radio_id !== previous.radio_id) {
+    if (Number.isInteger(previous.radio_id) && Number.isInteger(next.radio_id)) previousVolume = 0.32;
+    resetRadioInteraction();
+  }
   radio.classList.toggle("is-muted", Boolean(next.muted));
   muteKey.setAttribute("aria-pressed", String(Boolean(next.muted)));
   const measuredSignal = next.signal_meter_dbfs ?? next.signal_dbfs;
@@ -341,6 +428,7 @@ function render(next) {
   signalBars.forEach((bar, index) => bar.classList.toggle("is-visible", index < litBars));
   watchToggle.setAttribute("aria-pressed", String(Boolean(next.watch_enabled)));
   recordToggle.setAttribute("aria-pressed", String(Boolean(next.record_enabled)));
+  dabToggle.setAttribute("aria-pressed", String(Boolean(next.dab_enabled)));
   recordToggle.classList.toggle("is-recording", Boolean(next.record_active));
   if (!canTune()) frequencyEntry = "";
   const entering = frequencyEntry !== "";
@@ -356,9 +444,10 @@ function render(next) {
   }
   const visibleChannel = !entering && next.channel !== null && next.channel !== undefined;
   if (visibleChannel) active.add("CH");
+  const modeLegend = active.has("DAB") ? "DAB" : active.has("WFM") ? "WFM" : "NFM";
   for (const element of legends) {
     const name = element.dataset.lcd;
-    const indicator = name === "NFM" && active.has("WFM") ? "WFM" : name;
+    const indicator = name === "NFM" ? modeLegend : name;
     if (name === "NFM" && element.textContent !== indicator) element.textContent = indicator;
     element.classList.toggle("is-visible", active.has(indicator));
     element.classList.toggle("is-blinking",
@@ -374,16 +463,20 @@ function render(next) {
   display.classList.toggle("is-scrolling", !entering && Boolean(next.scan_scroll ?? next.display === "SCAN"));
   display.classList.toggle("is-clock", !next.power && next.display.includes(":"));
   const tunableDigits = !entering && canTune() && Number.isInteger(next.tune_hz)
-    && /^[0-9]{1,4}\.[0-9]{1,6}$/.test(readout);
+    && frequencyReadout.test(readout);
   drawDigits(display, readout, tunableDigits);
   drawDigits(channel, visibleChannel ? String(next.channel).padStart(2, "0") : "");
 
+  const dabActiveFavorites = next.dab_active_favorites ?? [next.active_favorite];
   for (const [index, button] of favorites.entries()) {
     const favorite = next.favorites?.[index];
-    const tuned = Boolean(next.power && favorite && favorite.hz === next.tune_hz);
-    button.classList.toggle("is-stored", Boolean(favorite));
+    const dabFavorite = next.dab_favorites?.[index];
+    const matching = next.dab_enabled ? dabFavorite && dabActiveFavorites.includes(index + 1)
+      : favorite && favorite.hz === next.tune_hz;
+    const tuned = Boolean(next.power && matching);
+    button.classList.toggle("is-stored", !parked && Boolean(favorite || dabFavorite));
     button.classList.toggle("is-tuned", tuned);
-    button.classList.toggle("is-watched", !tuned && Boolean(next.watch_active?.includes(index + 1)));
+    button.classList.toggle("is-watched", !parked && !tuned && Boolean(next.watch_active?.includes(index + 1)));
   }
   updateTooltip();
 
@@ -405,12 +498,15 @@ function render(next) {
 
 async function poll() {
   try {
-    if (!pendingActions) {
+    if (pageActive && !pendingActions) {
       const startedAt = actionVersion;
-      const response = await fetch("/api/state", { cache: "no-store" });
+      const response = await fetch(sessionUrl("/api/state"), { cache: "no-store" });
       if (response.ok) {
         const next = await response.json();
-        if (startedAt === actionVersion && !pendingActions) render(next);
+        if (pageActive && startedAt === actionVersion && !pendingActions && typeof next.display === "string") {
+          awaitingState = false;
+          render(next);
+        }
       }
     }
   } catch {
@@ -421,18 +517,23 @@ async function poll() {
 }
 
 function postAction(action) {
+  const session = scannerSession;
+  const radioId = state.radio_id;
   pendingActions += 1;
   actionVersion += 1;
   actionTail = actionTail.catch(() => {}).then(async () => {
-    const response = await fetch("/api/action", {
+    if (!pageActive || awaitingState || session !== scannerSession
+        || (radioId !== undefined && state.radio_id !== radioId)) return;
+    const response = await fetch(sessionUrl("/api/action", radioId), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(action),
     });
-    if (response.ok) {
+    if (pageActive && session === scannerSession && (response.ok || response.status === 409)) {
       const next = await response.json();
+      if (!pageActive || session !== scannerSession) return;
       render(next);
-      return next;
+      if (response.ok) return next;
     }
   }).finally(() => {
     pendingActions -= 1;
@@ -542,6 +643,46 @@ favoriteNameEditor.addEventListener("keydown", (event) => {
 lcd.addEventListener("click", (event) => {
   if (event.target !== favoriteNameEditor) focusLCD();
 });
+
+async function copyFrequency(hz) {
+  const frequency = `${hz / 1_000_000} MHz`;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(frequency);
+      return;
+    } catch {
+      // The browser can deny Clipboard API access even on a secure origin.
+    }
+  }
+
+  const previousFocus = document.activeElement;
+  const field = document.createElement("textarea");
+  field.value = frequency;
+  field.readOnly = true;
+  field.tabIndex = -1;
+  field.style.cssText = "position: fixed; top: 0; left: 0; opacity: 0; pointer-events: none;";
+  document.body.append(field);
+  try {
+    field.focus({ preventScroll: true });
+    field.select();
+    document.execCommand("copy");
+  } catch (error) {
+    console.debug("Could not copy the tuned frequency", error);
+  } finally {
+    field.remove();
+    previousFocus?.focus({ preventScroll: true });
+  }
+}
+
+display.addEventListener("dblclick", (event) => {
+  if (event.button !== 0 || editingFavorite || frequencyEntry || !Number.isInteger(state.tune_hz)) return;
+  const dabFrequency = state.dab_enabled && state.power && !state.scan_active && !state.dab_rescanning
+    && !state.lower?.includes("CH") && frequencyReadout.test(state.display);
+  if (display.dataset.tunable !== "true" && !dabFrequency) return;
+  event.preventDefault();
+  void copyFrequency(state.tune_hz);
+});
+
 lcd.addEventListener("wheel", (event) => {
   if (editingFavorite) return;
   // Read the units before the delta because some browsers normalize on access.
@@ -617,8 +758,11 @@ window.addEventListener("keydown", (event) => {
   }
 }, { capture: true });
 
-function sendTap({ key, favorite }) {
-  if (key === "play-last") {
+function sendTap({ key, favorite, setting }) {
+  if (setting === "dab") {
+    flushLockTap();
+    void postAction({ setting });
+  } else if (key === "play-last") {
     void toggleReplay();
   } else if (key === "record") {
     flushLockTap();
@@ -644,26 +788,33 @@ function isArrow(key) {
 
 function longPressDelay(key) {
   if (isArrow(key)) return state.power ? 1010 : 2010;
-  if (key === "band") return 850;
+  if (key === "band" || key === "watch") return 850;
   if (["lock", "close", "prog", "record"].includes(key)) return 2510;
   return null;
 }
 
 function beginPress(id, element) {
   if (presses.has(id)) return;
-  const { key, favorite } = element.dataset;
-  const press = { element, key, favorite, handled: false };
-  const recordHz = key === "record" ? state.tune_hz : null;
+  const { key, favorite, setting } = element.dataset;
+  const press = { element, key, favorite, setting, handled: false };
+  const recording = key === "record" && Number.isInteger(state.tune_hz)
+    && (!state.dab_enabled || state.dab_recording_identity)
+    ? { record: "delete", hz: state.tune_hz, ...(state.dab_enabled ? { dab: state.dab_recording_identity } : {}) }
+    : null;
   presses.set(id, press);
   element.classList.add("is-pressed");
   if (key !== "play-last") void enableAudio();
-  const delay = favorite === undefined ? longPressDelay(key) : favoriteHoldDelay;
+  const delay = setting === "dab" ? 850 : favorite === undefined ? longPressDelay(key) : favoriteHoldDelay;
   if (delay !== null) {
     press.timer = setTimeout(() => {
       press.handled = true;
       flushLockTap();
+      if (setting === "dab") {
+        void postAction({ setting, gesture: "long" });
+        return;
+      }
       if (key === "record") {
-        if (Number.isInteger(recordHz)) void postAction({ record: "delete", hz: recordHz });
+        if (recording) void postAction(recording);
         return;
       }
       const repeat = () => {
@@ -701,6 +852,17 @@ for (const button of keys) {
   button.addEventListener("pointerup", (event) => endPress(event.pointerId));
   button.addEventListener("pointercancel", (event) => endPress(event.pointerId, true));
   button.addEventListener("lostpointercapture", (event) => endPress(event.pointerId, true));
+  if (button.dataset.favorite !== undefined) {
+    button.addEventListener("mousedown", (event) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      flushLockTap();
+      void postAction({ favorite: Number(button.dataset.favorite), gesture: "lock" });
+    });
+    button.addEventListener("auxclick", (event) => {
+      if (event.button === 1) event.preventDefault();
+    });
+  }
   button.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     if (event.pointerType === "touch" || event.sourceCapabilities?.firesTouchEvents) return;
@@ -876,7 +1038,7 @@ for (const element of document.querySelectorAll("[data-knob]")) {
     if (!event.deltaY) return;
     void enableAudio();
     const step = dial.name === "squelch" ? 0.005 : 0.04;
-    changeDial(dial, dial.value - Math.sign(event.deltaY) * step);
+    changeDial(dial, dial.value + Math.sign(event.deltaY) * step);
   }, { passive: false });
   element.addEventListener("keydown", (event) => {
     let value;
@@ -961,22 +1123,25 @@ function stopReplay(message = "") {
   lastRecording.load();
   playLast.setAttribute("aria-pressed", "false");
   updateTooltip();
-  if (state.power) void enableAudio();
+  if (pageActive && state.power) void enableAudio();
 }
 
 async function toggleReplay() {
+  if (awaitingState) return;
   if (replayRequest) {
     stopReplay();
     return;
   }
   const request = new AbortController();
+  const radioId = state.radio_id;
   replayRequest = request;
   replayMessage = "Opening the latest recording…";
   playLast.setAttribute("aria-pressed", "true");
   updateTooltip();
   updateAudio();
   try {
-    const response = await fetch("/api/recordings/last", { cache: "no-store", signal: request.signal });
+    const response = await fetch(sessionUrl("/api/recordings/last", radioId),
+      { cache: "no-store", signal: request.signal });
     if (response.status === 404) {
       if (replayRequest === request) stopReplay("No saved recordings in the current folder.");
       return;
@@ -987,7 +1152,7 @@ async function toggleReplay() {
     if (typeof clip.url !== "string" || !clip.url.startsWith("/api/recordings/")) {
       throw new Error("Recording URL unavailable");
     }
-    lastRecording.src = clip.url;
+    lastRecording.src = sessionUrl(clip.url, radioId);
     await lastRecording.play();
     if (replayRequest === request) {
       replayMessage = clip.label || "Playing the latest recording.";
@@ -1002,9 +1167,17 @@ lastRecording.addEventListener("error", () => {
   if (replayRequest && lastRecording.error) stopReplay("Could not play the recording.");
 });
 
+function disconnectAudio() {
+  audioStream?.abort();
+  audioStream = undefined;
+  clearTimeout(audioRetry);
+  audioRetry = undefined;
+  pcmOutput?.reset();
+}
+
 function updateAudio(previous = state) {
   if (!pcmOutput) return;
-  const live = state.power && !replayRequest;
+  const live = pageActive && !awaitingState && state.power && !state.watch_only && !replayRequest;
   const gain = live && !state.muted ? state.volume ** 1.45 : 0;
   volumeNode.gain.setTargetAtTime(gain, audioContext.currentTime, 0.015);
   if (state.tune_hz !== previous.tune_hz || state.muted !== previous.muted
@@ -1014,10 +1187,7 @@ function updateAudio(previous = state) {
   if (live && audioContext.state === "running") {
     if (!audioStream && !audioRetry) void streamAudio();
   } else {
-    audioStream?.abort();
-    clearTimeout(audioRetry);
-    audioRetry = undefined;
-    pcmOutput.reset();
+    disconnectAudio();
   }
 }
 
@@ -1026,7 +1196,7 @@ async function streamAudio() {
   audioStream = controller;
   let trailing = -1;
   try {
-    const response = await fetch("/audio", { cache: "no-store", signal: controller.signal });
+    const response = await fetch(sessionUrl("/audio"), { cache: "no-store", signal: controller.signal });
     if (!response.ok || !response.body) throw new Error("Audio stream unavailable");
     const reader = response.body.getReader();
     for (;;) {
@@ -1049,12 +1219,14 @@ async function streamAudio() {
   } catch (error) {
     if (error.name !== "AbortError") console.debug(error.message);
   } finally {
-    if (audioStream === controller) audioStream = undefined;
-    if (state.power && !replayRequest && audioContext.state === "running") {
-      audioRetry = setTimeout(() => {
-        audioRetry = undefined;
-        updateAudio();
-      }, controller.signal.aborted ? 0 : 1000);
+    if (audioStream === controller) {
+      audioStream = undefined;
+      if (pageActive && state.power && !state.watch_only && !replayRequest && audioContext.state === "running") {
+        audioRetry = setTimeout(() => {
+          audioRetry = undefined;
+          updateAudio();
+        }, 1000);
+      }
     }
   }
 }
@@ -1083,9 +1255,17 @@ function playTone({ count, kind }) {
 }
 
 window.addEventListener("pagehide", () => {
-  replayRequest?.abort();
-  lastRecording.pause();
-  audioStream?.abort();
-  clearTimeout(audioRetry);
+  pageActive = false;
+  if (replayRequest) stopReplay();
+  disconnectAudio();
+  void fetch(sessionUrl("/api/session/leave"), { method: "POST", keepalive: true }).catch(() => {});
+});
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) {
+    scannerSession = newScannerSession();
+    actionVersion += 1;
+    awaitingState = true;
+  }
+  pageActive = true;
 });
 void poll();

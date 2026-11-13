@@ -8,21 +8,28 @@ import sys
 from array import array
 from contextlib import ExitStack, suppress
 from ctypes.util import find_library
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import BinaryIO
+from unicodedata import category, normalize
 from uuid import uuid4
 
 from recording_tones import ToneOnlyClip
 
 
 SAMPLE_RATE = 24_000
+MIN_CLIP_PCM_BYTES = 2 * SAMPLE_RATE * 2  # Two seconds of 16-bit mono PCM.
 RECORDINGS_FOLDER = "Recorded Audio"
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 CLIP_NAME = re.compile(r"[0-9]{6}-[0-9]{8}(?:-[0-9]+)?\.mp3")
+DAB_CLIP_NAME = re.compile(r"[0-9]{6}-[0-9]{6}(?:-[0-9]+)?\.mp3")
 PARTIAL_NAME = re.compile(r"\.scanner-recording-[0-9a-f]{32}\.part")
+FREQUENCY_NAME = re.compile(r"([0-9]{1,4})\.([0-9]{4,6})mhz")
+STATION_NAME_BYTES = 120
+STATION_FORBIDDEN = frozenset('/\\<>:"|?*')
+WINDOWS_DEVICE = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.IGNORECASE)
 
 
 class RecordingError(RuntimeError):
@@ -120,6 +127,24 @@ def _frequency_folder(hz):
     return f"{whole}.{fraction}mhz"
 
 
+def _station_folder(name):
+    if not isinstance(name, str):
+        return ""
+    name = "".join(" " if character in STATION_FORBIDDEN or category(character).startswith("C")
+                   else character for character in normalize("NFC", name))
+    name = " ".join(name.split()).strip(" .")
+    if (WINDOWS_DEVICE.match(name) or FREQUENCY_NAME.fullmatch(name.lower())
+            or name.casefold() == RECORDINGS_FOLDER.casefold()):
+        name = "_" + name
+    return name.encode("utf-8")[:STATION_NAME_BYTES].decode("utf-8", errors="ignore").rstrip(" .")
+
+
+def _recording_folder(hz, station_name):
+    frequency = _frequency_folder(hz)
+    station = _station_folder(station_name)
+    return (station, True) if station else (frequency, False)
+
+
 def _open_directory(path, *, create=False):
     # Walk with directory descriptors so symlinks and concurrent path replacement
     # cannot redirect the next operation outside the selected directory tree.
@@ -173,6 +198,15 @@ def _publish(fd, partial, filename):
 
 
 @dataclass
+class _PendingClip:
+    hz: int
+    path: Path
+    skip_tone_only: bool
+    dab: bool
+    pcm: bytearray = field(default_factory=bytearray)
+
+
+@dataclass
 class _Clip:
     hz: int
     path: Path
@@ -182,6 +216,7 @@ class _Clip:
     encoder: _Encoder
     cleanup: ExitStack
     tone_analysis: ToneOnlyClip | None
+    dab: bool
 
 
 class Recorder:
@@ -189,6 +224,7 @@ class Recorder:
 
     def __init__(self, parent):
         self._parent = _recording_parent(parent)
+        self._pending = None
         self._clip = None
 
     @property
@@ -201,11 +237,17 @@ class Recorder:
 
     @property
     def active_hz(self):
-        return self._clip.hz if self._clip else None
+        clip = self._active_clip
+        return clip.hz if clip else None
 
     @property
     def active_path(self):
-        return self._clip.path if self._clip else None
+        clip = self._active_clip
+        return clip.path if clip else None
+
+    @property
+    def _active_clip(self):
+        return self._clip or self._pending
 
     @staticmethod
     def check_available():
@@ -223,14 +265,12 @@ class Recorder:
             self.finish()
             self._parent = parent
 
-    def _start(self, hz, skip_tone_only):
-        folder = self.root / _frequency_folder(hz)
-        timestamp = datetime.now().strftime("%H%M%S-%d%m%Y")
+    def _start(self, pending):
         partial = f".scanner-recording-{uuid4().hex}.part"
         with ExitStack() as cleanup:
             encoder = _Encoder()
             cleanup.callback(encoder.close)
-            directory = _open_directory(folder, create=True)
+            directory = _open_directory(pending.path.parent, create=True)
             cleanup.callback(os.close, directory)
             fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          0o600, dir_fd=directory)
@@ -241,20 +281,39 @@ class Recorder:
                 os.close(fd)
                 raise
             cleanup.callback(_close_stream, stream)
-            analysis = ToneOnlyClip(SAMPLE_RATE) if skip_tone_only else None
-            return _Clip(hz, folder / f"{timestamp}.mp3", directory, partial, stream,
-                         encoder, cleanup.pop_all(), analysis)
+            analysis = ToneOnlyClip(SAMPLE_RATE) if pending.skip_tone_only else None
+            return _Clip(pending.hz, pending.path, directory, partial, stream,
+                         encoder, cleanup.pop_all(), analysis, pending.dab)
 
-    def feed(self, hz, pcm, *, skip_tone_only=False):
+    def feed(self, hz, pcm, *, skip_tone_only=False, station_name=None):
         if not pcm:
             return
         if len(pcm) % 2:
             raise RecordingError("Received an incomplete audio sample.")
-        if self._clip and (self.active_hz != hz or bool(self._clip.tone_analysis) != skip_tone_only):
+        name, dab = _recording_folder(hz, station_name)
+        folder = self.root / name
+        active = self._active_clip
+        active_tone_filter = None
+        if self._clip:
+            active_tone_filter = self._clip.tone_analysis is not None
+        elif self._pending:
+            active_tone_filter = self._pending.skip_tone_only
+        if active and (active.hz != hz or active.path.parent != folder or active.dab != dab
+                       or active_tone_filter != skip_tone_only):
             self.finish()
         try:
             if self._clip is None:
-                self._clip = self._start(hz, skip_tone_only)
+                if self._pending is None:
+                    timestamp = datetime.now().strftime("%H%M%S-%d%m%y" if dab else "%H%M%S-%d%m%Y")
+                    self._pending = _PendingClip(hz, folder / f"{timestamp}.mp3", skip_tone_only, dab)
+                pending = self._pending
+                if len(pending.pcm) + len(pcm) < MIN_CLIP_PCM_BYTES:
+                    pending.pcm.extend(pcm)
+                    return
+                self._pending = None
+                self._clip = self._start(pending)
+                if pending.pcm:
+                    pcm = pending.pcm + pcm
             clip = self._clip
             if clip.tone_analysis:
                 clip.tone_analysis.observe(pcm)
@@ -268,6 +327,7 @@ class Recorder:
             raise
 
     def finish(self):
+        self._pending = None
         clip, self._clip = self._clip, None
         if clip is None:
             return None
@@ -292,9 +352,11 @@ class Recorder:
         except OSError as exc:
             raise RecordingError(f"Could not save the MP3 clip ({exc.strerror}).") from exc
 
-    def clear_frequency(self, hz):
-        name = _frequency_folder(hz)
-        if self.active_hz == hz:
+    def clear_frequency(self, hz, *, station_name=None):
+        name, dab = _recording_folder(hz, station_name)
+        clip_name = DAB_CLIP_NAME if dab else CLIP_NAME
+        active = self._active_clip
+        if active and active.path.parent.name == name and active.dab == dab:
             self.finish()
         removed = 0
         try:
@@ -308,7 +370,7 @@ class Recorder:
                     return 0
                 with os.scandir(folder) as entries:
                     for entry in entries:
-                        clip = CLIP_NAME.fullmatch(entry.name)
+                        clip = clip_name.fullmatch(entry.name)
                         if (clip or PARTIAL_NAME.fullmatch(entry.name)) and entry.is_file(follow_symlinks=False):
                             try:
                                 os.unlink(entry.name, dir_fd=folder)

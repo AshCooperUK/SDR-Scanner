@@ -13,18 +13,23 @@ import socket
 import stat
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 
+from bandplan import BANK_KEYS
+from dab import BAND_III, SERVICE_ID, DabError, DabReceiver
 from folder_picker import browse_folders, select_folder
+from radio_pool import RadioPool
 from receiver import SAMPLE_RATE, Receiver, ReceiverError
 from recording import Recorder, RecordingError
 from replay import RECORDINGS_URL, byte_range, latest_clip, open_clip
 from scanner import (
     FAVORITE_COUNT, FINE_STEP_HZ, KEY_ALIASES, KEYS, MANUAL_MAX_HZ, MANUAL_MIN_HZ,
-    Scanner, normalize_favorite_name,
+    Scanner, format_frequency, normalize_favorite_name,
 )
 
 
@@ -33,14 +38,21 @@ ASSETS = frozenset({"index.html", "panel.css", "panel.js", "panel.png", "field-b
                     "pcm-buffer.js", "pcm-worklet.js", "ashcooperuk-avatar.png"})
 SILENCE = bytes(960)
 FREQUENCY_ENTRY = re.compile(r"[0-9]{1,4}(?:\.[0-9]{0,6})?")
+SESSION_QUERY = re.compile(r"session=([0-9a-f]{32})(?:&radio=([1-9][0-9]{0,5}))?")
 WHEEL_STEPS_HZ = frozenset(10 ** position for position in range(10))
 WATCH_INTERVAL = 0.12
 WATCH_LISTENING_INTERVAL = 0.85
 WATCH_IDLE_INTERVAL = 0.30
 WATCH_ACTIVITY_SECONDS = 1.4
+WATCH_ONLY_DWELL = 0.5
+WATCH_ONLY_STALE_SECONDS = 2 * FAVORITE_COUNT * WATCH_ONLY_DWELL
 WATCH_RDS_GRACE = 4.2
 WATCH_RECEIVER_RETRY = 2.0
 WATCH_SECONDARY_START_GRACE = 0.5
+WATCH_EXIT_KEYS = {*BANK_KEYS, "band", "close", "down", "scan", "search", "up"}
+DAB_CONTROLS = {"up", "down", "search", "scan"}
+DAB_EXIT_KEYS = (set(BANK_KEYS) - {"fav"}) | {"band", "close", "watch"}
+DAB_FREQUENCIES = dict(BAND_III)
 WFM_NOISE_MARGIN_DB = 1.5
 TUNING_LIMITS_HZ = {"AM": (350, 3_000), "FM": (900, 4_200), "WFM": (8_000, 40_000)}
 LOG = logging.getLogger("scanner")
@@ -117,6 +129,20 @@ def usable_signal_level(level, modulation, offset, rf_excess):
     return level
 
 
+@dataclass(frozen=True)
+class RecordingTarget:
+    hz: int
+    modulation: str
+    sid: str | None = None
+    station_name: str | None = None
+
+    @property
+    def dab_identity(self):
+        if self.sid is not None:
+            return {"sid": self.sid, "name": self.station_name}
+        return None
+
+
 class RecordingRuntime:
     """Keep MP3 encoding and file operations off the receiver thread."""
 
@@ -180,7 +206,7 @@ class RecordingRuntime:
             self._finish()
             self.message = "Recording stopped because disk writes fell behind."
 
-    def act(self, action, tuned):
+    def act(self, action, tuned, *, audio_open):
         if self.stopped.is_set():
             return
         command = action["record"]
@@ -198,16 +224,18 @@ class RecordingRuntime:
             self.message = "Finish choosing a folder before clearing recordings."
         elif tuned is None:
             self.message = "Tune to the frequency you want to clear."
-        elif action["hz"] != tuned[0]:
+        elif action["hz"] != tuned.hz:
             self.message = "Frequency changed. Hold RECORD again to clear the tuned frequency."
+        elif action.get("dab") != tuned.dab_identity:
+            self.message = "Tuning changed. Hold RECORD again to clear the current recordings."
         else:
             self._finish()
-            if self.enabled and self.scanner.audio_gate_open:
+            if self.enabled and audio_open:
                 self._suppressed = tuned
-            self._enqueue("delete", tuned[0])
-            self.message = "Clearing recordings for the tuned frequency."
+            self._enqueue("delete", tuned)
+            self.message = "Clearing recordings for the current station or frequency."
 
-    def folder_action(self, action):
+    def folder_action(self, action, *, parked=False):
         if action["record"] == "browse":
             with self.lock:
                 folder = Path(action.get("path", self.parent))
@@ -222,6 +250,8 @@ class RecordingRuntime:
         try:
             selected = select_folder(Path(action["path"]))
             with self.lock:
+                if parked and self.scanner.power:
+                    return None
                 if self.stopped.is_set():
                     raise ValueError("The scanner is stopping.")
                 if self.choosing:
@@ -236,6 +266,8 @@ class RecordingRuntime:
             return {"record_selected": True}
         except (OSError, ValueError) as error:
             with self.lock:
+                if parked and self.scanner.power:
+                    return None
                 self.message = str(error)
             return {"record_selected": False, "record_browser": {"error": str(error)}}
 
@@ -279,21 +311,23 @@ class RecordingRuntime:
                     self._pcm_slots.release()
                     if epoch == failed_epoch:
                         continue
-                    _, (hz, modulation), pcm = args
-                    self.recorder.feed(hz, pcm, skip_tone_only=(modulation in ("AM", "FM")))
+                    _, tuned, pcm = args
+                    self.recorder.feed(tuned.hz, pcm, skip_tone_only=tuned.modulation in ("AM", "FM"),
+                                       station_name=tuned.station_name)
                     with self.lock:
-                        if epoch == self._epoch and self._capture and self._capture[0] == hz:
+                        if epoch == self._epoch and self._capture == tuned:
                             self._writing = True
                 elif command == "finish":
                     self.recorder.finish()
                 elif command == "folder":
                     self._set_parent(*args)
                 elif command == "delete":
-                    hz = args[0]
-                    count = self.recorder.clear_frequency(hz)
+                    tuned = args[0]
+                    count = self.recorder.clear_frequency(tuned.hz, station_name=tuned.station_name)
                     with self.lock:
                         files = "recording" if count == 1 else "recordings"
-                        self.message = f"Cleared {count} {files} at {hz / 1_000_000:.6f} MHz."
+                        label = tuned.station_name or f"{tuned.hz / 1_000_000:.6f} MHz"
+                        self.message = f"Cleared {count} {files} for {label}."
             except (RecordingError, OSError) as error:
                 LOG.warning("Recording %s failed: %s", command, error)
                 with self.lock:
@@ -319,25 +353,49 @@ class RecordingRuntime:
             self._worker.join(timeout=3)
 
 
+@dataclass
+class WatchDwell:
+    slot: int
+    signal: tuple[int, str]
+    until: float
+    sampled: bool = False
+    hit: bool = False
+
+
 class ScannerRuntime:
-    def __init__(self, state_path):
+    def __init__(self, state_path, *, receiver_index=0, watch_available=None):
         self.scanner = Scanner(state_path)
+        self.receiver_index = receiver_index
         self.lock = threading.RLock()
         self.wake = threading.Event()
         self.stopped = threading.Event()
         self.recording = RecordingRuntime(self.scanner, self.lock, self.stopped)
         self.clients = set()
         self.receiver_status = "standby"
+        self._receiver_reopen = False
         self.signal = None
         self.rds = None
         self.rds_target = None
+        self.dab_enabled = False
+        self._dab_status = {}
+        self._dab_commands = deque(maxlen=12)
+        self._dab_recall = None
+        self._dab_favorite_slot = None
+        self._dab_browse_favorites = False
+        self._dab_epoch = 0
+        self._dab_save_retry_at = 0.0
         self.watch_enabled = False
+        self.watch_only = False
+        self._watch_mode_epoch = 0
+        self._watch_dwell = None
         self._watch_activity = {}
         self._watch_epoch = 0
         self._watch_cursor = 1
         self._next_watch = 0.0
         self._next_watch_probe = 0.0
         self._watch_secondary_ready = False
+        self._watch_available = watch_available
+        self._watch_index = None
         self._watch_wake = threading.Event()
         self._watch_worker = threading.Thread(target=self._run_watch_receiver, name="WATCH receiver", daemon=True)
         self.worker = threading.Thread(target=self.run, name="SDR receiver", daemon=True)
@@ -346,6 +404,12 @@ class ScannerRuntime:
         self.worker.start()
         self._watch_worker.start()
 
+    def reopen_receiver(self):
+        """Ask the tuner worker to reopen its index after USB enumeration changes."""
+        with self.lock:
+            self._receiver_reopen = True
+            self.wake.set()
+
     def _rds_for(self, state):
         if (self.rds and state["power"] and state["modulation"] == "WFM"
                 and state["rds_enabled"] and self.receiver_status == "ready"
@@ -353,88 +417,355 @@ class ScannerRuntime:
             return self.rds
         return None
 
-    def state(self):
+    def _dab_station(self):
+        status = self._dab_status
+        if status.get("sid") and not (status.get("scanning") or status.get("error")):
+            return status["block"], status["sid"]
+        return None
+
+    def _dab_favorite_slots(self, station):
+        return [slot for slot, entry in enumerate(self.scanner.dab_favorites, 1)
+                if entry and (entry["block"], entry["sid"]) == station]
+
+    def _dab_favorite_slot_for(self, matches):
+        return self._dab_favorite_slot if self._dab_favorite_slot in matches else next(iter(matches), None)
+
+    def _dab_favorite_name(self, slot):
+        names = self.scanner.favorite_names
+        return names[slot - 1] if slot and slot <= len(names) else ""
+
+    def _dab_recording_target(self):
+        station = self._dab_station()
+        if not station:
+            return None
+        name = None
+        if self.scanner.rds_enabled:
+            favorite = self._dab_favorite_slot_for(self._dab_favorite_slots(station))
+            name = self._dab_favorite_name(favorite) or self._dab_status.get("service") or None
+        return RecordingTarget(self._dab_status["hz"], "DAB", station[1], name)
+
+    def _show_dab(self, state):
+        status = self._dab_status
+        recall = self._dab_recall if status.get("recalling") or not status else None
+        hz = DAB_FREQUENCIES[recall[1]] if recall else status.get("hz")
+        error = status.get("error")
+        scanning = status.get("scanning", True) and not (recall or status.get("recalling") or error)
+        display = "Err" if error else "SCAN" if scanning else format_frequency(hz) if hz else "no Ch"
+        service, text = status.get("service", ""), status.get("text", "")
+        station = self._dab_station()
+        selected = station or (recall[1:] if recall else None)
+        matches = self._dab_favorite_slots(selected)
+        favorite = self._dab_favorite_slot_for(matches)
+        if recall and favorite and not service:
+            service = self._dab_favorite_name(favorite) or state["dab_favorites"][favorite - 1]["name"]
+        metadata = {"ps": service, "text": text} if state["rds_enabled"] and (service or text) else None
+        recording_target = self._dab_recording_target()
+        programming = self.scanner.dab_programming
+        if programming or (state["display"] in ("Pg.L", "OF Pg.L") and self.scanner.notice_until > time.monotonic()):
+            display, channel = state["display"], state["channel"]
+        else:
+            channel = favorite
+        show_favorites = favorite or self._dab_browse_favorites or self.scanner.dab_program_slot is not None
+        state.update(display=display, channel=channel, upper=["FAV", "DAB"] if show_favorites else ["DAB"],
+                     lower=["HOLD", "CH"] if programming else ["SCAN"] if scanning else [],
+                     blink_bank=None, blink=False, close_blink=False, scan_scroll=scanning and not programming,
+                     scan_active=bool(scanning and hz and not programming), search_active=False, search_full=False,
+                     tune_hz=hz, modulation="DAB", active_favorite=favorite if station else None,
+                     dab_active_favorites=matches if station else [],
+                     can_tune=False,
+                     close_probe=None, audio_open=bool(status.get("audio_open") and not state["muted"]),
+                     rds=metadata, dab_error=error, dab_rescanning=bool(status.get("rescanning")),
+                     dab_recording_identity=recording_target.dab_identity if recording_target else None)
+
+    def state(self, *, parked=False, parked_backlight=False):
         with self.lock:
-            state = self.scanner.snapshot()
-            state["receiver"] = self.receiver_status
-            current_signal = (self.signal if self.signal and self.receiver_status == "ready"
+            state = self.scanner.snapshot(parked=parked, parked_backlight=parked_backlight)
+            dab_enabled = self.dab_enabled and state["power"]
+            watch_only = self.watch_only and state["power"] and not dab_enabled
+            if watch_only:
+                state.update(display="-------", channel=None, upper=[], lower=[], blink_bank=None,
+                             blink=False, close_blink=False, scan_scroll=False, scan_active=False,
+                             search_active=False, search_full=False, tune_hz=None, modulation="FM",
+                             active_favorite=None, close_probe=None, audio_open=False)
+            state["receiver"] = "standby" if parked else self.receiver_status
+            current_signal = (self.signal if self.signal and state["receiver"] == "ready"
                               and self.signal[0] == target(state) else None)
             state["signal_dbfs"] = current_signal[1] if current_signal else None
             state["signal_meter_dbfs"] = current_signal[2] if current_signal else None
             state["tuning_offset_hz"] = current_signal[3] if current_signal else None
             state.update(self.recording.state())
+            if parked:
+                state.update(record_enabled=False, record_active=False, record_choosing=False)
             rds = self._rds_for(state)
             state["rds"] = dict(rds) if rds else None
-            state["watch_enabled"] = self.watch_enabled
+            state["watch_enabled"] = self.watch_enabled and not parked and not dab_enabled
+            state["watch_only"] = watch_only
+            state["watch_channel"] = None
             state["watch_active"] = []
             state["watch_receiver"] = None
-            if self.watch_enabled and state["power"] and self.receiver_status == "ready":
-                state["watch_receiver"] = "secondary" if self._watch_secondary_ready else "primary"
+            if state["watch_enabled"] and state["power"] and self.receiver_status == "ready":
+                state["watch_receiver"] = "secondary" if self._watch_secondary_ready and not watch_only else "primary"
                 now, targets = time.monotonic(), self._watch_targets()
+                dwell = self._watch_dwell
+                if watch_only and dwell is not None and targets.get(dwell.slot) == dwell.signal:
+                    state["watch_channel"] = {"slot": dwell.slot, "hz": dwell.signal[0]}
                 state["watch_active"] = [slot for slot, (signal, expires) in sorted(self._watch_activity.items())
                                          if expires > now and targets.get(slot) == signal]
-            if self.receiver_status == "unavailable" and state["power"]:
+            state["dab_enabled"] = dab_enabled
+            if dab_enabled:
+                self._show_dab(state)
+            elif self.receiver_status == "unavailable" and state["power"]:
                 state["audio_open"] = False
-                if state.get("audio_expected", state["tune_hz"] is not None):
+                if watch_only or state.get("audio_expected", state["tune_hz"] is not None):
                     state["display"] = "Err"
             return state
 
-    def act(self, action):
+    def act(self, action, *, parked=False, parked_backlight=False):
         if action.get("record") in ("browse", "select"):
-            result = self.recording.folder_action(action)
-            return {**self.state(), **result}
+            result = self.recording.folder_action(action, parked=parked)
+            if result is None:
+                return None
+            return {**self.state(parked=parked, parked_backlight=parked_backlight), **result}
         with self.lock:
+            if self.stopped.is_set() or (parked and self.scanner.power):
+                return None
             before = self.scanner.snapshot()
-            watch_changed = action.get("setting") == "watch"
-            if "record" in action:
-                self.recording.act(action, target(before))
+            was_watch_only = self.watch_only
+            was_dab = self.dab_enabled
+            gesture = action.get("gesture", "tap")
+            key = action.get("key")
+            key = KEY_ALIASES.get(key, key)
+            favorite = action.get("favorite")
+            recall = favorite is not None and "name" not in action and gesture == "tap"
+            if self.dab_enabled and (key in DAB_EXIT_KEYS
+                    or action.get("setting") == "watch" or "tune" in action
+                    or recall and not self.scanner.dab_programming and self.scanner.memories["FAV"][favorite - 1]):
+                self._set_dab(False)
+            changes_lockout = key == "lock" or (favorite is not None and gesture == "lock")
+            previous_targets = self._watch_targets() if changes_lockout else None
+            watch_key = key == "watch"
+            watch_changed = watch_key or action.get("setting") == "watch"
+            if action.get("setting") == "dab":
+                if before["power"] and (not self.scanner.menu or self.scanner.dab_programming):
+                    if gesture == "long":
+                        self._start_dab_rescan()
+                    else:
+                        self._set_dab(not self.dab_enabled)
+            elif self.dab_enabled and key and key != "mute":
+                self._dab_key(key, gesture)
+            elif watch_changed:
+                if self.watch_only:
+                    self._set_watch_only(False)
+                elif (watch_key and before["power"] and not self.scanner.menu
+                      and (gesture == "long" or target(before) is None)):
+                    self._set_watch_only(True)
+                elif gesture == "tap":
+                    self.watch_enabled = not self.watch_enabled
+                self._watch_cursor = 1
+                self._next_watch_probe = 0.0
+            elif "record" in action:
+                if self.dab_enabled:
+                    tuned = self._dab_recording_target()
+                    self.recording.act(action, tuned, audio_open=self._dab_status.get("audio_open"))
+                else:
+                    tuned = None if self.watch_only else target(before)
+                    self.recording.act(action, RecordingTarget(*tuned) if tuned else None,
+                                       audio_open=self.scanner.audio_gate_open)
             elif "key" in action:
-                self.scanner.key(action["key"], action.get("gesture", "tap"))
+                key = action["key"]
+                if KEY_ALIASES.get(key, key) in WATCH_EXIT_KEYS:
+                    self._set_watch_only(False)
+                if self.watch_only and key == "lock" and gesture == "long":
+                    self.scanner.clear_temporary_lockouts()
+                elif not self.watch_only or key == "mute":
+                    self.scanner.key(key, gesture)
             elif "favorite" in action:
                 if "name" in action:
-                    self.scanner.rename_favorite(action["favorite"], action["name"])
+                    self.scanner.rename_favorite(favorite, action["name"])
+                elif recall and before["power"] and not self.scanner.menu and (
+                        entry := self.scanner.get_dab_favorite(favorite)):
+                    self._recall_dab_favorite(favorite, entry)
+                elif self.dab_enabled and gesture == "long":
+                    if before["power"] and not self.scanner.menu and (station := self._dab_station()):
+                        saved = self.scanner.save_dab_favorite(
+                            favorite, block=station[0], sid=station[1], hz=self._dab_status["hz"],
+                            name=self._dab_status.get("service", ""),
+                        )
+                        if saved:
+                            self._dab_favorite_slot = favorite
                 else:
-                    gesture = action.get("gesture", "tap")
-                    rds = self._rds_for(before) if gesture == "long" else None
-                    self.scanner.favorite(action["favorite"], gesture, rds_ps=rds.get("ps") if rds else None)
+                    if self.watch_only and recall and self.scanner.memories["FAV"][favorite - 1]:
+                        self._set_watch_only(False)
+                    if not (self.watch_only or self.dab_enabled) or gesture == "lock":
+                        rds = self._rds_for(before) if gesture == "long" else None
+                        self.scanner.favorite(favorite, gesture, rds_ps=rds.get("ps") if rds else None)
             elif "setting" in action:
-                if watch_changed:
-                    self.watch_enabled = not self.watch_enabled
-                    self._watch_cursor = 1
-                    self._next_watch_probe = 0.0
-                else:
-                    self.scanner.toggle_rds()
+                self.scanner.toggle_rds()
             elif action.get("tune") == "step":
+                self._set_watch_only(False)
                 self.scanner.tune_step(action["direction"], action.get("step_hz", FINE_STEP_HZ))
             elif action.get("tune") == "frequency":
+                self._set_watch_only(False)
                 whole, _, fraction = action["mhz"].partition(".")
                 hz = int(whole) * 1_000_000 + int(fraction.ljust(6, "0"))
                 self.scanner.tune_frequency(hz)
             else:
                 self.scanner.knob(action["knob"], action["value"], action.get("held", ()))
+                if not self.scanner.power:
+                    self.scanner.cancel_dab_program()
+                    self._dab_commands.clear()
+            if previous_targets is not None:
+                self._watch_lockouts_changed(previous_targets)
             after = self.scanner.snapshot()
-            if self.watch_enabled and (watch_changed or not before["power"] and after["power"]):
+            if self.watch_enabled and not (self.watch_only or self.dab_enabled) and (
+                    watch_changed or not before["power"] and after["power"]):
                 self._next_watch_probe = time.monotonic() + WATCH_SECONDARY_START_GRACE
-            retuned = target(before) != target(after)
+            watch_mode_changed = was_watch_only != self.watch_only
+            dab_changed = was_dab != self.dab_enabled
+            retuned = watch_mode_changed or dab_changed or target(before) != target(after)
             if retuned:
                 self.signal = None
             if retuned or before["rds_enabled"] != after["rds_enabled"]:
                 self.rds = None
                 self.rds_target = None
-            if (watch_changed or (retuned and not self._watch_secondary_ready) or before["power"] != after["power"]
+            if (watch_changed or watch_mode_changed or dab_changed or (retuned and not self._watch_secondary_ready)
+                    or before["power"] != after["power"]
                     or before["squelch"] != after["squelch"]):
                 self._clear_watch()
             if retuned or (before["audio_open"] and not after["audio_open"]):
                 self.discard_audio()
-            if retuned or not self.scanner.audio_gate_open:
+            receiving = self._dab_status.get("audio_open") if self.dab_enabled else self.scanner.audio_gate_open
+            if retuned or not after["power"] or not receiving:
                 self.recording.boundary()
             self.wake.set()
             self._watch_wake.set()
-            return self.state()
+            return self.state(parked=parked, parked_backlight=parked_backlight)
+
+    def _set_dab(self, enabled):
+        self.scanner.cancel_dab_program()
+        self.dab_enabled = enabled
+        self._dab_epoch += 1
+        self._dab_commands.clear()
+        self._dab_status = {}
+        last_station = self.scanner.dab_last_station
+        self._dab_recall = ("recall", *last_station) if enabled and last_station else None
+        if self._dab_recall:
+            self._queue_dab(self._dab_recall)
+        self._dab_favorite_slot = None
+        self._dab_browse_favorites = False
+        self.scanner._clear_signal()
+        self.scanner.probe_request = None
+
+    def _queue_dab(self, command):
+        self._dab_commands.append(command)
+        self._dab_epoch += 1
+        if isinstance(command, tuple) and command[0] == "recall":
+            block = command[1]
+            self._dab_status = {"hz": DAB_FREQUENCIES[block], "block": block, "scanning": True, "recalling": True}
+        elif (command in ("up", "down") and self._dab_status.get("hz")
+              and not self._dab_status.get("scanning")):
+            self._dab_status = {"hz": self._dab_status["hz"], "scanning": False}
+        else:
+            self._dab_status = {"rescanning": command == "rescan" or (
+                isinstance(command, tuple) and command[0] == "rescan")}
+        self.discard_audio()
+        self.recording.boundary()
+
+    def _remember_dab(self, station, blocks, service_counts):
+        now = time.monotonic()
+        if now < self._dab_save_retry_at:
+            return
+        previous = self.scanner.dab_last_station
+        if not station and previous and previous[0] not in blocks:
+            previous = None
+        station = station or previous
+        if (station, blocks, service_counts) == (
+                self.scanner.dab_last_station, self.scanner.dab_known_blocks, self.scanner.dab_service_counts):
+            return
+        try:
+            self.scanner.remember_dab(station, blocks, service_counts)
+        except OSError as error:
+            self._dab_save_retry_at = now + 5.0
+            LOG.warning("Could not remember DAB reception: %s", error)
+
+    def _start_dab_rescan(self):
+        if not self.dab_enabled:
+            self._set_dab(True)
+        self.scanner.cancel_dab_program()
+        self._dab_commands.clear()
+        self._dab_recall = self._dab_favorite_slot = None
+        self._dab_browse_favorites = False
+        last = self.scanner.dab_last_station
+        self._queue_dab(("rescan", *last) if last else "rescan")
+
+    def _recall_dab_favorite(self, slot, entry):
+        self._set_watch_only(False)
+        if not self.dab_enabled:
+            self._set_dab(True)
+        self._dab_favorite_slot = slot
+        station = entry["block"], entry["sid"]
+        command = ("recall", *station)
+        pending = self._dab_status.get("recalling") or not self._dab_status
+        if station != self._dab_station() and not (pending and command == self._dab_recall):
+            self._dab_recall = command
+            self._dab_commands.clear()
+            self._queue_dab(self._dab_recall)
+
+    def _step_dab_favorite(self, direction):
+        entries = [(slot, entry) for slot, entry in enumerate(self.scanner.dab_favorites, 1) if entry]
+        if not entries:
+            return
+        slots = [slot for slot, _ in entries]
+        station = self._dab_station()
+        current = self._dab_favorite_slot or next((slot for slot, entry in entries
+                                                  if (entry["block"], entry["sid"]) == station), None)
+        if current in slots:
+            index = (slots.index(current) + direction) % len(slots)
+        else:
+            index = 0 if direction == 1 else -1
+        self._recall_dab_favorite(*entries[index])
+
+    def _dab_key(self, key, gesture):
+        if not self.scanner.power:
+            return
+        if self.scanner.dab_programming:
+            if slot := self.scanner.dab_program_key(key, gesture):
+                self._dab_favorite_slot = slot
+        elif key == "prog":
+            if gesture == "long":
+                self.scanner.key(key, gesture)
+            elif station := self._dab_station():
+                self.scanner.begin_dab_program(block=station[0], sid=station[1],
+                                               hz=self._dab_status["hz"],
+                                               name=self._dab_status.get("service", ""))
+        elif key == "fav":
+            self._dab_browse_favorites = not self._dab_browse_favorites
+            if self._dab_browse_favorites and not self._dab_favorite_slot:
+                current = self.state()["active_favorite"]
+                if current:
+                    self._dab_favorite_slot = current
+                else:
+                    self._step_dab_favorite(1)
+        elif self._dab_browse_favorites and key in ("up", "down"):
+            self._step_dab_favorite(1 if key == "up" else -1)
+        elif key in DAB_CONTROLS:
+            self._dab_browse_favorites = False
+            self._dab_recall = self._dab_favorite_slot = None
+            self._queue_dab("search" if key == "scan" else key)
+
+    def _set_watch_only(self, enabled):
+        if self.watch_only != enabled:
+            self.watch_only = self.watch_enabled = enabled
+            self._watch_mode_epoch += 1
+            self._watch_cursor = 1
+            self._next_watch_probe = 0.0
+            self.scanner._clear_signal()
+            self.scanner.probe_request = None
 
     def _clear_watch(self):
         self._watch_epoch += 1
         self._watch_activity.clear()
+        self._watch_dwell = None
         self._next_watch = 0.0
 
     def _watch_targets(self):
@@ -442,8 +773,54 @@ class ScannerRuntime:
         return {slot: (channel.hz, channel.modulation) for slot, channel in enumerate(channels, 1)
                 if channel and not self.scanner._lock_kind(channel)}
 
+    def _watch_lockouts_changed(self, previous):
+        targets = self._watch_targets()
+        if targets == previous:
+            return
+        self._watch_epoch += 1
+        self._watch_activity = {slot: entry for slot, entry in self._watch_activity.items()
+                                if targets.get(slot) == entry[0]}
+        dwell = self._watch_dwell
+        if dwell is not None and targets.get(dwell.slot) != dwell.signal:
+            self._watch_dwell = None
+
+    def _watch_only_step(self, receiver):
+        """Sample the selected favourite several times before advancing."""
+        with self.lock:
+            if not self.watch_only or not self.scanner.power or self._receiver_reopen or self.stopped.is_set():
+                return
+            now, epoch = time.monotonic(), self._watch_epoch
+            targets = self._watch_targets()
+            dwell = self._watch_dwell
+            if dwell is not None:
+                same_channel = targets.get(dwell.slot) == dwell.signal
+                if not same_channel or now >= dwell.until:
+                    if not same_channel or (dwell.sampled and not dwell.hit):
+                        self._watch_activity.pop(dwell.slot, None)
+                    self._watch_dwell = dwell = None
+            if not targets:
+                return
+            if dwell is None:
+                slot = min(targets, key=lambda value: (value - self._watch_cursor) % FAVORITE_COUNT)
+                self._watch_dwell = dwell = WatchDwell(slot, targets[slot], now + WATCH_ONLY_DWELL)
+                self._watch_cursor = slot % FAVORITE_COUNT + 1
+                self._next_watch = now
+            if now < self._next_watch:
+                return
+            self._next_watch = now + WATCH_INTERVAL
+
+        level = receiver.watch_probe(dwell.signal, restore=False)
+        with self.lock:
+            if (self._watch_epoch != epoch or self._watch_dwell is not dwell or self._receiver_reopen
+                    or self.stopped.is_set() or level is None or not math.isfinite(level)):
+                return
+            dwell.sampled = True
+            if level >= self.scanner.squelch_db:
+                dwell.hit = True
+                self._watch_activity[dwell.slot] = (dwell.signal, time.monotonic() + WATCH_ONLY_STALE_SECONDS)
+
     def _watch_current(self, epoch, primary):
-        return (self.watch_enabled and not self._watch_secondary_ready
+        return (self.watch_enabled and not self.watch_only and not self._watch_secondary_ready
                 and epoch == self._watch_epoch and self.scanner.power
                 and not self.scanner.menu and not self.scanner.preview_until
                 and target(self.scanner.snapshot()) == primary)
@@ -512,31 +889,59 @@ class ScannerRuntime:
     def _set_watch_secondary(self, ready):
         if ready != self._watch_secondary_ready:
             self._watch_secondary_ready = ready
-            self._clear_watch()
-            self._next_watch_probe = 0.0
+            if not self.watch_only:
+                self._clear_watch()
+                self._next_watch_probe = 0.0
 
     def _secondary_watch_requested(self):
-        return (self.watch_enabled and self.scanner.power and self.receiver_status == "ready"
+        return (self.watch_enabled and not (self.watch_only or self.dab_enabled)
+                and self.scanner.power and self.receiver_status == "ready"
                 and not self.stopped.is_set())
 
     def _wait_watch_receiver(self, seconds):
         self._watch_wake.wait(seconds)
         self._watch_wake.clear()
 
-    @staticmethod
-    def _open_watch_receiver(receiver):
-        for index in range(1, receiver.device_count()):
+    @property
+    def watch_index(self):
+        """Return the SDR index WATCH is opening or using."""
+        with self.lock:
+            return self._watch_index
+
+    def _watch_index_allowed(self, index):
+        # The session pool can call into this runtime while checking reservations.
+        return self._watch_available is None or self._watch_available(index)
+
+    def _open_watch_receiver(self, receiver):
+        for index in range(receiver.device_count()):
+            if index == self.receiver_index:
+                continue
+            with self.lock:
+                self._watch_index = index
+            if not self._watch_index_allowed(index):
+                continue
             receiver.index = index
             try:
                 receiver.open()
                 return True
             except ReceiverError as exc:
                 LOG.debug("WATCH could not open SDR index %d: %s", index, exc)
+        with self.lock:
+            self._watch_index = None
         return False
+
+    def _close_watch_receiver(self, receiver):
+        with self.lock:
+            self._set_watch_secondary(False)
+        try:
+            receiver.close()
+        finally:
+            with self.lock:
+                self._watch_index = None
 
     def _run_watch_receiver(self):
         """Use an available extra dongle without waiting on it in the audio worker."""
-        receiver = Receiver(index=1)
+        receiver = Receiver(index=0 if self.receiver_index else 1)
         connected = False
         cursor = 1
         retry_at = next_check = 0.0
@@ -548,20 +953,20 @@ class ScannerRuntime:
                     epoch = self._watch_epoch
                     paused = self.scanner.menu or self.scanner.preview_until
 
-                if not targets:
-                    if connected:
-                        with self.lock:
-                            self._set_watch_secondary(False)
-                        receiver.close()
-                        connected = False
+                idle = not targets or paused
+                if connected and (idle or not self._watch_index_allowed(receiver.index)):
+                    self._close_watch_receiver(receiver)
+                    connected = False
+                if idle:
                     retry_at = next_check = 0.0
-                    cursor = 1
+                    if not targets:
+                        cursor = 1
                     self._wait_watch_receiver(0.25)
                     continue
 
                 now = time.monotonic()
-                if paused or now < max(retry_at, next_check):
-                    self._wait_watch_receiver(0.25 if paused else max(retry_at, next_check) - now)
+                if now < max(retry_at, next_check):
+                    self._wait_watch_receiver(max(retry_at, next_check) - now)
                     continue
 
                 try:
@@ -583,15 +988,11 @@ class ScannerRuntime:
                             self._remember_watch_levels(targets, {signal: level})
                 except ReceiverError as exc:
                     LOG.debug("WATCH SDR unavailable: %s", exc)
-                    with self.lock:
-                        self._set_watch_secondary(False)
-                    receiver.close()
+                    self._close_watch_receiver(receiver)
                     connected = False
                     retry_at = time.monotonic() + WATCH_RECEIVER_RETRY
         finally:
-            with self.lock:
-                self._set_watch_secondary(False)
-            receiver.close()
+            self._close_watch_receiver(receiver)
 
     def subscribe(self):
         # Absorb brief delivery jitter without letting a slow browser delay the tuner.
@@ -630,7 +1031,9 @@ class ScannerRuntime:
         self.wake.clear()
 
     def run(self):
-        receiver = Receiver()
+        receiver = Receiver(index=self.receiver_index) if self.receiver_index else Receiver()
+        dab = None
+        dab_retry_at = 0.0
         connected = False
         tuned = None
         rds_since = None
@@ -638,12 +1041,47 @@ class ScannerRuntime:
         try:
             while not self.stopped.is_set():
                 with self.lock:
-                    self.scanner.tick()
-                    state = self.scanner.snapshot()
-                    probe = self.scanner.take_close_probe() if connected else None
-                    if not self.scanner.audio_gate_open:
+                    reopen = self._receiver_reopen
+                    if reopen:
+                        self._receiver_reopen = False
+                        self.receiver_status = "standby"
+                        self.scanner._clear_signal()
+                        self.signal = self.rds = self.rds_target = None
+                        self._dab_status = {}
+                        self.discard_audio()
+                        self._clear_watch()
+                        self._watch_wake.set()
                         self.recording.boundary()
+                    else:
+                        dab_enabled = self.dab_enabled and self.scanner.power
+                        dab_epoch = self._dab_epoch
+                        watch_only = self.watch_only and self.scanner.power and not dab_enabled
+                        watch_mode_epoch = self._watch_mode_epoch
+                        if not (watch_only or dab_enabled):
+                            self.scanner.tick()
+                        state = self.scanner.snapshot()
+                        probe = self.scanner.take_close_probe() if connected and not (watch_only or dab_enabled) else None
+                        if not dab_enabled and (watch_only or not self.scanner.audio_gate_open):
+                            self.recording.boundary()
 
+                if reopen:
+                    if dab is not None:
+                        dab.close()
+                        dab = None
+                    dab_retry_at = 0.0
+                    if connected:
+                        receiver.close()
+                    connected = False
+                    tuned = None
+                    rds_since = None
+                    retry_at = 0.0
+                    continue
+
+                if not dab_enabled:
+                    if dab is not None:
+                        dab.close()
+                        dab = None
+                    dab_retry_at = 0.0
                 if not state["power"]:
                     if connected:
                         receiver.close()
@@ -655,7 +1093,61 @@ class ScannerRuntime:
                         self.signal = None
                         self.rds = None
                         self.rds_target = None
+                        self._dab_status = {}
                     self.wait(0.05)
+                    continue
+
+                if dab_enabled:
+                    if connected:
+                        receiver.close()
+                        connected = False
+                    tuned = rds_since = None
+                    if time.monotonic() < dab_retry_at:
+                        self.wait(0.10)
+                        continue
+                    with self.lock:
+                        if dab_epoch != self._dab_epoch or not self.scanner.power:
+                            continue
+                        command = self._dab_commands.popleft() if self._dab_commands else (
+                            self._dab_recall if dab is None else None)
+                        known_blocks = self.scanner.dab_known_blocks
+                        service_counts = self.scanner.dab_service_counts
+                    try:
+                        if dab is None:
+                            dab = DabReceiver(self.receiver_index, known_blocks=known_blocks,
+                                              service_counts=service_counts)
+                        status, pcm = dab.step(command)
+                    except DabError as error:
+                        LOG.warning("DAB receiver unavailable: %s", error)
+                        if dab is not None:
+                            dab.close()
+                            dab = None
+                        with self.lock:
+                            if dab_epoch == self._dab_epoch:
+                                self._dab_status = {"error": str(error)}
+                                self.receiver_status = "unavailable"
+                                self.recording.boundary()
+                        dab_retry_at = time.monotonic() + 3.0
+                    else:
+                        with self.lock:
+                            if (dab_epoch == self._dab_epoch and self.scanner.power
+                                    and not self._receiver_reopen and not self._dab_commands):
+                                self._dab_status = status
+                                station = self._dab_station() if status.get("audio_open") else None
+                                if station:
+                                    self._dab_recall = ("recall", *station)
+                                if not status.get("rescanning"):
+                                    self._remember_dab(station, status.get("known_blocks", known_blocks),
+                                                       status.get("service_counts", service_counts))
+                                self.receiver_status = "ready"
+                                if pcm and status.get("audio_open"):
+                                    if self.recording.enabled:
+                                        self.recording.receive(self._dab_recording_target(), pcm)
+                                    if not self.scanner.muted:
+                                        self.publish(pcm)
+                                elif not status.get("audio_open"):
+                                    self.recording.boundary()
+                    self.wait(0.01)
                     continue
 
                 if time.monotonic() < retry_at:
@@ -669,13 +1161,21 @@ class ScannerRuntime:
                         with self.lock:
                             self.receiver_status = "ready"
                             self._watch_wake.set()
-                        LOG.info("USB SDR opened")
+                        LOG.info("USB SDR %d opened", self.receiver_index + 1)
 
                     if probe:
                         hit = receiver.probe(probe, windows=3)
                         if hit is not None:
                             with self.lock:
-                                self.scanner.close_hit(hit)
+                                if (not self._receiver_reopen and watch_mode_epoch == self._watch_mode_epoch
+                                        and dab_epoch == self._dab_epoch):
+                                    self.scanner.close_hit(hit)
+                        continue
+
+                    if watch_only:
+                        tuned = rds_since = None
+                        self._watch_only_step(receiver)
+                        self.wait(0.02)
                         continue
 
                     wanted = target(state)
@@ -702,7 +1202,9 @@ class ScannerRuntime:
                     rds = receiver.rds_status() if decode_rds else None
                     with self.lock:
                         current = self.scanner.snapshot()
-                        if not current["power"] or target(current) != wanted:
+                        if (self._receiver_reopen or watch_mode_epoch != self._watch_mode_epoch
+                                or dab_epoch != self._dab_epoch
+                                or not current["power"] or target(current) != wanted):
                             continue
                         self.scanner.tick(usable_level if wanted[1] == "WFM" else level)
                         was_open = current["audio_open"]
@@ -715,7 +1217,7 @@ class ScannerRuntime:
                         audible = primary == wanted and current["audio_open"] and bool(pcm)
                         capture = (pcm if primary == wanted and self.scanner.audio_gate_open
                                    and math.isfinite(level) else None)
-                        self.recording.receive(primary, capture)
+                        self.recording.receive(RecordingTarget(*primary) if capture else None, capture)
                         if audible:
                             self.publish(pcm)
                         elif was_open:
@@ -739,6 +1241,8 @@ class ScannerRuntime:
                         self._clear_watch()
                         self.recording.boundary()
         finally:
+            if dab is not None:
+                dab.close()
             receiver.close()
 
     def close(self):
@@ -768,12 +1272,21 @@ def valid_action(action):
             return (set(action) == {"record", "path"} and isinstance(path, str)
                     and 0 < len(path) <= 1024 and "\0" not in path and Path(path).is_absolute())
         hz = action.get("hz")
-        return (command == "delete" and set(action) == {"record", "hz"} and type(hz) is int
-                and MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ)
+        if (command != "delete" or type(hz) is not int or not MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ
+                or set(action) not in ({"record", "hz"}, {"record", "hz", "dab"})):
+            return False
+        if "dab" not in action:
+            return True
+        dab = action["dab"]
+        return (isinstance(dab, dict) and set(dab) == {"sid", "name"}
+                and isinstance(dab["sid"], str) and SERVICE_ID.fullmatch(dab["sid"]) is not None
+                and (dab["name"] is None or normalize_favorite_name(dab["name"]) is not None))
     if "name" in action and set(action) != {"favorite", "name"}:
         return False
     if "key" in action:
         key = action["key"]
+        if key == "watch":
+            return action.get("gesture", "tap") in ("tap", "long")
         return (isinstance(key, str) and (key in KEYS or key in KEY_ALIASES)
                 and action.get("gesture", "tap") in ("tap", "long", "double"))
     if "favorite" in action:
@@ -782,9 +1295,11 @@ def valid_action(action):
             return False
         if "name" in action:
             return normalize_favorite_name(action["name"]) is not None
-        return action.get("gesture", "tap") in ("tap", "long")
+        return action.get("gesture", "tap") in ("tap", "long", "lock")
     if "setting" in action:
-        return action["setting"] in ("rds", "watch")
+        setting = action["setting"]
+        return setting in ("rds", "watch", "dab") and (
+            "gesture" not in action or (setting == "dab" and action["gesture"] in ("tap", "long")))
     if "tune" in action:
         if action["tune"] == "step":
             direction = action.get("direction")
@@ -836,8 +1351,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.FORBIDDEN)
         return False
 
-    def response(self, content_type, body):
-        self.send_response(HTTPStatus.OK)
+    def response(self, content_type, body, status=HTTPStatus.OK):
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -846,22 +1361,61 @@ class PanelHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def json_response(self, result):
-        self.response("application/json", json.dumps(result).encode("utf-8"))
+    def json_response(self, result, status=HTTPStatus.OK):
+        self.response("application/json", json.dumps(result).encode("utf-8"), status)
+
+    def session_route(self):
+        path, separator, query = self.path.partition("?")
+        if not separator:
+            return path, None, None
+        match = SESSION_QUERY.fullmatch(query)
+        if match is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid scanner session")
+            return None
+        token, radio = match.groups()
+        return path, token, int(radio) if radio else None
+
+    def radio(self, token, *, touch=True):
+        pool = getattr(self.server, "radios", None)
+        if pool is None:
+            return self.server.runtime, 1, False
+        return pool.resolve(token, touch=touch)
+
+    def radio_state(self, state, radio_id, shared, token):
+        pool = getattr(self.server, "radios", None)
+        if token is not None and pool is not None and state["power"] and pool.muted(token):
+            state = {**state, "muted": True, "audio_open": False}
+        return {**state, "radio_id": radio_id, "radio_shared": shared}
+
+    def panel_state(self, runtime, radio_id, shared, token):
+        if radio_id is None:
+            state = runtime.state(parked=True, parked_backlight=self.server.radios.parked_backlight(token))
+        else:
+            state = runtime.state()
+        return self.radio_state(state, radio_id, shared, token)
 
     def do_GET(self):
         if not self.local_request():
             return
-        if self.path == "/api/state":
-            self.json_response(self.server.runtime.state())
+        route = self.session_route()
+        if route is None:
             return
-        if self.path == "/audio":
-            self.stream_audio()
+        path, token, expected_radio = route
+        if path == "/api/state":
+            runtime, radio_id, shared = self.radio(token)
+            self.json_response(self.panel_state(runtime, radio_id, shared, token))
             return
-        if self.path.startswith(RECORDINGS_URL):
-            self.replay_recording()
+        if path == "/audio":
+            runtime, radio_id, _ = self.radio(token)
+            if radio_id is None:
+                self.send_error(HTTPStatus.CONFLICT, "Scanner panel is in standby")
+                return
+            self.stream_audio(runtime, token)
             return
-        name = "index.html" if self.path == "/" else self.path.removeprefix("/")
+        if path.startswith(RECORDINGS_URL):
+            self.replay_recording(path, token, expected_radio)
+            return
+        name = "index.html" if path == "/" else path.removeprefix("/")
         if name not in ASSETS or not (ROOT / "web" / name).is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -871,16 +1425,23 @@ class PanelHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         if not self.local_request():
             return
-        if self.path.startswith(RECORDINGS_URL):
-            self.replay_recording()
+        route = self.session_route()
+        if route is None:
+            return
+        path, token, expected_radio = route
+        if path.startswith(RECORDINGS_URL):
+            self.replay_recording(path, token, expected_radio)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
-    def replay_recording(self):
-        runtime = self.server.runtime
+    def replay_recording(self, path, token, expected_radio):
+        runtime, radio_id, _ = self.radio(token)
+        if expected_radio is not None and expected_radio != radio_id:
+            self.send_error(HTTPStatus.CONFLICT, "Scanner receiver changed")
+            return
         with runtime.lock:
             root = Path(runtime.recording.folder)
-        route = self.path.removeprefix(RECORDINGS_URL)
+        route = path.removeprefix(RECORDINGS_URL)
         if route == "last":
             try:
                 clip = latest_clip(root)
@@ -940,7 +1501,22 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not self.local_request():
             self.close_connection = True
             return
-        if self.path != "/api/action":
+        route = self.session_route()
+        if route is None:
+            self.close_connection = True
+            return
+        path, token, expected_radio = route
+        pool = getattr(self.server, "radios", None)
+        if path == "/api/session/leave" and token is not None:
+            if self.headers.get("Content-Length", "0") != "0" or "Transfer-Encoding" in self.headers:
+                self.close_connection = True
+                self.send_error(HTTPStatus.BAD_REQUEST)
+                return
+            if pool is not None:
+                pool.leave(token)
+            self.json_response({})
+            return
+        if path != "/api/action":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if self.headers.get_content_type() != "application/json":
@@ -956,10 +1532,28 @@ class PanelHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeError):
             self.send_error(HTTPStatus.BAD_REQUEST)
             return
-        self.json_response(self.server.runtime.act(action))
+        if pool is not None and token is not None and action.get("key") == "mute":
+            runtime, radio_id, shared = pool.mute(token, action.get("gesture", "tap"))
+            self.json_response(self.panel_state(runtime, radio_id, shared, token))
+            return
+        if pool is not None and token is not None and action.get("knob") == "volume":
+            runtime, radio_id, shared, accepted = pool.volume(token, expected_radio, action)
+            status = HTTPStatus.OK if accepted else HTTPStatus.CONFLICT
+            self.json_response(self.panel_state(runtime, radio_id, shared, token), status)
+            return
+        runtime, radio_id, shared = self.radio(token)
+        if expected_radio is None or expected_radio == radio_id:
+            if radio_id is None:
+                result = runtime.act(action, parked=True, parked_backlight=pool.parked_backlight(token))
+            else:
+                result = runtime.act(action)
+            if result is not None:
+                self.json_response(self.radio_state(result, radio_id, shared, token))
+                return
+            runtime, radio_id, shared = self.radio(token, touch=False)
+        self.json_response(self.panel_state(runtime, radio_id, shared, token), HTTPStatus.CONFLICT)
 
-    def stream_audio(self):
-        runtime = self.server.runtime
+    def stream_audio(self, runtime, token):
         client = runtime.subscribe()
         self.close_connection = True
         try:
@@ -971,7 +1565,13 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
+            check_at = time.monotonic() + 0.35
             while not runtime.stopped.is_set():
+                if token is not None and time.monotonic() >= check_at:
+                    assigned, radio_id, _ = self.radio(token, touch=False)
+                    if assigned is not runtime or radio_id is None:
+                        break
+                    check_at = time.monotonic() + 0.35
                 try:
                     pcm = client.get(timeout=0.35)
                 except queue.Empty:
@@ -999,12 +1599,12 @@ def main():
             parser.error(str(error))
     bind = "0.0.0.0" if remote_access else "127.0.0.1"
     with ThreadingHTTPServer((bind, args.port), PanelHandler) as server:
-        runtime = ScannerRuntime(args.state)
-        server.runtime = runtime
+        radios = RadioPool(args.state, ScannerRuntime)
+        server.radios = radios
         server.remote_access = remote_access
         signal.signal(signal.SIGTERM, lambda *_: threading.Thread(
             target=server.shutdown, daemon=True).start())
-        runtime.start()
+        radios.start()
         LOG.info("Panel available at http://127.0.0.1:%d/", server.server_port)
         if remote_access:
             LOG.info("Private-network access is enabled for the configured IPv4 ranges.")
@@ -1013,7 +1613,7 @@ def main():
         except KeyboardInterrupt:
             pass
         finally:
-            runtime.close()
+            radios.close()
 
 
 if __name__ == "__main__":

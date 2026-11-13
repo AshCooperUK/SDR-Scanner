@@ -1,32 +1,39 @@
-# SDr Scanner – Web-Based RTL-SDR Radio Scanner for Ubuntu and Debian
+# SDr Scanner · Web-Based RTL-SDR Radio Scanner for Ubuntu and Debian
 
-SDr Scanner is a receive-only software-defined radio scanner with a browser interface modelled on the Uniden UBC-355CLT. Plug a USB RTL-SDR receiver such as the Nooelec NESDR SMArt v5 into an Ubuntu or Debian desktop or headless server, then tune, scan and listen in your browser.
+SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can use in a web browser. Install it on an Ubuntu or Debian desktop or headless Linux server, plug in a receiver such as the **Nooelec NESDR SMArt v5**, and listen from a computer, phone or tablet. The browser panel is modelled on the Uniden UBC-355CLT and includes DAB and DAB+ digital radio, broadcast FM with RDS, AM airband, marine VHF, PMR446 and CB radio.
 
-[Download v3.0](https://github.com/AshCooperUK/SDR-Scanner/releases/tag/v3.0) · [Install on Ubuntu or Debian](#install-on-ubuntu-or-debian) · [Quick start](#open-the-panel-and-tune-your-first-station) · [Control reference](#front-panel-controls)
+[Download v5.0](https://github.com/AshCooperUK/SDR-Scanner/releases/tag/v5.0) · [Install on Ubuntu or Debian](#install-on-ubuntu-or-debian) · [Quick start](#open-the-panel-and-tune-your-first-station) · [Operating manual](#front-panel-controls) · [DAB setup](#install-the-optional-dab-decoder)
 
-![SDr Scanner v3.0 browser panel showing an FM station, signal meter and favourite channel buttons](docs/screenshots/scanner-panel.png)
+![SDr Scanner v5.0 web radio showing DAB station details, favourite channel buttons and recording controls](docs/screenshots/scanner-dab.png)
 
 ## Features
 
-- **Listen to broadcast FM with RDS.** Tune wide FM and display station names and RadioText when the station broadcasts them.
-- **Scan AM airband, marine VHF, PMR446 and CB radio.** Use the preset banks or search from **100 kHz to 1.75 GHz** with compatible hardware. Save up to 124 favourite channels.
-- **Record and replay radio audio.** Save MP3 clips when a signal opens the squelch, then play the latest recording from the panel.
-- **Listen from another device.** Keep the USB receiver on your Linux host and open the panel over a private network or SSH tunnel without a scanner account or sign-in.
+- **Receive DAB and DAB+ digital radio.** Scan Band III, browse multiplexes, display station names and scrolling text, and resume the exact station after switching modes or restarting. DAB uses the [optional headless decoder](#install-the-optional-dab-decoder).
+- **Listen to broadcast FM with RDS.** Tune wide FM and display the station name and RadioText when the broadcaster transmits them. Use the LCD digits for fine tuning and copy frequencies in MHz.
+- **Scan AM airband, marine VHF, PMR446 and CB radio.** Scan presets or search **100 kHz to 1.75 GHz** with compatible hardware. Use adjustable squelch, a signal meter, temporary and permanent lockouts, and Close Call for strong nearby signals.
+- **Save and watch favourites.** Store 124 analogue channels or DAB stations with 24 front-panel shortcuts. Use **WATCH** to check analogue favourites for activity, using a spare SDR when available.
+- **Record and replay radio audio.** Save MP3 clips of at least two seconds into frequency or DAB station folders. Choose the server-side location in the browser and loop the latest clip with **PLAY LAST**.
+- **Share the receiver over your private network.** Listen from multiple browsers without a scanner account. Each powered-on listener gets a separate USB receiver when one is available. Tabs sharing a receiver can mute independently.
 
 ## Contents
 
 - [Install on Ubuntu or Debian](#install-on-ubuntu-or-debian)
+- [Upgrade an existing installation](#upgrade-an-existing-installation)
 - [Open the panel and tune your first station](#open-the-panel-and-tune-your-first-station)
 - [Front-panel controls](#front-panel-controls)
 - [Scan banks, search and lockouts](#scan-banks-search-and-lockouts)
 - [Favourites and programming](#favourites-and-programming)
 - [RDS and Watch](#rds-and-watch)
+- [DAB and DAB+](#dab-and-dab)
+- [Install the optional DAB decoder](#install-the-optional-dab-decoder)
 - [Recording and playback](#recording-and-playback)
 - [Close Call](#close-call)
 - [Clock, band plans and memory reset](#clock-band-plans-and-memory-reset)
 - [Service commands and backups](#service-commands-and-backups)
 - [Access from another computer](#access-from-another-computer)
+- [Share the scanner with multiple listeners](#share-the-scanner-with-multiple-listeners)
 - [Troubleshooting](#troubleshooting)
+- [Frequently asked questions](#frequently-asked-questions)
 - [Uniden control reference](#uniden-control-reference)
 
 ## Install on Ubuntu or Debian
@@ -35,18 +42,21 @@ Use Ubuntu 22.04 or newer, or Debian 12 or newer, with Python 3.10 or newer and 
 
 **Recommended receiver** is the **Nooelec NESDR SMArt v5 SDR** for **100 kHz–1.75 GHz** coverage. Below 25 MHz the app uses direct sampling, which requires a receiver that supports it and an antenna suited to the frequency. [Nooelec receiver specifications](https://www.nooelec.com/store/nesdr-smart-sdr.html)
 
-### 1. Install the packages and clone v3.0
+### 1. Install the packages and clone v5.0
 
 Run these commands on the Linux machine that will host the scanner.
 
 ```bash
 sudo apt update
-sudo apt install --no-install-recommends git ca-certificates python3 python3-numpy python3-scipy rtl-sdr libmp3lame0
-git clone --branch v3.0 https://github.com/AshCooperUK/SDR-Scanner.git
+sudo apt install --no-install-recommends git ca-certificates python3 python3-numpy \
+  python3-scipy rtl-sdr libmp3lame0 libpam-systemd dbus-user-session
+git clone --branch v5.0 --depth 1 https://github.com/AshCooperUK/SDR-Scanner.git
 cd SDR-Scanner
 ```
 
 The `rtl-sdr` package supplies the receiver tools, library and USB device rules. If APT cannot find it on Ubuntu, run `sudo apt install --no-install-recommends software-properties-common`, then `sudo add-apt-repository universe` and retry the installation. [Ubuntu package](https://packages.ubuntu.com/jammy/rtl-sdr) · [Debian package](https://packages.debian.org/bookworm/rtl-sdr)
+
+On hosts where the `rtl-sdr` rule assigns the dongle to `plugdev`, add the service user with `sudo usermod -aG plugdev "$USER"`. Sign out and back in after changing groups or installing the systemd user-session packages. On an SSH-only host, reconnect the SSH session. Reconnect the USB dongle after the package install so the rule applies. [Debian RTL-SDR USB rules](https://sources.debian.org/src/rtl-sdr/0.6.0-4/rtl-sdr.rules) · [Debian systemd PAM package](https://packages.debian.org/bookworm/libpam-systemd)
 
 ### 2. Choose headless server or desktop
 
@@ -71,20 +81,47 @@ Open **SDR Scanner** from your applications menu or visit [the local panel](http
 
 With no flag, `launcher.py install` adds the icon if it detects a local X11 or Wayland session. It skips the icon over SSH or in a text console. Both modes start and enable the same systemd user service. The installer enables user lingering so the service can start at boot before login. If your system requires administrator permission for this step, run `sudo loginctl enable-linger "$USER"` and check `loginctl show-user "$USER" -p Linger` for `Linger=yes`.
 
+### 3. Enable DAB and DAB+ if you want digital radio
+
+Follow the [optional DAB decoder setup](#install-the-optional-dab-decoder) on the Linux machine with the receiver. The decoder runs without a desktop and uses the same scanner panel.
+
+## Upgrade an existing installation
+
+Back up `.scanner-state.json`, `.scanner-radios/` if present, and your recording folder. Open a terminal in your existing checkout. Once you have saved any local source edits, fetch and check out the release, then restart the service.
+
+```bash
+git fetch origin tag v5.0
+git switch --detach v5.0
+systemctl --user restart local-sdr-scanner.service
+```
+
+Refresh your browser after the restart. The panel opens in clock standby. The app keeps your favourites, recording location and other saved settings in the existing checkout. If you use a private-network systemd drop-in, an in-place upgrade keeps its paths valid. To enable digital radio for the first time, follow the [DAB decoder setup](#install-the-optional-dab-decoder).
+
 ## Open the panel and tune your first station
 
 1. Connect an antenna and plug the receiver into USB. Reconnect the dongle if it was plugged in when you installed `rtl-sdr`. Close any other SDR app using it.
 2. Open [the panel](http://127.0.0.1:8766/) locally or follow [the remote access instructions](#access-from-another-computer). The app starts in clock standby.
-3. Click **VOLUME** to power on and claim the receiver. Adjust the volume and turn **SQUELCH** down until you can hear the signal. Turning **VOLUME** to zero returns to clock standby and releases the receiver.
+3. Click **VOLUME** to power on and claim a receiver. Adjust the volume and turn **SQUELCH** down until you can hear the signal. Turning **VOLUME** to zero returns this tab to clock standby and releases its assignment.
 4. Click or hover over the LCD, type a local broadcast FM frequency in MHz such as `98.4`, and press **Enter**. The app tunes it in wide FM and enters **HOLD**. Turn on **RDS** to see the station details when available.
 5. To stop **SCAN** or **SEARCH** on the current frequency, press **HOLD**. To resume, press **HOLD** again or use **SCAN** or **SEARCH** to select that operation.
+
+| To do this | Start here |
+| --- | --- |
+| Listen to local digital radio | Install the [DAB decoder](#install-the-optional-dab-decoder), power on, and tap **DAB**. Hold **DAB** to refresh the local station count. |
+| Listen to aircraft or PMR446 | Press **AIR/MARINE** or **PMR 446** to [scan a preset bank](#scan-presets-or-favourites). Press **HOLD** to stay on a channel. |
+| Save a station for later | Hold one of **F01–F24**, or use **PROG → FAV** to [choose any memory slot](#save-or-erase-a-numbered-slot). |
+| Record and listen back | Choose a destination with a right-click on **RECORD**, tap it to arm, then use **PLAY LAST** after the clip has finished. See [Recording and playback](#recording-and-playback). |
+| Listen from a phone or another computer | Use the [private LAN or SSH setup](#access-from-another-computer). Power the browser panel on after opening it. |
 
 ### Tuning on the LCD
 
 - **Type a frequency.** Enter MHz from `0.1` through `1750`, with up to six decimal places. Use **Backspace** to edit, **Enter** to tune and **Escape** to cancel. The segmented LCD displays up to five fractional digits.
 - **Scroll a digit.** Point at a frequency digit and scroll up or down to add or subtract that place value. Scrolling up over the **2** in **12.3456** tunes **13.3456 MHz**. Scrolling down over the **9** in **98.7654** tunes **88.7654 MHz**. Scrolling elsewhere on the LCD steps by **100 Hz**. Wheel tuning enters **HOLD**.
+- **Copy the tuned frequency.** Double-click the numeric readout to copy the exact frequency in MHz. In DAB, this copies the multiplex frequency.
 - **See the current frequency.** Hover over or focus the LCD while **SCAN** or **SEARCH** advances to see the frequency being checked. **CH** identifies a memory slot or numbered preset. The LCD also shows active banks, **AM**, **NFM** or **WFM**, search direction, lockout and Close Call status.
 - **Modulation follows the frequency or bank.** Direct tuning uses mono wide FM from **87.5 to just below 108 MHz**, AM below **25 MHz** and in the **108–137 MHz** and **225–400 MHz** air ranges, and the band-plan mode or narrow FM elsewhere. Tuning within the CB range after selecting a CB channel preserves that channel's AM or FM mode.
+
+![SDr Scanner tuned to wide FM with decoded RDS, signal level and analogue favourites](docs/screenshots/scanner-panel.png)
 
 ## Front-panel controls
 
@@ -92,25 +129,28 @@ Hover over a control for its tooltip. **Tab** moves keyboard focus, and **Space*
 
 | Control | What it does |
 | --- | --- |
-| **VOLUME** | Click to switch between reception and the standby clock. Drag up or right, or scroll up, to increase the volume. Drag down or left, or scroll down, to lower it. At zero the app releases the USB receiver. |
+| **VOLUME** | Click to switch between reception and the standby clock. Scroll to adjust in small steps. Drag up or right to increase the volume and down or left to lower it. At zero this tab releases its receiver assignment. |
 | **SQUELCH** | Sets the signal level that opens audio, pauses scan or search, and triggers recording or Watch. Drag, click around the outer part of the dial or scroll for **0.5 dB** wheel steps. Fully counterclockwise opens the audio gate. |
 | **HOLD** | Pauses on the current frequency or channel. Press again to resume the underlying scan or search. In programming, it cancels the pending operation. |
-| **UP / DOWN** | In FAV, steps to the next or previous saved slot and holds it. In Search, sets the direction and moves past a hit. In Hold, steps channels or frequencies. During other automatic scans, **UP** skips past a hit. Hold an arrow for about a second for repeat stepping. |
-| **MUTE** | Toggles sound and panel LEDs. The LCD stays readable at about 10% brightness. The receiver, scan, search and any armed recording continue. |
+| **UP / DOWN** | In FAV, steps to the next or previous saved slot. In DAB, steps through stations and available multiplexes. In Search, sets the direction and moves past a hit. In Hold, steps channels or frequencies. During other automatic scans, **UP** skips past a hit. Hold an arrow for about a second for repeat stepping. |
+| **MUTE** | Silences this browser and switches off its panel LEDs. The LCD stays readable at about 10% brightness. Other listeners and any armed recording continue. |
 | **FAV / PMR 446 / AIR/MARINE / CB AM/FM** | Select banks and start scanning. **FAV** also selects the memory destination during programming. |
 | **CLOSE CALL** | Tap to cycle nearby-signal modes. Hold for about 2½ seconds for Close Call Only. Tap again in Only mode to open setup. |
 | **SEARCH** | Sweeps a frequency range and advances past a hit on a second press. |
 | **L/O** | Tap for a temporary skip, double-tap for a permanent skip, or hold for about 2½ seconds to clear temporary skips and the current permanent lockout. |
 | **BAND/STEP** | Tap to select a search range. Hold for about a second during Search to edit step sizes. It also backs out of Close Call setup or cancels a clock edit. |
 | **PROG** | Starts or confirms memory programming. Hold for about 2½ seconds to toggle Program Lock in radio mode or set the clock in standby. It also confirms step, band-plan and Close Call settings. |
-| **F01–F24** | Tap to recall, hold for about a second to save, or right-click to name. |
-| **RDS** | Shows or hides broadcast station details and custom favourite names on the LCD. |
+| **F01–F24** | Tap to recall, hold for about a second to save an analogue frequency or DAB station, and right-click to name it. Middle-click temporarily locks out an analogue slot. |
+| **RDS** | Shows or hides FM RDS, DAB station details and custom favourite names on the LCD. |
 | **SCAN** | Starts or resumes scanning the selected banks or saved favourites. |
-| **WATCH** | Checks F01–F24 for activity while you listen elsewhere. |
-| **RECORD** | Tap to arm or stop recording, right-click to choose the server folder, or hold for about 2½ seconds to delete clips for the tuned frequency. |
+| **WATCH** | Tap while tuned to check F01–F24 in the background. Hold, or tap with no frequency tuned, to monitor those favourites in silent Watch mode. |
+| **RECORD** | Tap to arm or stop recording clips of at least two seconds, right-click to choose the server folder, or hold for about 2½ seconds to delete clips for the tuned station or frequency. |
 | **PLAY LAST** | Loops the latest saved recording in this browser. Press again for live audio. |
+| **DAB** | Tap to switch between digital radio and analogue reception. Hold for about a second to rescan Band III for local stations. |
 
 The bar on the right side of the LCD estimates usable signal strength. Hover over it for raw RF power, usable power when it differs, and carrier offset when available. A strong off-frequency signal can raise raw power while the usable bar drops. In wide FM, the meter and squelch also account for the noise floor. For a quiet standby between transmissions, hold a frequency and raise **SQUELCH** until the idle noise just disappears.
+
+Hover over **SQUELCH** to see the threshold in dBFS. Hover over an individual visible LCD symbol to see its name. Hover over a favourite to see its saved name, frequency and, for DAB, its multiplex block.
 
 The avatar in the bottom-right footer opens the maintainer's GitHub profile. [AshCooperUK on GitHub](https://github.com/AshCooperUK)
 
@@ -122,7 +162,7 @@ Press a bank button to start scanning. Several banks can be enabled together. Pr
 
 | Bank button | Selections |
 | --- | --- |
-| **FAV** | Saved favourites in slots 1–124. Tap again in Scan to disable the bank. |
+| **FAV** | Saved analogue favourites in slots 1–124. Tap again in Scan to disable the bank. In DAB mode, **FAV** browses DAB memories with the arrows. |
 | **PMR 446** | Eight original analogue PMR446 channels from **446.00625 to 446.09375 MHz** in **12.5 kHz** steps. Tap again in Scan to disable the bank. |
 | **AIR/MARINE** | **Air AM + Marine NFM → Air AM → Marine NFM → Off**. Combined scan uses each channel's own mode and shows both AM and NFM. Air covers the **108–137 MHz** preset grid. Marine uses 57 international presets, with coast-station frequencies for duplex channels. |
 | **CB AM/FM** | **CB AM + CB FM → CB AM → CB FM → Off**. The AM grid covers **25.000–27.995 MHz** and the FM grid **28.000–29.995 MHz**, both in **5 kHz** steps. |
@@ -155,6 +195,8 @@ To unlock a permanently excluded favourite, recall it directly or step to its sa
 3. Tap a saved button to recall and hold it. A matching frequency lights green whenever the receiver tunes it, including when Scan or Search reaches it. Hover to see the name followed by the saved frequency.
 4. To rename a slot, right-click its button and type in the LCD. **Enter** saves, **Escape** cancels, and saving an empty name clears it. The panel label stays **F01**, **F02** and so on.
 
+While listening to DAB, hold a favourite button to store the exact station and its name. Each slot holds one analogue channel or DAB station. Tapping a DAB favourite also works from analogue mode. Its LED turns green only when the saved DAB station is selected.
+
 ### Save or erase a numbered slot
 
 **Save to slot 99** works the same way as any of the 124 slots.
@@ -165,7 +207,9 @@ To unlock a permanently excluded favourite, recall it directly or step to its sa
 
 Slots **1–24** are the same memories as **F01–F24**. The next 100 slots are available through **PROG** and the arrows. Existing Emergency memories from older versions map to **25–124**. While on a favourite, the arrows step through saved slots in either direction, including those beyond F24, and skip empty slots.
 
-**Erase one slot.** Tap **PROG**, then hold **L/O** for about 2½ seconds **before** pressing **FAV**. This loads `000.0000` as the source. Select the slot and tap **PROG** to erase it. You can also clear an F01–F24 name separately through its right-click editor.
+To save a DAB station in any slot, listen to it and use **PROG → FAV → UP/DOWN → PROG**. While in DAB, tap **FAV** to browse saved DAB stations with the arrows, including slots 25–124. Tap **FAV** again to return to browsing all receivable DAB stations.
+
+**Erase one slot.** In analogue mode, tap **PROG**, then hold **L/O** for about 2½ seconds **before** pressing **FAV**. This loads `000.0000` as the source. Select an analogue or DAB slot and tap **PROG** to erase it. You can also clear an F01–F24 name separately through its right-click editor.
 
 **Program Lock.** While powered on, hold **PROG** for about 2½ seconds to toggle the **PROG** memory-writing sequence. `Pg.L` means locked, and `OF Pg.L` means unlocked.
 
@@ -173,24 +217,70 @@ Slots **1–24** are the same memories as **F01–F24**. The next 100 slots are 
 
 **RDS.** Turn on **RDS** and hold a wide-FM station that broadcasts RDS. The LCD reserves two lines for a station name and broadcast text. Long text scrolls, and the LCD stays the same size. Allow several seconds for the data to decode. A custom F01–F24 name takes the place of the station-name line and can appear for any modulation when the tuned frequency matches. Turning **RDS** off hides broadcast details and custom names on the LCD. Saved names remain in favourite tooltips.
 
-**WATCH.** Tap **WATCH** to check unlocked F01–F24 frequencies for signals above the current squelch setting. A flashing amber favourite LED means Watch detected a signal there. The frequency you are listening to remains green. Hover over **WATCH** to see which SDR it is using.
+**WATCH.** Tap **WATCH** while tuned to check unlocked analogue favourites in F01–F24 in the background. Hold **WATCH**, or tap it when no frequency is tuned, to pause current reception and monitor those favourites in silent Watch mode. It spends about half a second checking each slot. A matching favourite LED flashes amber when its signal exceeds the squelch setting. Hover over the LCD to see the slot and frequency being checked. Tap **WATCH** again to resume your previous tuning.
 
-- With a second available RTL-SDR plugged into the host, Watch opens it automatically. The main receiver stays on the frequency you are listening to.
-- With one SDR, nearby checks can use the current tuner capture. More distant checks can briefly retune and interrupt live audio. Close Call takes priority over those retunes. Watch checks are brief samples, so a short transmission can end between checks.
+Hold **L/O** during silent Watch mode to clear temporary lockouts.
+
+- With a spare RTL-SDR plugged into the host, Watch opens it automatically. Your receiver stays on the frequency you are listening to. An independent listener takes priority if they need the spare.
+- With one SDR, nearby checks can use the current tuner capture. More distant background checks can briefly retune and interrupt live audio. Close Call takes priority over background checks. Watch checks are brief samples, so a short transmission can end between checks.
+
+## DAB and DAB+
+
+1. Tap **DAB** while powered on. On first use, the scanner looks for a Band III multiplex, which is a group of stations broadcast on the same frequency. Later, it returns to the last playable station. The station and discovered multiplexes are saved across service restarts.
+2. Use **UP** and **DOWN** to move through stations and remembered multiplexes. Press **SEARCH** or **SCAN** to look for the next receivable multiplex.
+3. Turn **RDS** on to show the DAB station name and scrolling broadcast text on the LCD. Hold a favourite button to save the exact station, or use **PROG → FAV** for a numbered slot.
+4. Tap **DAB** again to return to analogue reception. Tap a saved DAB favourite from analogue mode to go straight to that station.
+
+**Find more stations.** Hold **DAB** for about a second to run one sweep of all 38 Band III blocks. Audio pauses during the sweep, which can take several minutes. The scanner checks UK national and Norfolk blocks early and allows extra time when a detected multiplex is still identifying stations. It then resumes the previous station if available. Hover over **DAB** to see the total number of audio services discovered across multiplexes. The count updates after a full rescan and as you find stations during normal tuning.
+
+DAB playback and recordings are mono. Audio opens when the decoder receives valid audio from the selected service.
+
+### Install the optional DAB decoder
+
+Run these commands on the Linux host, as the same user who runs the scanner service. The build produces the headless `welle-cli` decoder and binds its internal HTTP listener to loopback. [welle-cli v2.7 source](https://github.com/AlbrechtL/welle.io/tree/v2.7)
+
+```bash
+sudo apt install --no-install-recommends build-essential cmake xxd \
+  libfaad-dev libmpg123-dev libmp3lame-dev gstreamer1.0-tools \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+(
+  set -eu
+  dab_build_dir=$(mktemp -d)
+  trap 'rm -rf -- "$dab_build_dir"' EXIT
+  git clone --depth 1 --branch v2.7 https://github.com/AlbrechtL/welle.io.git "$dab_build_dir/source"
+  dab_socket="$dab_build_dir/source/src/various/Socket.cpp"
+  sed -i 's/htons(INADDR_ANY)/htonl(INADDR_LOOPBACK)/' "$dab_socket"
+  grep -q 'htonl(INADDR_LOOPBACK)' "$dab_socket"
+  cmake -S "$dab_build_dir/source" -B "$dab_build_dir/build" \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DBUILD_WELLE_IO=OFF -DBUILD_WELLE_CLI=ON \
+    -DKISS_FFT=ON -DRTLSDR=OFF -DSOAPYSDR=OFF
+  cmake --build "$dab_build_dir/build" --parallel 2
+  install -D -m 0755 "$dab_build_dir/build/welle-cli" "$HOME/.local/share/sdr-scanner/bin/welle-cli"
+)
+```
+
+If the panel is already open, return to analogue mode and tap **DAB** again. If the LCD shows `Err`, hover over **DAB** for the decoder message. The build installs the decoder to `~/.local/share/sdr-scanner/bin/welle-cli`.
 
 ## Recording and playback
 
-**Arm recording.** Tap **RECORD**. Its LED flashes red while capturing audio above squelch. A clip is finalised when the signal ends, the tuner changes frequency, or you stop recording. Recording uses the receiver audio even while the browser is muted. The app skips identifiable short, isolated AM or narrow-FM beep bursts. Clips with speech retain their original audio, including any courtesy tone.
+**Arm recording.** Tap **RECORD**. Its LED flashes red while capturing audio above squelch. A clip is finalised when the signal ends, the tuner changes frequency, or you stop recording. Captures shorter than two seconds are discarded. Kept clips include the opening audio and use the receiver audio even while the browser is muted. The app also skips identifiable short, isolated AM or narrow-FM beep bursts. Clips with speech retain their original audio, including any courtesy tone.
 
 **Choose a folder.** Right-click **RECORD**. In the browser picker, open a listed subfolder, use **Up**, or enter an absolute server path and select **Open**. Choose a writable location and click **Choose folder**. The picker works from a Windows browser connected to a headless Linux host, and the folders are on the host where the SDR is attached.
 
 ![Browser recording folder picker over the scanner panel](docs/screenshots/scanner-recording-folder.png)
 
-Files go into `Recorded Audio/<frequency>mhz/HHMMSS-DDMMYYYY.mp3` under the chosen folder. The date and time use the server's local clock. For example, `Recorded Audio/128.1250mhz/143059-12112026.mp3`. If you choose an existing folder named `Recorded Audio`, the app uses it directly. The default is `recordings/Recorded Audio` beside the scanner state file.
+| Reception | Example path under the chosen folder |
+| --- | --- |
+| Analogue | `Recorded Audio/128.1250mhz/143059-13112026.mp3` |
+| DAB with no displayed station name | `Recorded Audio/222.0640mhz/143059-13112026.mp3` |
+| DAB with **RDS** on and a displayed station name | `Recorded Audio/GB News Radio/143059-131126.mp3` |
 
-**Play the latest clip.** Tap **PLAY LAST** to loop the latest finished clip across all frequencies in the selected folder. Playback takes over live sound and panel tones in that browser. The tuner and recording continue to operate. **MUTE** also silences playback. Tap **PLAY LAST** again to stop the loop and return to live audio.
+The filenames use `HHMMSS-DDMMYYYY.mp3` for frequency folders and `HHMMSS-DDMMYY.mp3` for station folders. Times follow the server's local clock. With **RDS** off, recordings of services on the same DAB multiplex share its frequency folder. If you choose an existing folder named `Recorded Audio`, the app uses it directly. The default is `recordings/Recorded Audio` beside the scanner state file.
 
-**Delete a frequency's recordings.** Tune and hold the exact frequency, then hold **RECORD** for about 2½ seconds. This immediately deletes the scanner's clips for that frequency in the selected folder and removes the frequency folder if it is empty. Other frequencies and unrelated files are preserved. If recording is armed and the squelch is open when you delete, the app waits for that opening to end before recording there again.
+**Play the latest clip.** Tap **PLAY LAST** to loop the latest finished clip across all station and frequency folders in the selected location. Playback takes over live sound and panel tones in that browser. The tuner and recording continue to operate. **MUTE** also silences playback. Tap **PLAY LAST** again to stop the loop and return to live audio.
+
+**Delete recordings.** Tune to the station or hold the exact frequency, then hold **RECORD** for about 2½ seconds. The scanner clears its clips from the current station or frequency folder and removes that folder if empty. Use the same **RDS** setting and displayed name as when you recorded the clip. If recording is armed and audio is open when you delete, the app waits for that audio to end before recording there again.
 
 ## Close Call
 
@@ -245,13 +335,13 @@ From the repo, `/usr/bin/python3 launcher.py open` starts the service if needed 
 
 For a foreground session, stop the service, run `/usr/bin/python3 app.py` from the checkout, and open [the local panel](http://127.0.0.1:8766/). **Ctrl+C** ends the foreground session.
 
-The default state file is `.scanner-state.json` in the checkout. It saves memories, names, permanent lockouts, clock and band settings, RDS and the recording destination. Back it up along with the recording folder before moving to a new checkout. Stop the service before replacing a state file, copy it into the new checkout, then run the appropriate installer command from there and restart the service to load that copy. Volume starts in clock standby each time the service starts.
+The default state file is `.scanner-state.json` in the checkout. It saves memories, names, permanent lockouts, clock and band settings, RDS, DAB discovery and the recording destination. Additional independent receivers save their settings under `.scanner-radios/`. Back up both paths and any recording folders you selected, including folders outside the checkout. Stop the service before restoring state files. If you move to a new checkout, run the installer there and update any private-network drop-in paths before restarting. Each new browser session starts in clock standby.
 
 ## Access from another computer
 
 ### Use an SSH tunnel
 
-With SSH access to the server, run this on the computer with the browser and leave the session open.
+The Linux host needs a running SSH server. On Ubuntu or Debian, install `openssh-server` on the host if SSH access is unavailable. Once you can sign in to the host over SSH, run this on the computer with the browser and leave the session open.
 
 ```bash
 ssh -N -L 8766:127.0.0.1:8766 your-user@your-server
@@ -280,23 +370,44 @@ ExecStart=/usr/bin/python3 /absolute/path/to/SDR-Scanner/app.py --remote-config 
 
 Restart the service, then open the numeric address and port in the browser. The example address is `http://192.168.1.20:8766/`. If the host uses a firewall, permit TCP **8766** from the configured client addresses. The app checks both the client and destination addresses. Keep them limited to devices you trust, since an allowed browser can use the controls and recordings without a scanner sign-in. On plain HTTP the app falls back to a browser audio processor when AudioWorklet is unavailable.
 
+## Share the scanner with multiple listeners
+
+Every new or refreshed browser tab opens at the standby clock. Click **VOLUME** to request a free RTL-SDR. When all receivers are assigned, additional powered-on tabs share the main radio and its tuning.
+
+On a shared receiver, changing station, band, squelch or scan mode affects the other listeners using that tuner. **MUTE** acts on the current browser. Turn **VOLUME** to zero to release your assignment. Your tab stays at the clock while other tabs keep listening. When the last listener turns off a radio, the receiver returns to standby and becomes available. The server checks for newly connected and freed receivers automatically. An independent radio has its own saved favourites and recording settings. **WATCH** can use a spare until a listener needs it.
+
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
 | Clock on the LCD | Click **VOLUME** to leave standby. |
 | Panel fails to load | Check the service status and journal. On a remote computer, verify the SSH tunnel or private IP and port. |
+| `systemctl --user` cannot connect | Install `dbus-user-session` and `libpam-systemd`, then start a fresh login session. Check that the host boots with systemd. |
 | `Err` when tuning | Confirm the SDR is plugged into the Linux host. Put the panel in standby before running the USB test below. Close other apps using the same dongle. |
 | Silent or noisy reception | Interact with the panel to enable browser audio. Check **MUTE**, **VOLUME**, squelch, the antenna and the tuned frequency. Use the meter tooltip to check carrier offset, then tune the exact frequency or make a small wheel adjustment. |
 | FM audio without RDS | Check for **WFM**, turn **RDS** on, hold the station for several seconds and check reception. A station needs to transmit RDS for the receiver to decode it. |
+| `Err` in DAB mode | Hover over **DAB** for the decoder message. Follow the [decoder setup](#install-the-optional-dab-decoder) if the helper is missing. |
+| Too few DAB stations | Hold **DAB** to sweep Band III once, then hover over it for the discovered total. Check that the antenna receives VHF Band III and give the sweep time to finish. |
 | Search stops on noise | Raise **SQUELCH** slightly. Try a narrower **BAND/STEP** range or change the spacing if you are looking for a specific channel grid. |
 | No recording to play | Arm **RECORD**, wait for a signal to pass squelch and then end, and check that the chosen server folder is writable. The **PLAY LAST** tooltip reports when no finished recording is available. |
 
 To check USB access, put the panel in clock standby and run `rtl_test -s 2400000` as your normal user. When it identifies the receiver and reads samples, press **Ctrl+C** so the scanner can reclaim the device. If the test reports permission denied, reconnect the dongle after installing `rtl-sdr`. If your distribution's USB rule assigns it to `plugdev`, run `sudo usermod -aG plugdev "$USER"` and sign out and back in.
 
+## Frequently asked questions
+
+**Can I use this as a headless RTL-SDR server?** Yes. Install with `--headless`, leave the dongle on the Ubuntu or Debian host, and open the browser panel over an SSH tunnel or a configured private LAN. You can listen from a Windows, macOS, Linux, Android or iOS browser.
+
+**What frequencies and modes does it receive?** The panel accepts **100 kHz–1.75 GHz** with compatible hardware. It supports AM, narrow FM, wide FM broadcast radio and optional Band III DAB/DAB+. Reception depends on the dongle, antenna and signal conditions. Low-frequency coverage below 25 MHz uses direct sampling on supported receivers.
+
+**Can two people listen to different stations?** Each independent station or frequency needs its own assigned dongle. With one dongle, active tabs listen to the shared tuner. If a second dongle becomes available, the server can assign it to a waiting listener.
+
+**Where do the scanner's MP3 files live?** They are written on the Linux host, even when you arm recording from a phone or another computer. Right-click **RECORD** to choose a location. Use **PLAY LAST** to play the newest completed clip in the browser.
+
+**Does a DAB scan keep running?** Holding **DAB** starts a single sweep, which can take several minutes on one receiver. When it finishes, the panel updates the discovered station count and resumes the previous station if available.
+
 ## Uniden control reference
 
-| Original UBC-355CLT control | SDR Scanner v3.0 |
+| Original UBC-355CLT control | SDr Scanner v5.0 |
 | --- | --- |
 | **VOLUME/CLOCK**, **SQ** | **VOLUME** retains reception, volume and standby clock. **SQUELCH** sets the receive gate. |
 | **HOLD**, **▲**, **▼** | Hold and stepping remain. In FAV, the arrows recall saved memories and hold them. |
@@ -304,7 +415,7 @@ To check USB access, put the panel in clock standby and run `rtl_test -s 2400000
 | **FRN/PMR** | **PMR 446** retains the original PMR446 presets. Freenet is removed from the panel. |
 | **PRIVATE**, **EMG** | Their panel positions now serve **MUTE** and **FAV**. The original Emergency presets were replaced by user favourites. |
 | **SEARCH**, **BAND/STEP** | Retain band selection and step settings. **SEARCH** can also sweep the full SDR range. |
-| **L/O**, **PROG** | Retain skips, programming, Program Lock and clock setting. In v3.0, holding **L/O** clears all temporary skips and just the current permanent lockout. |
+| **L/O**, **PROG** | Retain skips, programming, Program Lock and clock setting. Holding **L/O** clears all temporary skips and the current permanent lockout. |
 | **Close Call** | Retains Do Not Disturb, Priority, Only, band selection and an alert toggle. Detection runs on the SDR. |
 | **Segmented LCD** | Retains frequency, bank, channel and status indicators and the standby clock. Adds direct tuning, signal strength and RDS text. |
 

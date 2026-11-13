@@ -5,13 +5,16 @@ import os
 import re
 import stat
 from contextlib import ExitStack
+from urllib.parse import quote, unquote
 
-from recording import CLIP_NAME, DIRECTORY_FLAGS, _frequency_folder, _open_directory
+from recording import (
+    CLIP_NAME, DAB_CLIP_NAME, DIRECTORY_FLAGS, FREQUENCY_NAME,
+    _frequency_folder, _open_directory, _station_folder,
+)
 from scanner import MANUAL_MAX_HZ, MANUAL_MIN_HZ
 
 
 RECORDINGS_URL = "/api/recordings/"
-FREQUENCY_NAME = re.compile(r"([0-9]{1,4})\.([0-9]{4,6})mhz")
 CLIP_ID = re.compile(r"[0-9a-f]{24}")
 BYTE_RANGE = re.compile(r"bytes=([0-9]{0,20})-([0-9]{0,20})", re.IGNORECASE)
 
@@ -23,6 +26,14 @@ def _valid_frequency(name):
     whole, fraction = match.groups()
     hz = int(whole) * 1_000_000 + int(fraction.ljust(6, "0"))
     return MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ and _frequency_folder(hz) == name
+
+
+def _clip_pattern(folder):
+    if _valid_frequency(folder):
+        return CLIP_NAME
+    if folder and _station_folder(folder) == folder:
+        return DAB_CLIP_NAME
+    return None
 
 
 def _finalized(info):
@@ -44,16 +55,17 @@ def latest_clip(root):
     try:
         with os.scandir(directory) as folders:
             for folder in folders:
-                if not _valid_frequency(folder.name):
+                pattern = _clip_pattern(folder.name)
+                if pattern is None:
                     continue
                 try:
-                    freq = os.open(folder.name, DIRECTORY_FLAGS, dir_fd=directory)
+                    descriptor = os.open(folder.name, DIRECTORY_FLAGS, dir_fd=directory)
                 except OSError:
                     continue
                 try:
-                    with os.scandir(freq) as clips:
+                    with os.scandir(descriptor) as clips:
                         for clip in clips:
-                            if not CLIP_NAME.fullmatch(clip.name):
+                            if not pattern.fullmatch(clip.name):
                                 continue
                             try:
                                 info = clip.stat(follow_symlinks=False)
@@ -64,14 +76,15 @@ def latest_clip(root):
                                 if newest is None or candidate > newest[0]:
                                     newest = candidate, _fingerprint(info)
                 finally:
-                    os.close(freq)
+                    os.close(descriptor)
     finally:
         os.close(directory)
     if newest is None:
         return None
     (_, _, folder, name), fingerprint = newest
-    return {"url": f"{RECORDINGS_URL}{folder}/{name}/{fingerprint}",
-            "label": f"{folder.removesuffix('mhz')} MHz · {name}"}
+    label = f"{folder.removesuffix('mhz')} MHz" if _valid_frequency(folder) else folder
+    return {"url": f"{RECORDINGS_URL}{quote(folder, safe='')}/{name}/{fingerprint}",
+            "label": f"{label} · {name}"}
 
 
 def open_clip(root, route):
@@ -79,13 +92,18 @@ def open_clip(root, route):
     parts = route.split("/")
     if len(parts) != 3:
         raise FileNotFoundError
-    frequency, name, fingerprint = parts
-    if not (_valid_frequency(frequency) and CLIP_NAME.fullmatch(name) and CLIP_ID.fullmatch(fingerprint)):
+    encoded_folder, name, fingerprint = parts
+    try:
+        folder_name = unquote(encoded_folder, errors="strict")
+    except UnicodeError:
+        raise FileNotFoundError from None
+    pattern = _clip_pattern(folder_name)
+    if pattern is None or not (pattern.fullmatch(name) and CLIP_ID.fullmatch(fingerprint)):
         raise FileNotFoundError
     with ExitStack() as stack:
         directory = _open_directory(root)
         stack.callback(os.close, directory)
-        folder = os.open(frequency, DIRECTORY_FLAGS, dir_fd=directory)
+        folder = os.open(folder_name, DIRECTORY_FLAGS, dir_fd=directory)
         stack.callback(os.close, folder)
         descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
         try:

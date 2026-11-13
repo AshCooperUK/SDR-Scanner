@@ -199,19 +199,42 @@ body {
   position: fixed;
   inset: auto 0 0;
   display: flex;
-  justify-content: flex-end;
-  padding: .55rem clamp(.8rem, 2vw, 1.4rem);
-  padding-bottom: max(.55rem, env(safe-area-inset-bottom));
+  align-items: center;
+  justify-content: space-between;
+  gap: clamp(.75rem, 3vw, 2rem);
+  padding: .7rem clamp(.8rem, 2vw, 1.4rem);
+  padding-bottom: max(.7rem, env(safe-area-inset-bottom));
   border-top: 1px solid #ffffff1a;
-  background: rgb(17 17 15 / 90%);
+  background: linear-gradient(100deg, rgb(28 24 19 / 96%), rgb(17 17 15 / 92%));
+}
+
+.footer-copy {
+  padding-inline-start: .7rem;
+  border-inline-start: 2px solid #e7a354;
+}
+
+.footer-copy h1 {
+  margin: 0 0 .2rem;
+  color: #fff2e0;
+  font-size: 1rem;
+  line-height: 1.2;
+}
+
+.footer-copy p {
+  margin: 0;
+  color: #d4cec3;
+  font-size: .82rem;
+  line-height: 1.4;
 }
 
 .github-profile {
   position: relative;
+  flex: 0 0 auto;
   width: 2.35rem;
   height: 2.35rem;
   border-radius: 50%;
   background: #3c3b36;
+  box-shadow: 0 0 0 1px #ffffff26;
 }
 
 .github-profile:focus-visible {
@@ -556,10 +579,13 @@ body {
 
 [data-lcd] {
   opacity: 0;
+  pointer-events: none;
 }
 
 [data-lcd].is-visible {
   opacity: 1;
+  cursor: help;
+  pointer-events: auto;
 }
 
 .lcd-readout {
@@ -786,7 +812,6 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #display.is-scrolling,
   .is-blinking {
     animation: none;
   }

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#252720">
-  <title>Scanner</title>
+  <title>SDr Scanner</title>
   <link rel="icon" href="ashcooperuk-avatar.png" type="image/png" sizes="128x128">
   <link rel="stylesheet" href="panel.css">
   <script src="panel.js" type="module"></script>
@@ -69,7 +69,7 @@
         <button type="button" class="extension-button setting-button" data-key="scan">
           <span class="button-label">SCAN</span><span class="button-cap" aria-hidden="true"></span>
         </button>
-        <button type="button" id="watch-toggle" class="extension-button setting-button" data-setting="watch" aria-pressed="false">
+        <button type="button" id="watch-toggle" class="extension-button setting-button" data-key="watch" aria-pressed="false">
           <span class="button-label">WATCH</span><span class="button-cap" aria-hidden="true"></span>
         </button>
         <button type="button" id="record-toggle" class="extension-button setting-button" data-key="record" aria-pressed="false">
@@ -78,10 +78,17 @@
         <button type="button" id="play-last" class="extension-button setting-button" data-key="play-last" aria-pressed="false">
           <span class="button-label">PLAY LAST</span><span class="button-cap" aria-hidden="true"></span>
         </button>
+        <button type="button" id="dab-toggle" class="extension-button setting-button" data-setting="dab" aria-pressed="false">
+          <span class="button-label">DAB</span><span class="button-cap" aria-hidden="true"></span>
+        </button>
       </div>
     </div>
   </main>
   <footer class="profile-footer">
+    <div class="footer-copy">
+      <h1>SDr Scanner</h1>
+      <p>Listen to live radio, save favourites and record audio from your RTL-SDR.</p>
+    </div>
     <a class="github-profile" href="https://github.com/AshCooperUK" target="_blank" rel="noopener noreferrer"
       aria-label="AshCooperUK on GitHub" title="AshCooperUK on GitHub">
       <img class="github-avatar" src="https://github.com/AshCooperUK.png?size=96"
