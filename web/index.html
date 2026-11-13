@@ -10,10 +10,12 @@
   <script src="panel.js" type="module"></script>
 </head>
 <body>
-  <main class="radio" aria-label="Scanner front panel">
+  <div class="scanner-unit">
+  <main class="radio is-mobile-slim" aria-label="Scanner front panel">
     <div class="upper-panel">
       <div class="left-controls">
         <button type="button" class="key" data-key="hold" style="--x:99;--y:0;--w:145;--h:96;--sprite-y:254"><span class="face-label">Hold</span></button>
+        <button type="button" id="slim-search" class="key" data-key="search" style="--x:660;--w:134;--h:98;--sprite-y:493"><span class="face-label">Search</span></button>
         <button type="button" class="key" data-key="up" style="--x:278;--y:0;--w:138;--h:100;--sprite-y:251"><span class="face-label">Up</span></button>
         <button type="button" class="key" data-key="down" style="--x:454;--y:0;--w:143;--h:100;--sprite-y:251"><span class="face-label">Down</span></button>
         <button type="button" id="dab-toggle" class="key" data-setting="dab" aria-pressed="false" style="--x:98;--y:151;--w:147;--h:69;--sprite-y:389"><span class="face-label">DAB</span></button>
@@ -30,14 +32,17 @@
         <button type="button" class="key" data-key="cb" style="--x:450;--y:549;--w:152;--h:73;--sprite-y:491"><span class="face-label">CB AM/FM</span></button>
       </div>
       <div class="dials">
-        <div class="dial" data-knob="squelch" role="slider" tabindex="0" aria-label="Squelch" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="--x:1405;--y:293;--w:152;--h:152;--cap-x:1413;--cap-y:238;--cap-size:148">
+        <div class="dial" data-knob="squelch" role="slider" tabindex="0" aria-label="Squelch" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="--x:1405;--y:293;--w:152;--h:152">
           <span class="face-label" aria-hidden="true">Squelch</span>
+          <span class="dial-grip" aria-hidden="true"></span><span class="dial-pointer" aria-hidden="true"></span>
         </div>
-        <div class="dial" data-knob="boost" role="slider" tabindex="0" aria-label="Audio boost" aria-valuemin="0" aria-valuemax="12" aria-valuenow="0" aria-valuetext="0 dB" style="--x:1405;--y:497;--w:152;--h:152;--cap-x:1413;--cap-y:450;--cap-size:148">
+        <div class="dial" data-knob="boost" role="slider" tabindex="0" aria-label="Audio boost" aria-valuemin="0" aria-valuemax="12" aria-valuenow="0" aria-valuetext="0 dB" style="--x:1405;--y:497;--w:152;--h:152">
           <span class="face-label" aria-hidden="true">Audio Boost</span>
+          <span class="dial-grip" aria-hidden="true"></span><span class="dial-pointer" aria-hidden="true"></span>
         </div>
-        <div class="dial" data-knob="volume" role="slider" tabindex="0" aria-label="Volume/Clock" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Clock standby" style="--x:1405;--y:701;--w:152;--h:152;--cap-x:1413;--cap-y:450;--cap-size:148">
+        <div class="dial" data-knob="volume" role="slider" tabindex="0" aria-label="Volume/Clock" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Clock standby" style="--x:1405;--y:701;--w:152;--h:152">
           <span class="face-label" aria-hidden="true">Volume</span>
+          <span class="dial-grip" aria-hidden="true"></span><span class="dial-pointer" aria-hidden="true"></span>
         </div>
       </div>
 
@@ -50,10 +55,12 @@
             <div class="lcd-channel"><span data-lcd="CH">CH</span><div id="channel"></div></div>
             <div id="display"></div>
           </div>
+          <div id="pin-status" class="lcd-pin-status" role="status" hidden></div>
           <div id="rds-readout" class="lcd-rds" aria-hidden="true" hidden>
             <span id="rds-station" class="lcd-line" hidden><span></span></span>
             <span id="rds-text" class="lcd-line" hidden><span id="rds-copy"></span></span>
           </div>
+          <span id="tone-readout" class="lcd-tone" hidden></span>
           <input id="favorite-name" class="lcd-editor" type="text" maxlength="80"
             aria-label="Favourite name" autocomplete="off" spellcheck="false" hidden>
           <div class="lcd-status" aria-hidden="true">
@@ -85,19 +92,27 @@
       </div>
       <div class="control-divider" aria-hidden="true"></div>
       <div class="control-keys">
-        <button type="button" class="key" data-key="search" style="--x:660;--position-x:126;--y:975;--w:134;--h:98;--sprite-y:493"><span class="face-label">Search</span></button>
-        <button type="button" class="key" data-key="lock" style="--x:834;--position-x:165;--y:976;--w:135;--h:97;--sprite-y:495"><span class="face-label">L/O</span></button>
-        <button type="button" class="key" data-key="band" style="--x:1015;--position-x:198;--y:976;--w:133;--h:97;--sprite-y:495"><span class="face-label">Band/Step</span></button>
-        <button type="button" class="key" data-key="prog" style="--x:1188;--position-x:238;--y:975;--w:135;--h:98;--sprite-y:494"><span class="face-label">Prog</span></button>
+        <button type="button" class="key" data-key="sideband" style="--x:660;--w:134;--h:98;--sprite-y:493"><span class="face-label">USB/LSB</span></button>
+        <button type="button" class="key" data-key="tone" aria-pressed="false" style="--x:834;--w:135;--h:97;--sprite-y:495"><span class="face-label">Tone</span></button>
+        <button type="button" class="key" data-key="search" style="--x:660;--w:134;--h:98;--sprite-y:493"><span class="face-label">Search</span></button>
+        <button type="button" class="key" data-key="lock" style="--x:834;--w:135;--h:97;--sprite-y:495"><span class="face-label">L/O</span></button>
+        <button type="button" class="key" data-key="band" style="--x:1015;--w:133;--h:97;--sprite-y:495"><span class="face-label">Band/Step</span></button>
+        <button type="button" class="key" data-key="prog" style="--x:1188;--w:135;--h:98;--sprite-y:494"><span class="face-label">Prog</span></button>
+        <button type="button" class="key" data-key="save-vol" style="--x:1188;--w:135;--h:98;--sprite-y:494"><span class="face-label">Save Vol</span></button>
       </div>
     </div>
     <div class="extension">
       <div id="favorite-bank" class="favorite-bank" role="group" aria-label="Favourite frequencies"></div>
+      <div id="mobile-keypad" class="favorite-bank" role="group" aria-label="Frequency keypad">
+        <button type="button" id="slim-lock" class="extension-button setting-button" data-key="lock">
+          <span class="button-label">L/O</span><span class="button-cap" aria-hidden="true"></span>
+        </button>
+      </div>
       <div class="settings-bank" role="group" aria-label="Scanner settings">
         <button type="button" id="rds-toggle" class="extension-button setting-button" data-setting="rds" aria-pressed="false">
           <span class="button-label">RDS</span><span class="button-cap" aria-hidden="true"></span>
         </button>
-        <button type="button" class="extension-button setting-button" data-key="scan">
+        <button type="button" id="scan-toggle" class="extension-button setting-button" data-key="scan">
           <span class="button-label">SCAN</span><span class="button-cap" aria-hidden="true"></span>
         </button>
         <button type="button" id="watch-toggle" class="extension-button setting-button" data-key="watch" aria-pressed="false">
@@ -106,15 +121,80 @@
         <button type="button" id="record-toggle" class="extension-button setting-button" data-key="record" aria-pressed="false">
           <span class="button-label">RECORD</span><span class="button-cap" aria-hidden="true"></span>
         </button>
+        <button type="button" id="discovery-toggle" class="extension-button setting-button desktop-discovery-control" data-key="discovery" aria-expanded="false" aria-controls="discovery-pad">
+          <span class="button-label">DISCOVERY</span><span class="button-cap" aria-hidden="true"></span>
+        </button>
+        <button type="button" id="instant-replay" class="extension-button setting-button desktop-discovery-control" data-key="replay" aria-pressed="false">
+          <span class="button-label">REPLAY</span><span class="button-cap" aria-hidden="true"></span>
+        </button>
         <button type="button" id="play-last" class="extension-button setting-button" data-key="play-last" aria-pressed="false">
           <span class="button-label">PLAY LAST</span><span class="button-cap" aria-hidden="true"></span>
         </button>
         <button type="button" class="extension-button setting-button" data-key="mute" aria-pressed="false">
           <span class="button-label">MUTE</span><span class="button-cap" aria-hidden="true"></span>
         </button>
+        <button type="button" id="mobile-advanced-toggle" class="extension-button setting-button" aria-pressed="false">
+          <span class="button-label"><span class="adv-label">ADV</span><span class="pin-confirm-label" aria-hidden="true">PROG</span></span>
+          <span class="button-cap" aria-hidden="true"></span>
+        </button>
       </div>
     </div>
   </main>
+  <aside id="discovery-pad" class="discovery-pad" aria-labelledby="discovery-title" hidden>
+    <div class="discovery-screen">
+      <div class="discovery-lcd" aria-hidden="true"></div>
+      <header class="discovery-heading">
+        <h2 id="discovery-title" class="discovery-title">Discovery Log</h2>
+        <div id="discovery-current" role="group" hidden>
+          <span class="discovery-current-frequency" aria-hidden="true">
+            <span id="discovery-current-hz" class="discovery-current-digits"></span>
+            <span class="discovery-current-unit">MHz</span>
+          </span>
+          <span id="discovery-current-mode" class="discovery-current-digits" aria-hidden="true"></span>
+          <span id="discovery-current-tone" class="discovery-current-digits" aria-hidden="true"></span>
+        </div>
+      </header>
+      <div class="discovery-toolbar">
+        <button type="button" id="discovery-mobile-replay" aria-pressed="false">Replay</button>
+        <p id="discovery-status" role="status"></p>
+        <span id="discovery-page-number" aria-live="polite">Page 1 / 1</span>
+      </div>
+      <div class="discovery-pages" tabindex="0" role="region" aria-label="Discovery entries">
+        <table>
+          <colgroup>
+            <col class="discovery-time-column"><col class="discovery-frequency-column">
+            <col class="discovery-mode-column"><col>
+            <col span="2" class="discovery-action-column">
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col">Time</th><th scope="col">MHz</th>
+              <th scope="col" aria-label="Mode" title="Mode">M</th>
+              <th scope="col" aria-label="Tone" title="Tone">T</th>
+              <th scope="col"><span class="discovery-action-label">Play</span></th>
+              <th scope="col"><span class="discovery-action-label">Rec</span></th>
+            </tr>
+          </thead>
+          <tbody id="discovery-hits"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="discovery-controls" role="group" aria-label="Discovery controls">
+      <button type="button" id="discovery-log-toggle" class="extension-button setting-button" aria-pressed="false" title="Pause or resume reception logging">
+        <span class="button-label">PAUSE LOG</span><span class="button-cap" aria-hidden="true"></span>
+      </button>
+      <button type="button" id="discovery-page-up" class="extension-button setting-button" aria-controls="discovery-hits" title="Show newer hits" disabled>
+        <span class="button-label">PAGE UP</span><span class="button-cap" aria-hidden="true"></span>
+      </button>
+      <button type="button" id="discovery-page-down" class="extension-button setting-button" aria-controls="discovery-hits" title="Show older hits" disabled>
+        <span class="button-label">PAGE DOWN</span><span class="button-cap" aria-hidden="true"></span>
+      </button>
+      <button type="button" id="discovery-close" class="extension-button setting-button" title="Close the Discovery display">
+        <span class="button-label">CLOSE</span><span class="button-cap" aria-hidden="true"></span>
+      </button>
+    </div>
+  </aside>
+  </div>
   <footer class="profile-footer">
     <div class="footer-copy">
       <h1>SDr Scanner</h1>
@@ -130,6 +210,48 @@
     </a>
   </footer>
   <audio id="last-recording" preload="none" loop hidden></audio>
+  <dialog id="tone-filter-dialog" class="folder-dialog" aria-labelledby="tone-filter-title">
+    <form id="tone-filter-form" method="dialog">
+      <h2 id="tone-filter-title">Favourite tone squelch</h2>
+      <p id="tone-filter-channel"></p>
+      <label for="tone-filter-kind">Open squelch on</label>
+      <select id="tone-filter-kind" autofocus>
+        <option value="">Carrier only</option>
+        <option value="CTCSS">CTCSS tone</option>
+        <option value="DCS">DCS code</option>
+      </select>
+      <div id="tone-filter-ctcss-fields" class="tone-filter-fields" hidden>
+        <label for="tone-filter-hz">CTCSS frequency (Hz)</label>
+        <input id="tone-filter-hz" type="number" min="67" max="254.1" step="0.1" placeholder="94.8" disabled required>
+      </div>
+      <div id="tone-filter-dcs-fields" class="tone-filter-fields" hidden>
+        <label for="tone-filter-code">DCS code</label>
+        <input id="tone-filter-code" type="text" inputmode="numeric" pattern="[0-7]{3}" maxlength="3" placeholder="023" disabled required>
+        <label for="tone-filter-polarity">Polarity</label>
+        <select id="tone-filter-polarity" disabled>
+          <option value="N">Normal</option>
+          <option value="I">Inverted</option>
+        </select>
+      </div>
+      <button type="button" id="tone-filter-detected" hidden>Use detected tone</button>
+      <p id="tone-filter-status" role="status"></p>
+      <div class="folder-actions">
+        <button id="tone-filter-cancel" type="button">Cancel</button>
+        <button id="tone-filter-save" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="volume-offset-dialog" class="folder-dialog" aria-labelledby="volume-offset-title">
+    <form method="dialog">
+      <h2 id="volume-offset-title">Channel volume offset</h2>
+      <label for="volume-offset-value">Offset (dB)</label>
+      <input id="volume-offset-value" type="number" min="-12" max="12" step="0.5" required>
+      <div class="folder-actions">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button value="save">Save</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="record-folder-dialog" class="folder-dialog" aria-labelledby="record-folder-title">
     <form method="dialog">
       <h2 id="record-folder-title">Recording folder</h2>

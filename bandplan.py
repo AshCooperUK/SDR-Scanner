@@ -5,6 +5,9 @@ from typing import NamedTuple
 
 from ofcom_presets import BUSINESS_FM, COASTAL_FM, EVENTS_FM, RAIL_FM, UTILITIES_FM
 
+ANALOGUE_MODES = ("AM", "FM", "WFM", "USB", "LSB")
+SIDEBANDS = ("USB", "LSB")
+
 
 class Channel(NamedTuple):
     hz: int
@@ -196,6 +199,9 @@ AMATEUR_FM = tuple(dict.fromkeys((
     *range(1_291_000_000, 1_291_375_001, 25_000),
     *range(1_298_025_000, 1_298_975_001, 25_000),
     *range(1_299_775_000, 1_299_975_001, 25_000),
+    # 10 m RH8 output and additional 2 m and 70 cm internet voice gateways.
+    29_700_000, 144_875_000, 144_887_500, 144_900_000,
+    *range(433_950_000, 434_050_001, 12_500),
 )))
 
 # RSGB AM activity and VMARS frequencies. Sample the unchannelised
@@ -206,12 +212,126 @@ AMATEUR_AM = (
     *range(29_010_000, 29_100_000, 10_000),
 )
 
+# RSGB January 2026 voice and shared narrowband segments. SSB is not
+# channelised, so sample dial frequencies every 2.5 kHz and include activity centres.
+AMATEUR_LSB = tuple(dict.fromkeys((
+    1_900_000, 3_690_000, 7_090_000,
+    *range(1_843_000, 2_000_000, 2_500),     # 160 m
+    *range(3_603_000, 3_800_000, 2_500),     # 80 m
+    *range(7_060_000, 7_200_000, 2_500),     # 40 m
+)))
+
+AMATEUR_USB = tuple(dict.fromkeys((
+    # RSGB 60 m guidance lists dial frequencies within separate UK segments.
+    5_278_500, 5_298_500, 5_301_000, 5_304_000, 5_320_000, 5_335_000,
+    5_354_000, 5_363_000, 5_371_500, 5_379_000, 5_395_000, 5_398_500, 5_403_500,
+    14_285_000, 18_130_000, 21_285_000, 24_950_000, 28_360_000,
+    50_110_000, 50_150_000, 50_285_000, 70_185_000, 70_200_000,
+    144_250_000, 144_260_000, 144_300_000, 432_200_000, 432_350_000, 1_296_200_000,
+    # Leave room for the upper sideband at each segment's upper edge.
+    *range(14_112_000, 14_347_001, 2_500),   # 20 m
+    *range(18_120_000, 18_165_001, 2_500),   # 17 m
+    *range(21_151_000, 21_447_001, 2_500),   # 15 m
+    *range(24_940_000, 24_987_001, 2_500),   # 12 m
+    *range(28_320_000, 28_997_001, 2_500),   # 10 m
+    *range(50_100_000, 50_297_001, 2_500),   # 6 m
+    *range(70_100_000, 70_247_001, 2_500),   # 4 m
+    *range(144_150_000, 144_397_001, 2_500), # 2 m
+    *range(432_000_000, 432_397_001, 2_500), # 70 cm
+    *range(1_296_150_000, 1_296_597_001, 2_500), # 23 cm below the data centre
+    *range(1_296_602_500, 1_296_738_001, 2_500), # Above data, below the first beacon segment
+)))
+
+# Ofcom OFW611 Schedule 1, within the receiver range. Keep the 60 m gaps.
+AMATEUR_SEARCH = {
+    "136 kHz": ((135_700, 137_800, 100),),
+    "472 kHz": ((472_000, 479_000, 100),),
+    "160m": ((1_810_000, 2_000_000, 1_000),),
+    "80m": ((3_500_000, 3_800_000, 1_000),),
+    "60m": ((5_258_500, 5_264_000, 500), (5_276_000, 5_284_000, 500),
+            (5_288_500, 5_292_000, 500), (5_298_000, 5_307_000, 500),
+            (5_313_000, 5_323_000, 500), (5_333_000, 5_338_000, 500),
+            (5_354_000, 5_358_000, 500), (5_362_000, 5_374_500, 500),
+            (5_378_000, 5_382_000, 500), (5_395_000, 5_401_500, 500),
+            (5_403_500, 5_406_500, 500)),
+    "40m": ((7_000_000, 7_200_000, 1_000),),
+    "30m": ((10_100_000, 10_150_000, 1_000),),
+    "20m": ((14_000_000, 14_350_000, 1_000),),
+    "17m": ((18_068_000, 18_168_000, 1_000),),
+    "15m": ((21_000_000, 21_450_000, 1_000),),
+    "12m": ((24_890_000, 24_990_000, 1_000),),
+    "10m": ((28_000_000, 29_000_000, 2_500), (29_000_000, 29_700_000, 5_000)),
+    "6m": ((50_000_000, 50_500_000, 2_500), (50_500_000, 52_000_000, 5_000)),
+    "4m": ((70_000_000, 70_250_000, 2_500), (70_250_000, 70_500_000, 6_250)),
+    "2m": ((144_000_000, 144_500_000, 2_500), (144_500_000, 146_000_000, 6_250)),
+    "70cm": ((430_000_000, 432_000_000, 6_250), (432_000_000, 432_500_000, 2_500),
+             (432_500_000, 440_000_000, 6_250)),
+    "23cm": ((1_240_000_000, 1_240_750_000, 2_500), (1_240_750_000, 1_296_000_000, 12_500),
+             (1_296_000_000, 1_296_994_000, 2_500), (1_296_994_000, 1_325_000_000, 12_500)),
+}
+
+# Ofcom IR 2044 and Business Radio Guidance. LF allocations are non-voice.
+BUSINESS_SEARCH = {
+    "LF 1": ((132_977, 133_977, 100),),
+    "LF 1A": ((146_205, 147_205, 100),),
+    "Paging": ((26_225_000, 49_493_750, 6_250),),
+    "Band 1": ((55_750_000, 68_000_000, 6_250),),
+    "Low": ((68_081_250, 87_493_750, 6_250),),
+    "Mid": ((137_962_500, 165_043_750, 6_250),),
+    "High": ((165_043_750, 173_093_750, 6_250),),
+    "Band 3": ((177_206_250, 191_493_750, 6_250),),
+    "UHF 1": ((425_006_250, 449_493_750, 6_250),),
+    "UHF 2": ((450_000_000, 470_000_000, 6_250),),
+}
+
+BAND_SEARCH_RANGES = {"HAM": AMATEUR_SEARCH, "BUS": BUSINESS_SEARCH}
+_AMATEUR_SEARCH_FM = frozenset(AMATEUR_FM)
+_AMATEUR_SEARCH_AM = frozenset(AMATEUR_AM)
+_AMATEUR_SEARCH_USB = frozenset(AMATEUR_USB)
+
+
+def band_search_frequencies(bank, label, step=0):
+    ranges = BAND_SEARCH_RANGES[bank]
+    selected = ranges.values() if label == f"{bank} ALL" else (ranges[label],)
+    known = BUSINESS_FM if bank == "BUS" else (*AMATEUR_FM, *AMATEUR_AM, *AMATEUR_LSB, *AMATEUR_USB)
+    frequencies = set()
+    for segments in selected:
+        for lower, upper, default_step in segments:
+            spacing = step or default_step
+            first = ((lower + spacing - 1) // spacing) * spacing
+            frequencies.update(range(first, upper + 1, spacing))
+            frequencies.update((lower, upper))
+            frequencies.update(hz for hz in known if lower <= hz <= upper)
+    return tuple(sorted(frequencies))
+
+
+def band_search_mode(bank, hz):
+    if bank == "BUS":
+        return "AM" if hz < 1_000_000 else "FM"
+    if hz in _AMATEUR_SEARCH_AM or 29_000_000 <= hz < 29_100_000:
+        return "AM"
+    if hz in _AMATEUR_SEARCH_FM:
+        return "FM"
+    if hz in _AMATEUR_SEARCH_USB:
+        return "USB"
+    if 1_810_000 <= hz <= 3_800_000 or 7_000_000 <= hz <= 7_200_000:
+        return "LSB"
+    if (hz < 29_100_000 or 50_000_000 <= hz < 50_500_000 or 70_000_000 <= hz < 70_250_000
+            or 144_000_000 <= hz < 144_500_000 or 432_000_000 <= hz < 432_500_000
+            or 1_240_000_000 <= hz < 1_240_750_000 or 1_296_000_000 <= hz < 1_296_994_000):
+        return "USB"
+    return "FM"
+
+
 # Ofcom TxParams entries for West Runton, Tacolneston, Stody, Fakenham,
 # Aylmerton, Great Massingham and Stoke Holy Cross lead the UK FM band grid.
 BROADCAST_FM = tuple(dict.fromkeys((
     95_600_000, 89_700_000, 91_900_000, 94_100_000, 95_100_000,
     96_200_000, 99_300_000, 101_500_000, 103_200_000, 104_400_000, 106_100_000,
-    *range(87_500_000, 108_000_000, 100_000),
+    96_700_000, 99_900_000, 102_400_000, 107_300_000,
+    # Ofcom TxParams November 2026 lists no transmitters on the final three points.
+    87_700_000, 87_800_000, *range(88_000_000, 108_000_000, 100_000),
+    87_500_000, 87_600_000, 87_900_000,
 )))
 
 # Ofcom IR 2027 and IR 2027.2 channel centres, in channel-number order.
@@ -231,6 +351,93 @@ CB_UK = tuple(range(27_601_250, 27_991_251, 10_000))
 # List coast first on duplex channels, then add the ship side.
 _MARINE_SIMPLEX = {6, *range(8, 18), *range(67, 78), 87, 88}
 _MARINE_NUMBERS = (*range(1, 29), *range(60, 70), *range(71, 89))
+_MARINE_UHF = (*range(457_525_000, 457_575_001, 12_500), *range(467_525_000, 467_575_001, 12_500))
+
+# Norwich AIP voice carriers, then CAA common UK channels. 8.33 kHz
+# channel designators are converted to their actual RF carrier frequencies.
+_AIR_PRIORITY = (
+    119_350_000, 124_250_000, 128_325_000, 128_625_000, 121_600_000,
+    121_500_000, 123_100_000, 123_450_000, 130_491_667,
+    135_475_000, 118_675_000, 118_683_333, 122_475_000, 122_950_000,
+    129_825_000, 129_833_333, 129_900_000, 129_975_000, 130_100_000,
+    130_125_000, 130_533_333, 129_891_667, 130_400_000, 130_525_000,
+)
+
+
+# NATS UK AIP AIRAC 11/2026 AD and ENR voice channel designators, converted
+# to RF carrier frequencies and deduplicated. See the CAA CAP 1573 conversion table.
+_UK_AIR_VOICE = (
+    118_025_000, 118_050_000, 118_075_000, 118_100_000, 118_150_000, 118_200_000,
+    118_250_000, 118_275_000, 118_300_000, 118_350_000, 118_375_000, 118_400_000,
+    118_425_000, 118_450_000, 118_475_000, 118_500_000, 118_550_000, 118_575_000,
+    118_600_000, 118_625_000, 118_650_000, 118_700_000, 118_775_000, 118_800_000,
+    118_825_000, 118_850_000, 118_925_000, 118_950_000, 119_000_000, 119_050_000,
+    119_100_000, 119_125_000, 119_150_000, 119_200_000, 119_225_000, 119_325_000,
+    119_350_000, 119_375_000, 119_400_000, 119_450_000, 119_475_000, 119_500_000,
+    119_525_000, 119_575_000, 119_600_000, 119_675_000, 119_700_000, 119_725_000,
+    119_775_000, 119_800_000, 119_850_000, 119_875_000, 119_950_000, 119_975_000,
+    120_050_000, 120_058_333, 120_125_000, 120_175_000, 120_225_000, 120_250_000,
+    120_300_000, 120_400_000, 120_450_000, 120_475_000, 120_525_000, 120_575_000,
+    120_600_000, 120_625_000, 120_700_000, 120_708_333, 120_775_000, 120_850_000,
+    120_900_000, 120_966_667, 120_975_000, 121_000_000, 121_025_000, 121_075_000,
+    121_125_000, 121_200_000, 121_225_000, 121_275_000, 121_325_000, 121_350_000,
+    121_375_000, 121_450_000, 121_500_000, 121_550_000, 121_600_000, 121_625_000,
+    121_700_000, 121_725_000, 121_750_000, 121_800_000, 121_816_667, 121_825_000,
+    121_850_000, 121_875_000, 121_883_333, 121_900_000, 121_925_000, 121_933_333,
+    121_950_000, 121_975_000, 122_075_000, 122_100_000, 122_125_000, 122_150_000,
+    122_208_333, 122_250_000, 122_300_000, 122_400_000, 122_425_000, 122_450_000,
+    122_600_000, 122_608_333, 122_675_000, 122_700_000, 122_708_333, 122_725_000,
+    122_775_000, 122_800_000, 122_825_000, 122_850_000, 122_866_667, 122_900_000,
+    122_925_000, 123_000_000, 123_150_000, 123_200_000, 123_275_000, 123_425_000,
+    123_475_000, 123_575_000, 123_600_000, 123_625_000, 123_700_000, 123_775_000,
+    123_800_000, 123_875_000, 123_900_000, 123_950_000, 123_975_000, 124_000_000,
+    124_025_000, 124_075_000, 124_100_000, 124_125_000, 124_150_000, 124_225_000,
+    124_250_000, 124_275_000, 124_325_000, 124_375_000, 124_400_000, 124_450_000,
+    124_475_000, 124_500_000, 124_575_000, 124_600_000, 124_625_000, 124_650_000,
+    124_750_000, 124_825_000, 124_875_000, 124_900_000, 124_925_000, 124_950_000,
+    125_000_000, 125_091_667, 125_200_000, 125_225_000, 125_250_000, 125_300_000,
+    125_350_000, 125_375_000, 125_400_000, 125_408_333, 125_425_000, 125_475_000,
+    125_550_000, 125_600_000, 125_625_000, 125_650_000, 125_675_000, 125_800_000,
+    125_825_000, 125_850_000, 125_875_000, 125_900_000, 125_950_000, 126_025_000,
+    126_075_000, 126_125_000, 126_175_000, 126_300_000, 126_350_000, 126_450_000,
+    126_550_000, 126_700_000, 126_725_000, 126_775_000, 126_825_000, 126_875_000,
+    126_925_000, 127_100_000, 127_150_000, 127_175_000, 127_200_000, 127_275_000,
+    127_350_000, 127_400_000, 127_425_000, 127_475_000, 127_525_000, 127_700_000,
+    127_725_000, 127_825_000, 127_875_000, 127_925_000, 127_950_000, 128_000_000,
+    128_025_000, 128_050_000, 128_075_000, 128_125_000, 128_158_333, 128_175_000,
+    128_300_000, 128_325_000, 128_400_000, 128_425_000, 128_475_000, 128_525_000,
+    128_550_000, 128_625_000, 128_650_000, 128_675_000, 128_750_000, 128_816_667,
+    128_850_000, 128_900_000, 128_966_667, 128_975_000, 129_025_000, 129_050_000,
+    129_075_000, 129_100_000, 129_175_000, 129_200_000, 129_225_000, 129_250_000,
+    129_275_000, 129_375_000, 129_425_000, 129_450_000, 129_525_000, 129_550_000,
+    129_575_000, 129_600_000, 129_725_000, 129_883_333, 130_016_667, 130_050_000,
+    130_425_000, 130_475_000, 130_500_000, 130_550_000, 130_558_333, 130_700_000,
+    130_725_000, 130_775_000, 130_800_000, 130_850_000, 130_875_000, 130_925_000,
+    130_975_000, 131_000_000, 131_050_000, 131_150_000, 131_300_000, 131_325_000,
+    131_350_000, 132_050_000, 132_150_000, 132_166_667, 132_300_000, 132_375_000,
+    132_475_000, 132_491_667, 132_550_000, 132_600_000, 132_700_000, 132_725_000,
+    132_841_667, 132_858_333, 132_950_000, 133_050_000, 133_075_000, 133_100_000,
+    133_125_000, 133_150_000, 133_175_000, 133_200_000, 133_375_000, 133_400_000,
+    133_425_000, 133_441_667, 133_450_000, 133_525_000, 133_600_000, 133_675_000,
+    133_700_000, 133_725_000, 133_800_000, 133_850_000, 133_875_000, 133_941_667,
+    133_975_000, 134_050_000, 134_125_000, 134_150_000, 134_175_000, 134_200_000,
+    134_225_000, 134_250_000, 134_275_000, 134_350_000, 134_375_000, 134_391_667,
+    134_425_000, 134_441_667, 134_458_333, 134_575_000, 134_600_000, 134_675_000,
+    134_750_000, 134_775_000, 134_800_000, 134_850_000, 134_875_000, 134_900_000,
+    134_925_000, 134_975_000, 135_000_000, 135_050_000, 135_250_000, 135_325_000,
+    135_425_000, 135_525_000, 135_575_000, 135_675_000, 135_700_000, 135_716_667,
+    135_800_000, 135_850_000, 135_875_000, 135_900_000, 136_025_000, 136_050_000,
+    136_075_000, 136_200_000, 136_225_000, 136_275_000, 136_350_000, 136_525_000,
+    136_550_000, 136_600_000,
+)
+
+def _air_channels(step):
+    air = BANDS[AIR_INDEX]
+    frequencies = tuple(air.frequency(index, step) for index in range(air.count(step)))
+    included = set(frequencies)
+    priorities = (hz for hz in (*_AIR_PRIORITY, *_UK_AIR_VOICE) if hz in included)
+    ordered = dict.fromkeys((*priorities, *frequencies))
+    return tuple(Channel(hz, "AM", "AIR") for hz in ordered)
 
 
 def _marine_frequencies(number):
@@ -242,30 +449,31 @@ def _marine_frequencies(number):
 
 
 def _marine_channels():
-    international = tuple(Channel(hz, "FM", "MRN", preset_number=number)
-                          for number in _MARINE_NUMBERS for hz in _marine_frequencies(number))
-    international_hz = {channel.hz for channel in international}
-    return international + tuple(Channel(hz, "FM", "MRN")
-                                 for hz in COASTAL_FM if hz not in international_hz)
+    numbered = tuple(Channel(hz, "FM", "MRN", preset_number=number)
+                     for number in _MARINE_NUMBERS for hz in _marine_frequencies(number))
+    numbered += (Channel(162_150_000, "FM", "MRN", preset_number=31),
+                 Channel(157_550_000, "FM", "MRN", preset_number=31))
+    numbered_hz = {channel.hz for channel in numbered}
+    return numbered + tuple(Channel(hz, "FM", "MRN") for hz in (*COASTAL_FM, *_MARINE_UHF)
+                            if hz not in numbered_hz)
 
 
 def factory_banks(air_step):
-    air = BANDS[AIR_INDEX]
     return {
         "PVT": (),
         "FAV": (),
         "PMR": tuple(Channel(hz, "FM", "PMR", preset_number=index)
                      for index, hz in enumerate(PMR, 1)),
-        "AIR": tuple(Channel(air.frequency(index, air_step), "AM", "AIR")
-                     for index in range(air.count(air_step))),
+        "AIR": _air_channels(air_step),
         "MRN": _marine_channels(),
         "CBAM": tuple(Channel(hz, "AM", "CBAM", preset_number=number)
                       for number, hz in enumerate(CB_CEPT, 1)),
         "CBFM": tuple(Channel(hz, "FM", "CBFM", preset_number=number)
                       for frequencies in (CB_UK, CB_CEPT) for number, hz in enumerate(frequencies, 1)),
         "BUS": tuple(Channel(hz, "FM", "BUS") for hz in BUSINESS_FM),
-        "HAM": tuple(Channel(hz, "FM", "HAM") for hz in AMATEUR_FM)
-               + tuple(Channel(hz, "AM", "HAM") for hz in AMATEUR_AM),
+        "HAM": tuple(Channel(hz, mode, "HAM") for mode, frequencies in (
+            ("FM", AMATEUR_FM), ("AM", AMATEUR_AM), ("LSB", AMATEUR_LSB), ("USB", AMATEUR_USB),
+        ) for hz in frequencies),
         "BCAST": tuple(Channel(hz, "WFM", "BCAST") for hz in BROADCAST_FM),
         "RAIL": tuple(Channel(hz, "FM", "RAIL") for hz in RAIL_FM),
         "EVT": tuple(Channel(hz, "FM", "EVT") for hz in EVENTS_FM),

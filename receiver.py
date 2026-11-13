@@ -1,4 +1,4 @@
-"""Receive AM, narrowband FM or broadcast FM from a local RTL-SDR.
+"""Receive AM, FM and single sideband from a local RTL-SDR.
 
 Only the radio worker should use a Receiver instance. Level measurements are
 channel power relative to ADC full scale. Audio is signed little-endian PCM.
@@ -16,6 +16,7 @@ import numpy as np
 from scipy import signal
 
 from rds import RdsDecoder
+from tone_search import ToneSearch
 
 
 SAMPLE_RATE = 24_000
@@ -33,8 +34,13 @@ PROBE_STRIDE = 1_600_000
 WATERFALL_BINS = 172
 WATERFALL_SPAN_HZ = 1_000_000
 WATERFALL_INTERVAL = 1 / 7
-WATCH_HALF_WIDTH = {"AM": 7_000, "FM": 9_000, "WFM": 120_000}
-METER_NOISE_BANDWIDTH = {"AM": 7_400, "FM": 10_600, "WFM": 200_000}
+SSB_MODES = frozenset(("USB", "LSB"))
+SSB_LOW_HZ = 300
+SSB_HIGH_HZ = 3_000
+SSB_GAIN_DECAY = np.exp(-IQ_SAMPLES / (IQ_RATE * .5))
+WATCH_HALF_WIDTH = {"AM": 7_000, "FM": 9_000, "WFM": 120_000, "USB": 3_600, "LSB": 3_600}
+METER_NOISE_BANDWIDTH = {"AM": 7_400, "FM": 10_600, "WFM": 200_000,
+                         "USB": SSB_HIGH_HZ - SSB_LOW_HZ, "LSB": SSB_HIGH_HZ - SSB_LOW_HZ}
 METER_SPECTRUM_INTERVAL = 4
 METER_MIN_EXCESS_DB = 5
 NFM_DEEMPHASIS_SECONDS = 200e-6
@@ -198,17 +204,30 @@ class _IqStream:
 class _ChannelDecoder:
     def __init__(self):
         self.rds = None
+        self.tone_search = None
         narrow_decimation = signal.firwin(
             1101, 15_000, fs=IQ_RATE, window=("kaiser", 8.0)
         ).astype(np.float32)
         self.decimation_filters = {
             "AM": narrow_decimation,
             "FM": narrow_decimation,
+            "USB": narrow_decimation,
+            "LSB": narrow_decimation,
             "WFM": signal.firwin(641, 104_000, fs=IQ_RATE, window=("kaiser", 8.0)).astype(np.float32),
         }
+        # Move a low-pass FIR away from zero to isolate one sideband in
+        # complex baseband, before taking the real component for audio.
+        ssb_taps = 641
+        ssb_half_width = (SSB_HIGH_HZ - SSB_LOW_HZ) / 2
+        ssb_midpoint = (SSB_HIGH_HZ + SSB_LOW_HZ) / 2
+        ssb_indexes = np.arange(ssb_taps) - ssb_taps // 2
+        usb = (signal.firwin(ssb_taps, ssb_half_width, fs=CHANNEL_RATE, window=("kaiser", 8.0))
+               * np.exp(2j * np.pi * ssb_midpoint * ssb_indexes / CHANNEL_RATE)).astype(np.complex64)
         self.filters = {
             "AM": signal.firwin(121, 3700, fs=CHANNEL_RATE).astype(np.float32),
             "FM": signal.firwin(121, 5300, fs=CHANNEL_RATE).astype(np.float32),
+            "USB": usb,
+            "LSB": np.conjugate(usb),
             "WFM": np.ones(1, dtype=np.float32),  # The wide decimator already selects the station.
         }
         # Narrow FM voice usually carries boosted treble and may carry a
@@ -234,6 +253,8 @@ class _ChannelDecoder:
     def reset(self, offset_hz, mode, keep_rds=False):
         if self.rds is not None:
             self.rds.reset(keep_metadata=keep_rds)
+        if self.tone_search is not None:
+            self.tone_search.reset()
         channel_rate = WFM_CHANNEL_RATE if mode == "WFM" else CHANNEL_RATE
         self.channel_decimation = IQ_RATE // channel_rate
         self.audio_decimation = channel_rate // SAMPLE_RATE
@@ -248,11 +269,12 @@ class _ChannelDecoder:
         self.phase_step = np.exp((-2j * np.pi * offset_hz * IQ_SAMPLES) / IQ_RATE)
         self.iq_history = np.zeros(self.history_size, dtype=np.complex64)
         self.channel_history = np.zeros(len(self.filters[mode]) - 1, dtype=np.complex64)
-        self.audio_filter = self.audio_filters[mode]
-        self.audio_history = np.zeros((len(self.audio_filter), 2))
+        self.audio_filter = self.audio_filters.get(mode)
+        self.audio_history = np.zeros((len(self.audio_filter), 2)) if self.audio_filter is not None else None
         self.mode = mode
         self.previous_iq = 0j
         self.am_carrier = None
+        self.ssb_peak = 0.0
         self.block_offset_hz = None
 
     def decode(self, iq):
@@ -272,7 +294,14 @@ class _ChannelDecoder:
         # channel filter's short transient cannot hide a hit after a retune.
         power = float(np.mean(np.abs(channel[self.level_start:]) ** 2))
         level = float(10 * np.log10(max(power, 1e-15)))
-        if self.mode == "AM":
+        if self.mode in SSB_MODES:
+            audio = channel.real
+            peak = float(np.max(np.abs(audio)))
+            self.ssb_peak = max(peak, self.ssb_peak * SSB_GAIN_DECAY)
+            # There is no carrier for the AM gain loop to follow. Track
+            # speech peaks with a slow release and cap gain during silence.
+            audio = audio * (.8 / max(self.ssb_peak, .8 / 64))
+        elif self.mode == "AM":
             audio = np.abs(channel)
             carrier = float(np.mean(audio[self.level_start:]))
             if self.am_carrier is None:
@@ -293,7 +322,10 @@ class _ChannelDecoder:
 
         if self.mode == "WFM" and self.rds is not None:
             self.rds.feed(audio)
-        audio, self.audio_history = signal.sosfilt(self.audio_filter, audio, zi=self.audio_history)
+        if self.mode == "FM" and self.tone_search is not None:
+            self.tone_search.feed(audio)
+        if self.audio_filter is not None:
+            audio, self.audio_history = signal.sosfilt(self.audio_filter, audio, zi=self.audio_history)
         pcm = (np.clip(audio[::self.audio_decimation] * 0.65, -1.0, 1.0) * 32767).astype("<i2")
         return level, pcm.tobytes()
 
@@ -437,6 +469,24 @@ class Receiver:
             return self._decoder.rds.status()
         return None
 
+    def set_tone_search(self, enabled):
+        if enabled and self._decoder.tone_search is None:
+            self._decoder.tone_search = ToneSearch(CHANNEL_RATE)
+        elif not enabled:
+            self._decoder.tone_search = None
+
+    @property
+    def tone_search_active(self):
+        return self._decoder.tone_search is not None
+
+    def tone_status(self):
+        decoder = self._decoder.tone_search
+        return decoder.result if decoder is not None else None
+
+    def reset_tone_search(self):
+        if self._decoder.tone_search is not None:
+            self._decoder.tone_search.reset()
+
     @property
     def tuning_offset_hz(self):
         """Estimated signed carrier offset from the selected frequency, when reliable."""
@@ -496,7 +546,7 @@ class Receiver:
 
     def tune(self, hz, mode):
         hz = int(hz)
-        if mode not in ("AM", "FM", "WFM") or not 100_000 <= hz <= TUNER_LIMIT:
+        if mode not in WATCH_HALF_WIDTH or not 100_000 <= hz <= TUNER_LIMIT:
             raise ReceiverError("Frequency or modulation is outside the SDR receiver configuration")
         if self._tuning != (hz, mode):
             self._reset_tuning_measurement()
@@ -585,7 +635,7 @@ class Receiver:
         if self._tuning_snr_db < METER_MIN_EXCESS_DB:
             self._meter_offsets.clear()
             self._tuning_offset_hz = None
-        elif mode != "AM":
+        elif mode in ("FM", "WFM"):
             self._meter_offsets.append(self._decoder.block_offset_hz)
             if len(self._meter_offsets) >= (6 if mode == "WFM" else 4):
                 self._tuning_offset_hz = sum(self._meter_offsets) / len(self._meter_offsets)
@@ -638,12 +688,18 @@ class Receiver:
         return np.mean(np.abs(spectrum) ** 2, axis=0) / window_energy
 
     def _watch_level(self, power, offset, mode):
+        half_width = WATCH_HALF_WIDTH[mode]
+        sideband = mode in SSB_MODES
         response = self._watch_responses.get(mode)
         if response is None:
-            frequencies, weights = signal.freqz(self._decoder.decimation_filters[mode],
-                                               worN=PROBE_FFT, fs=IQ_RATE)
-            stop = np.searchsorted(frequencies, WATCH_HALF_WIDTH[mode], side="right") + 1
-            frequencies, weights = frequencies[:stop], weights[:stop]
+            if sideband:
+                frequencies = np.linspace(-half_width, half_width, 145)
+                _, weights = signal.freqz(self._decoder.decimation_filters[mode], worN=frequencies, fs=IQ_RATE)
+            else:
+                frequencies, weights = signal.freqz(self._decoder.decimation_filters[mode],
+                                                   worN=PROBE_FFT, fs=IQ_RATE)
+                stop = np.searchsorted(frequencies, half_width, side="right") + 1
+                frequencies, weights = frequencies[:stop], weights[:stop]
             if mode != "WFM":
                 _, channel_weights = signal.freqz(self._decoder.filters[mode], worN=frequencies,
                                                   fs=CHANNEL_RATE)
@@ -651,9 +707,9 @@ class Receiver:
             response = frequencies, np.abs(weights) ** 2
             self._watch_responses[mode] = response
 
-        half_width = WATCH_HALF_WIDTH[mode]
         left, right = np.searchsorted(self._probe_offsets, [offset - half_width, offset + half_width])
-        weights = np.interp(np.abs(self._probe_offsets[left:right] - offset), *response)
+        relative = self._probe_offsets[left:right] - offset
+        weights = np.interp(relative if sideband else np.abs(relative), *response)
         channel_power = np.dot(power[left:right], weights)
         return float(10 * np.log10(max(channel_power, 1e-15)))
 

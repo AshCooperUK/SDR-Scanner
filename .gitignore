@@ -1,6 +1,8 @@
 __pycache__/
 .scanner-state.json
 .scanner-state.json.tmp
+/.scanner-state.access.json
+/.scanner-state.access.json.*
 /.scanner-radios/
 /recordings/
 /releases/

@@ -12,7 +12,9 @@ SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can
 - **Listen to broadcast FM with RDS.** Tune wide FM and display the station name and RadioText when the broadcaster transmits them. Use the LCD digits for fine tuning and copy frequencies in MHz.
 - **Scan AM airband, marine VHF, PMR446 and CB radio.** Scan presets or search **100 kHz to 1.75 GHz** with compatible hardware. Use adjustable squelch, a signal meter, temporary and permanent lockouts, and Close Call for strong nearby signals.
 - **Save and watch favourites.** Store 124 analogue channels or DAB stations with 24 front-panel shortcuts. Use **WATCH** to check analogue favourites for activity, using a spare SDR when available.
-- **Record and replay radio audio.** Save MP3 clips of at least two seconds into frequency or DAB station folders. Choose the server-side location in the browser and loop the latest clip with **PLAY LAST**.
+- **Program the scanner from CHIRP.** Download an image of the scanner's analogue favourites, zones and radio settings, edit it in CHIRP and upload your changes.
+- **Record and replay radio audio.** Save MP3 clips of at least two seconds with the frequency or DAB station name in the filename. Choose the server-side location in the browser and loop the latest clip with **PLAY LAST**.
+- **Log and replay reception.** Open the **Discovery Log** on desktop, or hold **PLAY LAST** on mobile. See the time, frequency, mode and detected tone for each hit. **REPLAY** plays the most recent received audio.
 - **Share the receiver over your private network.** Listen from multiple browsers without a scanner account. Each powered-on listener gets a separate USB receiver when one is available. Tabs sharing a receiver can mute independently. On phones, the panel fills the viewport in portrait and landscape.
 
 ## Contents
@@ -21,12 +23,14 @@ SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can
 - [Upgrade an existing installation](#upgrade-an-existing-installation)
 - [Open the panel and tune your first station](#open-the-panel-and-tune-your-first-station)
 - [Front-panel controls](#front-panel-controls)
-- [Scan banks, search and lockouts](#scan-banks-search-and-lockouts)
+- [Scan zones, search and lockouts](#scan-zones-search-and-lockouts)
 - [Favourites and programming](#favourites-and-programming)
+- [Program with CHIRP](#program-with-chirp)
 - [RDS and Watch](#rds-and-watch)
 - [DAB and DAB+](#dab-and-dab)
 - [Install the optional DAB decoder](#install-the-optional-dab-decoder)
 - [Recording and playback](#recording-and-playback)
+- [Discovery Log and instant replay](#discovery-log-and-instant-replay)
 - [Close Call](#close-call)
 - [Clock, band plans and memory reset](#clock-band-plans-and-memory-reset)
 - [Service commands and backups](#service-commands-and-backups)
@@ -49,7 +53,7 @@ Run these commands on the Linux machine that will host the scanner.
 ```bash
 sudo apt update
 sudo apt install --no-install-recommends git ca-certificates python3 python3-numpy \
-  python3-scipy rtl-sdr libmp3lame0 libpam-systemd dbus-user-session
+  python3-scipy rtl-sdr libmp3lame0 libpam-systemd dbus-user-session iproute2
 git clone --branch v5.0.1 --depth 1 https://github.com/AshCooperUK/SDR-Scanner.git
 cd SDR-Scanner
 ```
@@ -109,14 +113,14 @@ Refresh your browser after the restart. The panel opens in clock standby. The ap
 
 1. Connect an antenna and plug the receiver into USB. Reconnect the dongle if it was plugged in when you installed `rtl-sdr`. Close any other SDR app using it.
 2. Open [the panel](http://127.0.0.1:8766/) locally or follow [the remote access instructions](#access-from-another-computer). The app starts in clock standby.
-3. Click **VOLUME** to power on and claim a receiver. Adjust the volume and turn **SQUELCH** down until you can hear the signal. Turning **VOLUME** to zero returns this tab to clock standby and releases its assignment.
+3. Click **VOLUME** to power on and claim a receiver. A receiver starting from standby opens the first saved favourite in **HOLD**. Use **UP** and **DOWN** to browse saved analogue and DAB favourites. Adjust the volume and turn **SQUELCH** down until you can hear the signal. Turning **VOLUME** to zero returns this tab to clock standby and releases its assignment.
 4. Click or hover over the LCD, type a local broadcast FM frequency in MHz such as `98.4`, and press **Enter**. The app tunes it in wide FM and enters **HOLD**. Turn on **RDS** to see the station details when available.
 5. To stop **SCAN** or **SEARCH** on the current frequency, press **HOLD**. To resume, press **HOLD** again or use **SCAN** or **SEARCH** to select that operation.
 
 | To do this | Start here |
 | --- | --- |
 | Listen to local digital radio | Install the [DAB decoder](#install-the-optional-dab-decoder), power on, and hold **DAB** once. When the sweep finishes, browse stations with **UP** and **DOWN**. |
-| Listen to aircraft or PMR446 | Press **AIR/MARINE** or **PMR 446** to [scan a preset bank](#scan-presets-or-favourites). Press **HOLD** to stay on a channel. |
+| Listen to aircraft or PMR446 | Press **AIR/MARINE** or **PMR 446** to [scan a zone](#scan-zones-or-favourites). Press **HOLD** to stay on a channel. |
 | Save a station for later | Hold one of **F01–F24**, or use **PROG → FAV** to [choose any memory slot](#save-or-erase-a-numbered-slot). |
 | Record and listen back | Choose a destination with a right-click on **RECORD**, tap it to arm, then use **PLAY LAST** after the clip has finished. See [Recording and playback](#recording-and-playback). |
 | Listen from a phone or another computer | Use the [private LAN or SSH setup](#access-from-another-computer). Power the browser panel on after opening it. |
@@ -126,8 +130,8 @@ Refresh your browser after the restart. The panel opens in clock standby. The ap
 - **Type a frequency.** Enter MHz from `0.1` through `1750`, with up to six decimal places. Use **Backspace** to edit, **Enter** to tune and **Escape** to cancel. The segmented LCD displays up to five fractional digits.
 - **Scroll a digit.** Point at a frequency digit and scroll up or down to add or subtract that place value. Scrolling up over the **2** in **12.3456** tunes **13.3456 MHz**. Scrolling down over the **9** in **98.7654** tunes **88.7654 MHz**. Scrolling elsewhere on the LCD steps by **100 Hz**. Wheel tuning enters **HOLD**.
 - **Copy the tuned frequency.** Double-click the numeric readout to copy the exact frequency in MHz. In DAB, this copies the multiplex frequency.
-- **See the current frequency.** Hover over or focus the LCD while **SCAN** or **SEARCH** advances to see the frequency being checked. **CH** identifies a memory slot or numbered preset. The LCD also shows active banks, **AM**, **NFM** or **WFM**, search direction, lockout and Close Call status.
-- **Modulation follows the frequency or bank.** Direct tuning uses mono wide FM from **87.5 to just below 108 MHz**, AM below **25 MHz** and in the **108–137 MHz** and **225–400 MHz** air ranges, and the band-plan mode or narrow FM elsewhere. Tuning within the CB range after selecting a CB channel preserves that channel's AM or FM mode.
+- **See the current frequency.** Hover over or focus the LCD while **SCAN** or **SEARCH** advances to see the frequency being checked. **CH** identifies a memory slot or numbered preset. The LCD also shows active zones, **AM**, **NFM** or **WFM**, scan and search direction, lockout and Close Call status.
+- **Modulation follows the frequency or zone.** Direct tuning uses mono wide FM from **87.5 to just below 108 MHz**, AM below **25 MHz** and in the **108–137 MHz** and **225–400 MHz** air ranges, and the band-plan mode or narrow FM elsewhere. Tuning within the CB range after selecting a CB channel preserves that channel's AM or FM mode.
 
 ![SDr Scanner tuned to wide FM with decoded RDS, signal level and analogue favourites](docs/screenshots/scanner-panel.png)
 
@@ -140,62 +144,91 @@ Hover over a control for its tooltip. **Tab** moves keyboard focus, and **Space*
 | **VOLUME** | Click to switch between reception and the standby clock. Scroll to adjust in small steps. Drag up or right to increase the volume and down or left to lower it. At zero this tab releases its receiver assignment. |
 | **SQUELCH** | Sets the signal level that opens audio, pauses scan or search, and triggers recording or Watch. Drag, click around the outer part of the dial or scroll for **0.5 dB** wheel steps. Fully counterclockwise opens the audio gate. |
 | **AUDIO BOOST** | Raises live audio in this browser by **0–12 dB**. Drag, scroll, or use the arrow keys. The tooltip shows the current boost in dB. |
-| **HOLD** | Pauses on the current frequency or channel. Press again to resume the underlying scan or search. In programming, it cancels the pending operation. |
-| **UP / DOWN** | In FAV, steps to the next or previous saved slot. In DAB, steps through stations and available multiplexes. In Search, sets the direction and moves past a hit. In Hold, steps channels or frequencies. During preset scanning, **UP** skips forward and **DOWN** skips backward. Hold an arrow for about a second for repeat stepping. |
+| **HOLD** | Tap to pause on the current frequency or resume a scan or search. Hold for about a second to enter Favourites in **HOLD**. This keeps the current favourite if one is selected, or opens the first saved slot. In programming, **HOLD** cancels the pending operation. |
+| **UP / DOWN** | During preset scanning, skips the current channel and keeps scanning in the chosen direction. In Search, sets the direction and moves past a hit. On Hold, steps channels or frequencies. After recalling a favourite, steps through saved analogue and DAB slots in slot order. In DAB, steps through discovered services across multiplexes. Hold an arrow for about a second for repeat stepping. |
 | **DAB** | Below **HOLD**. Tap to switch between digital radio and analogue reception. Hold for about a second to rescan Band III for local stations. |
-| **FAV / PMR 446 / AIR/MARINE / CB AM/FM** | Select banks and start scanning. **FAV** also selects the memory destination during programming. |
+| **FAV / PMR 446 / AIR/MARINE / CB AM/FM** | Select a zone or favourites and start scanning. **FAV** also selects the memory destination during programming. |
 | **CLOSE CALL** | Tap to cycle nearby-signal modes. Hold for about 2½ seconds for Close Call Only. Tap again in Only mode to open setup. |
-| **BUSINESS / AMATEUR / FM RADIO** | Tap to enable or disable each of the three UK preset banks. The LCD shows `BUS`, `HAM`, or `FM` for the selected banks. |
-| **RAIL / EVENTS / UTILITIES** | Toggle selected UK analogue voice banks. The LCD shows `RAIL`, `EVT`, or `UTIL`. |
+| **BUSINESS / AMATEUR / FM RADIO** | Tap to toggle the zone. Hold **BUSINESS** or **AMATEUR** to search its full ranges. The LCD shows `BUS`, `HAM`, or `FM` for the selected zones. |
+| **RAIL / EVENTS / UTILITIES** | Toggle the UK analogue voice zones. The LCD shows `RAIL`, `EVT`, or `UTIL`. |
 | **SEARCH** | Sweeps an analogue frequency range and advances past a hit on a second press. |
 | **L/O** | Tap for a temporary skip, double-tap for a permanent skip, or hold for about 2½ seconds to clear temporary skips and the current permanent lockout. |
+| **USB/LSB** | Cycles upper sideband, lower sideband and automatic modulation for direct tuning and Search. |
+| **TONE** | Tap to toggle CTCSS and DCS identification. Hold, then tap a saved narrow-FM **F01–F24** slot to set its tone squelch. |
 | **BAND/STEP** | Tap to select a search range. Hold for about a second during Search to edit step sizes. It also backs out of Close Call setup or cancels a clock edit. |
-| **PROG** | Starts or confirms memory programming. Hold for about 2½ seconds to toggle Program Lock in radio mode or set the clock in standby. It also confirms step, band-plan and Close Call settings. |
+| **PROG** | Starts or confirms memory programming. Hold for about 2½ seconds to toggle Program Lock in radio mode or set the clock in standby. Double-tap in standby on the scanner host to set the remote PIN. It also confirms step, band-plan and Close Call settings. |
+| **SAVE VOL** | Saves listening volume, Audio Boost, the listening squelch threshold and volume offset for the tuned channel in this browser. The saved volume also sets the default when powering on in a new tab. Hold or right-click to edit the offset in dB. |
 | **F01–F24** | Tap to recall, hold for about a second to save an analogue frequency or DAB station, and right-click to name it. Middle-click temporarily locks out an analogue slot. |
+| **ADV** | On a phone, switches between the slim panel and the full panel. The slim panel opens by default with the enlarged LCD, **HOLD**, **SEARCH**, **UP**, **DOWN**, the three dials and a numeric keypad. **L/O** is beside **0 - .**. Open the full panel for the waterfall and all 24 favourite buttons. |
+| **1–9 / 0 - .** | Tap to enter a frequency in MHz. Hold **0 - .** for the decimal point. The scanner tunes 1.4 seconds after the last digit. Hold **1–9** to recall **F01–F09**. |
 | **RDS** | Shows or hides FM RDS, DAB station details and custom favourite names on the LCD. |
-| **SCAN** | Starts or resumes analogue scanning. Hold **DAB** to discover digital stations. |
+| **SCAN** | Starts or resumes analogue scanning. Hold to choose which saved analogue favourites to scan. The SCAN LED flashes green while you select them. Hold **DAB** to discover digital stations. |
 | **WATCH** | Tap while tuned to check F01–F24 in the background. Hold, or tap with no frequency tuned, to monitor those favourites in silent Watch mode. |
 | **RECORD** | Tap to arm or stop recording clips of at least two seconds, right-click to choose the server folder, or hold for about 2½ seconds to delete clips for the tuned station or frequency. |
-| **PLAY LAST** | Loops the latest saved recording in this browser. Press again for live audio. |
+| **DISCOVERY** | Opens or closes the attached Discovery display. Its LED goes out when the display closes. |
+| **REPLAY** | Plays up to 30 seconds of the most recent received audio once. Press again to stop. On mobile, use **Replay** in the Discovery Log. |
+| **PLAY LAST** | Loops the latest saved recording in this browser. Press again for live audio. On mobile, hold to open the Discovery Log. |
 | **MUTE** | To the right of **PLAY LAST**. Silences this browser and switches off its panel LEDs. The LCD stays readable at about 10% brightness. Other listeners and any armed recording continue. |
 
 The bar on the right side of the LCD estimates usable signal strength. Hover over it for raw RF power, usable power when it differs, and carrier offset when available. A strong off-frequency signal can raise raw power while the usable bar drops. In wide FM, the meter and squelch also account for the noise floor. For a quiet standby between transmissions, hold a frequency and raise **SQUELCH** until the idle noise just disappears.
 
-The amber waterfall below the frequency shows about eight seconds of live RF activity. The horizontal scale is in MHz. New readings appear at the top and stronger signals draw darker traces. Click or tap a trace to tune and hold the analogue frequency at that point. The plot uses the same receiver as the audio and clears when the view changes frequency or the scanner sweeps between channels. Press **HOLD** to watch a fixed frequency. DAB uses the decoder’s spectrum when available. Clicking that plot switches to analogue tuning, and the **DAB** button returns to the last digital service.
+The amber waterfall below the frequency shows about eight seconds of live RF activity. The horizontal scale is in MHz. New readings appear at the top and stronger signals draw darker traces. Hover over the plot to see the frequency under the pointer. Click or tap a trace to tune and hold the analogue frequency at that point. The plot uses the same receiver as the audio and clears when the view changes frequency or the scanner sweeps between channels. Press **HOLD** to watch a fixed frequency. DAB uses the decoder’s spectrum when available. Clicking that plot switches to analogue tuning, and the **DAB** button returns to the last digital service.
 
 Hover over **SQUELCH** to see the threshold in dBFS. Hover over an individual visible LCD symbol to see its name. Hover over a favourite to see its saved name, frequency and, for DAB, its multiplex block.
 
 The avatar in the bottom-right footer opens the maintainer's GitHub profile. [AshCooperUK on GitHub](https://github.com/AshCooperUK)
 
-## Scan banks, search and lockouts
+## Scan zones, search and lockouts
 
-### Scan presets or favourites
+### Scan zones or favourites
 
-Press a bank button to start scanning. Several banks can be enabled together. Press **SCAN** to resume the selected banks from Hold or Search. With no selected bank, **SCAN** can start your saved FAV list. If no eligible channels are available, the panel shows `no Ch`.
+Press a zone button to start scanning. Several zones can be enabled together. Press **SCAN** to resume the selected zones from Hold or Search. With no selected zone, **SCAN** can start your saved FAV list. If no eligible channels are available, the panel shows `no Ch`.
 
-| Bank button | Selections |
+Hold **SCAN** until the LCD shows `SEL FAV`. Tap saved analogue slots **F01–F24** to add or remove them. Selected, unlocked slots flash green while the scanner checks them. The **SCAN** LED flashes during selection and glows steady green in Scan mode, including when the scanner stops on an active channel. The selection window closes five seconds after the last tap and the chosen slots keep scanning. Hold **SCAN** again to change the selection. **HOLD** pauses the scan. Choose a zone or tune a frequency to leave it.
+
+Hold **FAV** until the LCD shows `dEL FAV`. Tap any saved analogue or DAB slot **F01–F24** to delete its memory and name. The window closes five seconds after the last tap. Tap **FAV** normally to scan saved channels.
+
+| Zone button | Selections |
 | --- | --- |
-| **FAV** | Saved analogue favourites in slots 1–124. Tap again in Scan to disable the bank. In DAB mode, **FAV** browses DAB memories with the arrows. |
-| **PMR 446** | All 16 analogue channels from **446.00625 to 446.19375 MHz** in **12.5 kHz** steps. Tap again in Scan to disable the bank. [Ofcom PMR446 channel plan](https://www.ofcom.org.uk/siteassets/resources/documents/manage-your-licence/business-radio/business-radio-guidance/ir_2009_analogue_and_digita1.pdf?v=335306) |
-| **AIR/MARINE** | **Air AM + Marine NFM → Air AM → Marine NFM → Off**. Air covers the **108–137 MHz** preset grid. Marine scans **133** voice frequencies, including both sides of international duplex channels and Ofcom coastal and marina assignments. [Ofcom maritime channel table](https://www.ofcom.org.uk/siteassets/resources/documents/manage-your-licence/ships/ship-radio-licences-guidance-notes-for-licensing.pdf?v=323115) |
+| **FAV** | Scans saved analogue favourites in slots 1–124. Tap again in Scan to disable the zone. In DAB mode, **FAV** switches the arrows between discovered DAB stations and saved favourites. |
+| **PMR 446** | All 16 analogue channels from **446.00625 to 446.19375 MHz** in **12.5 kHz** steps. Tap again in Scan to disable the zone. [Ofcom PMR446 channel plan](https://www.ofcom.org.uk/siteassets/resources/documents/manage-your-licence/business-radio/business-radio-guidance/ir_2009_analogue_and_digita1.pdf?v=335306) |
+| **AIR/MARINE** | **Air AM + Marine NFM → Air AM → Marine NFM → Off**. Air covers the **108–137 MHz** grid with Norwich, CAA common channels and published UK AIP voice carriers first. Marine scans **145** voice frequencies including coastal, marina and onboard UHF channels. [UK AIP](https://nats-uk.ead-it.com/cms-nats/opencms/en/Publications/AIP/) · [UK CAA air channels](https://www.caa.co.uk/commercial-industry/airspace/communication-navigation-and-surveillance/aeronautical-radio-stations/) · [Ofcom maritime channel table](https://www.ofcom.org.uk/siteassets/resources/documents/manage-your-licence/ships/ship-radio-licences-guidance-notes-for-licensing.pdf?v=323115) · [Ofcom onboard UHF channels](https://www.ofcom.org.uk/siteassets/resources/documents/manage-your-licence/ships/emf-ship-licence-terms-and-conditions.pdf?v=325993) |
 | **CB AM/FM** | **CB AM + CB FM → CB AM → CB FM → Off**. AM scans the **40 CEPT channels** at **26.965–27.405 MHz**. FM scans the **40 UK channels** at **27.60125–27.99125 MHz** and the **40 CEPT channels**. [Ofcom FM channel table](https://www.ofcom.org.uk/siteassets/resources/documents/spectrum/interface-requirements/ir_2027.pdf?v=335197) · [Ofcom AM channel table](https://www.ofcom.org.uk/siteassets/resources/documents/spectrum/interface-requirements/ir_2027.2.pdf?v=335215) |
 | **BUSINESS** | **2,656** distinct narrow-FM frequencies from the supplied Ofcom register and the Simple UK, Simple Site and Suppliers Light licence schedules. Norfolk and East Anglia assignments come first. [Ofcom licence register](https://www.ofcom.org.uk/spectrum/frequencies/wtr) · [Ofcom licence schedules](https://www.ofcom.org.uk/spectrum/radio-equipment/business-radio-licence-management?language=en) |
-| **AMATEUR** | **531** AM and narrow-FM presets, including UK simplex, repeaters, gateways and analogue satellite voice. Calling channels and selected Norfolk repeater outputs come first. [RSGB band plans](https://rsgb.org/main/operating/band-plans/) · [RSGB repeater directory](https://ukrepeater.net/repeaterlist.html?filter=ANALOGUE) |
+| **AMATEUR** | **1,912** scan entries across narrow FM, AM, LSB and USB. Calling channels and selected Norfolk repeater outputs come first. The SSB section checks published 60 m USB spots and samples voice segments on 160 m through 23 cm. [RSGB band plans](https://rsgb.org/main/operating/band-plans/) · [RSGB 60 m guidance](https://rsgb.org/main/operating/band-plans/hf/5mhz/) · [RSGB repeater directory](https://ukrepeater.net/repeaterlist.html?filter=ANALOGUE) |
 | **FM RADIO** | **87.5–107.9 MHz** in **100 kHz** steps using wide FM, with selected North Norfolk broadcasts first. [Ofcom broadcast transmitter data](https://www.ofcom.org.uk/tv-radio-and-on-demand/coverage-and-transmitters/radio-tech-parameters) |
-| **RAIL** | **220** UK railway and tram analogue voice frequencies, with East Anglia first. [Ofcom licence register](https://www.ofcom.org.uk/spectrum/frequencies/wtr) |
-| **EVENTS** | **212** UK venue and event analogue voice frequencies, with East Anglia first. [Ofcom licence register](https://www.ofcom.org.uk/spectrum/frequencies/wtr) |
-| **UTILITIES** | **692** UK water and power utility analogue voice frequencies, with East Anglia first. [Ofcom licence register](https://www.ofcom.org.uk/spectrum/frequencies/wtr) |
+| **RAIL** | **259** UK railway and tram analogue voice frequencies, with East Anglia first. [Ofcom licence register](https://www.ofcom.org.uk/spectrum/frequencies/wtr) · [ORR rail operators](https://dataportal.orr.gov.uk/statistics/external-links/industry-groups-and-operators/) |
+| **EVENTS** | **402** UK venue, event and production talkback voice frequencies, with East Anglia first. [Ofcom licence register](https://www.ofcom.org.uk/spectrum/frequencies/wtr) · [Ofcom OB talkback](https://www.ofcom.org.uk/spectrum/radio-equipment/ob-talkback) · [Ofcom fixed-site talkback](https://www.ofcom.org.uk/spectrum/radio-equipment/fixed-site-talkback) · [Ofcom Channel 21](https://www.ofcom.org.uk/spectrum/radio-equipment/channel-21) |
+| **UTILITIES** | **697** UK water and power utility analogue voice frequencies, with East Anglia first. [Ofcom licence register](https://www.ofcom.org.uk/spectrum/frequencies/wtr) |
 
-The land-mobile banks use live, publishable analogue voice records from the Ofcom register snapshot dated 13 November 2026. The three sector banks group assignments by public licensee names because the register has no industry field. The frequencies are built in and work offline. A full pass takes longer on larger banks, and the scanner pauses when a signal opens the squelch. Contains Ofcom copyright data derived from the [Wireless Telegraphy Register](https://www.ofcom.org.uk/about-ofcom/our-research/opendata#spectrum-open-data).
+The land-mobile zones use live, publishable analogue voice records from the Ofcom register snapshot dated 13 November 2026. The three sector zones group assignments by public licensee names because the register has no industry field. The frequencies are built in and work offline. A full pass takes longer on larger zones, and the scanner pauses when a signal opens the squelch. Contains Ofcom copyright data derived from the [Wireless Telegraphy Register](https://www.ofcom.org.uk/about-ofcom/our-research/opendata#spectrum-open-data).
 
-While scanning, `SCAN` scrolls and the current bank label flashes. When reception ends, the scanner waits about two seconds for a reply before moving on. **HOLD** stays on the current channel after the signal ends. Disabling the last enabled bank returns to the last held frequency if one is available.
+The Amateur zone switches modulation automatically for each entry. SSB voices can fall between the 2.5 kHz scan points. Press **HOLD** and scroll the LCD to fine-tune while keeping USB or LSB. [RSGB band plans](https://rsgb.org/main/operating/band-plans/)
+
+While scanning, `SCAN` scrolls and the current zone label flashes. When reception ends, the scanner waits about two seconds for a reply before moving on. **HOLD** stays on the current channel after the signal ends. Disabling the last enabled zone returns to the last held frequency if one is available.
+
+### Search the full Amateur or Business zone
+
+1. Hold **AMATEUR** or **BUSINESS** for about a second. The LCD shows `HAM` or `BUS` with `SEARCH` and a direction arrow. The search starts from the current frequency and skips the gaps between ranges.
+2. To search a single range, tap **BAND/STEP**, then choose with **UP**, **DOWN** or repeated **BAND/STEP** taps. Tap **SEARCH** to begin or wait about three seconds. Choose `HAM ALL` or `BUS ALL` to include every range in the zone.
+3. During the search, **UP** and **DOWN** set direction, **SEARCH** moves past a hit, and **HOLD** keeps the current frequency. Tap the zone button to return to its presets. Hold **BAND/STEP** to change the grid and use **USB/LSB** to override the automatic modulation.
+
+Amateur covers **27** UK allocations from the 136 kHz band through 23 cm, including the separate 60 m segments. Business covers **10** Ofcom ranges and checks the exact WTR and licence-schedule frequencies alongside the grid. Full searches take several minutes and can stop on signals from other services in shared ranges. The scanner demodulates analogue audio, so a hit in a data or digital voice segment may be audible as noise. [Ofcom amateur licence schedule](https://www.ofcom.org.uk/siteassets/resources/documents/spectrum/emf/emf-amateur-licence-terms-and-conditions.pdf?v=386197) · [Ofcom Business Radio IR 2044](https://www.ofcom.org.uk/siteassets/resources/documents/spectrum/interface-requirements/ir2044.pdf?v=335177)
 
 ### Search frequencies and change the step
 
 - Tap **SEARCH** from Scan to sweep **100 kHz–1.75 GHz**, starting from the current frequency in the selected direction. For example, from Scan, enter `102.4` on the LCD and then press **SEARCH** to begin from that part of the band. If you are already using a preset search range, select **ALL** for a full sweep. **UP** and **DOWN** change the direction while the sweep runs. **Auto** uses a **12.5 kHz** step for the full sweep.
 - To pick a narrower range, tap **BAND/STEP** and use **UP**, **DOWN** or repeated **BAND/STEP** taps while the range label is on screen. The app offers **31 ranges** in frequency order, from **0.1–25 MHz** to **960–1750 MHz**, plus **ALL**. Press **SEARCH** or wait about three seconds to begin. Press **SEARCH** again to move past a hit or **HOLD** to keep listening.
-- To set spacing, hold **BAND/STEP** while in Search. Use the arrows to choose **Auto, 5, 6.25, 10 or 12.5 kHz**. Tap **BAND/STEP** inside this menu to switch to the Air spacing, then choose **8.33 or 12.5 kHz** with the arrows. Press **PROG** or wait about three seconds to save and restart the search at the range boundary. Air spacing also changes the Air bank grid.
+- To set spacing, hold **BAND/STEP** while in Search. Use the arrows to choose **Auto, 5, 6.25, 10 or 12.5 kHz**. Tap **BAND/STEP** inside this menu to switch to the Air spacing, then choose **8.33 or 12.5 kHz** with the arrows. Press **PROG** or wait about three seconds to save and restart the search at the range boundary. Air spacing also changes the Air zone grid.
 - The sweep checks discrete frequencies. Smaller steps take longer, and coverage and retune speed depend on the receiver. For an exact frequency between grid points, use [LCD tuning](#tuning-on-the-lcd).
+
+### Scan with sideband, tone search and saved audio levels
+
+- **Sideband search.** Tap **USB/LSB** to choose the sideband, tune near the band you want, then tap **SEARCH** to start from there. For a smaller sweep, use **BAND/STEP** to select a range. While searching in USB or LSB, hold **BAND/STEP** to choose **100 Hz, 500 Hz, 1 kHz or 2.5 kHz** spacing. The default is **1 kHz**. Press **PROG** or wait about three seconds to apply it. Use **HOLD** and LCD wheel tuning to clarify a voice hit. Tap **USB/LSB** through to **Auto** to restore band-based modulation.
+- **Scan saved channels.** While held on a USB or LSB signal, hold a favourite button to save it. Scan your favourites or hold **SCAN** to choose individual slots. Saved channels keep their own modulation, so an analogue scan can mix sideband and narrow FM.
+- **Identify tones while scanning.** Enable **TONE** before a preset scan or narrow-FM search. When squelch opens, the LCD shows the CTCSS frequency or DCS code if one is detected. DCS aliases appear in the tooltip when the received pattern has two equivalent labels.
+- **Save tone squelch.** Hold **TONE**, then tap a saved narrow-FM favourite in **F01–F24**. Enter a CTCSS frequency or a three-digit DCS code and polarity. **Use detected tone** copies the result when you are tuned to that frequency and a tone is available. Choose **Carrier only** to clear the filter. The saved filter applies during favourite recall and scanning even with the **TONE** search display off. The scan checks for a match for up to about three-quarters of a second after carrier squelch opens. Only matching signals open audio and recording. **WATCH** continues to report RF activity.
+- **Save listening levels.** Tune a channel or press **HOLD** on a hit, adjust the dials and tap **SAVE VOL**. Hold or right-click **SAVE VOL** to set a **−12 to +12 dB** channel offset. The settings return when this browser tunes the channel or stops on it during a scan. A saved listening squelch can mute audio in this browser when a signal is below its threshold. The receiver squelch still controls scanning and recording.
 
 ### Skip and restore channels
 
@@ -226,13 +259,30 @@ While listening to DAB, hold a favourite button to store the exact station and i
 2. Tap **PROG**, then **FAV**. The LCD alternates between the source frequency and the destination slot. It starts at the first empty slot, or slot 1 when all slots are occupied.
 3. Tap or hold **UP** or **DOWN** until the slot display shows `CH 99`. Slot selection wraps around. Tap **PROG** to save and hold that slot. **HOLD** cancels before writing.
 
-Slots **1–24** are the same memories as **F01–F24**. The next 100 slots are available through **PROG** and the arrows. Existing Emergency memories from older versions map to **25–124**. While on a favourite, the arrows step through saved slots in either direction, including those beyond F24, and skip empty slots.
+Slots **1–24** are the same memories as **F01–F24**. The next 100 slots are available through **PROG** and the arrows. Existing Emergency memories from older versions map to **25–124**. After recalling a favourite, use the arrows to step through saved analogue and DAB slots in either direction. The arrows skip empty slots, include those beyond F24 and wrap at both ends.
 
-To save a DAB station in any slot, listen to it and use **PROG → FAV → UP/DOWN → PROG**. While in DAB, tap **FAV** to browse saved DAB stations with the arrows, including slots 25–124. Tap **FAV** again to return to browsing all receivable DAB stations.
+To save a DAB station in any slot, listen to it and use **PROG → FAV → UP/DOWN → PROG**. While in DAB, tap **FAV** to switch between discovered DAB stations and the saved favourite list.
 
 **Erase one slot.** In analogue mode, tap **PROG**, then hold **L/O** for about 2½ seconds **before** pressing **FAV**. This loads `000.0000` as the source. Select an analogue or DAB slot and tap **PROG** to erase it. You can also clear an F01–F24 name separately through its right-click editor.
 
 **Program Lock.** While powered on, hold **PROG** for about 2½ seconds to toggle the **PROG** memory-writing sequence. `Pg.L` means locked, and `OF Pg.L` means unlocked.
+
+## Program with CHIRP
+
+Run CHIRP on the computer hosting SDr Scanner. The scanner service needs to be running. These steps use the supplied [SDr Scanner CHIRP driver](chirp_sdr_scanner.py).
+
+1. In CHIRP, enable **Help → Developer Mode**, then choose **File → Load Module** and open `chirp_sdr_scanner.py` from the scanner checkout. If the menu is missing, restart CHIRP after enabling Developer Mode.
+2. Choose **Radio → Download From Radio**. Under **Port**, select **Custom…** and enter `socket://127.0.0.1:8766`. Use your configured port if it differs. Select **SDr Scanner** as vendor and **Web Scanner** as model, then download.
+3. Edit analogue favourites in **Favourites**, scan channels in the named zone editors, and radio configuration in **Settings**. Save a copy of the downloaded CHIRP image if you want to keep the original entries for reference.
+4. Choose **Radio → Upload To Radio** and use the same port. If the scanner reports that its programming has changed since the download, download a fresh image and reapply the desired edits.
+
+Favourites use scanner slots **1–124**, with **1–24** matching **F01–F24**. DAB favourites remain on the scanner and occupy protected slots. Zone edits change the preset lists used by a tap of the corresponding zone button. The full Amateur and Business range searches still use their published frequency ranges. Settings include the band plan, frequency steps, RDS, clock offset, Program Lock and Close Call options. Programming applies to the primary receiver and works while the panel is in standby.
+
+**Copy channels from another radio.** Open the other radio's image in CHIRP, copy the rows you want, then select the starting slot in **Memories (Favourites)** and paste. The scanner uses the receive frequency, mode, name and any supported receive tone. Transmit offsets and transmit-only tones are discarded. Choose slots that are free of DAB favourites.
+
+**Remote Access.** Download a fresh image and open **Settings → Remote Access**. Set **Remote URL** to the one address you use away from home, such as `https://scanner.example.com`, and enter a **New six-digit PIN** if you want to set or change it. Leave the PIN blank to keep the existing one. Choose **Radio → Upload To Radio** to apply the changes. The PIN is entered again if you close CHIRP before uploading because the image does not store it.
+
+The configured URL requires the PIN. Other remote URLs are blocked. Direct connections from the scanner's LAN and known Tailscale peers still work without a PIN. To use the scanner only on those networks, clear **Remote URL** and upload. If the URL has never been configured, also tick **Block remote access when URL is blank** to switch from the original policy to local-only access. A PIN or URL change clears existing remote unlocks.
 
 ## RDS and Watch
 
@@ -260,8 +310,8 @@ Hold **L/O** during silent Watch mode to clear temporary lockouts.
 | --- | --- |
 | **Hold DAB** | Discover stations across Band III and refresh the stored list. |
 | **Tap DAB** | Switch between analogue reception and the last playable digital station. `LOADING` appears while tuning. `no Ch` means there is no saved station to resume. |
-| **UP / DOWN** | Move to the next or previous discovered service, including across multiplexes. The list wraps at both ends. |
-| **FAV** | Switch between the full discovered list and saved DAB favourites. |
+| **UP / DOWN** | Move to the next or previous discovered service, including across multiplexes. After recalling a favourite, the arrows step through saved slots instead. Both lists wrap at either end. |
+| **FAV** | Switch between the full discovered list and saved favourites. |
 | **RDS** | Show or hide the station name and scrolling digital broadcast text. |
 
 **SCAN** and **SEARCH** are analogue controls. For digital station discovery, hold **DAB**.
@@ -305,15 +355,25 @@ The build installs the decoder to `~/.local/share/sdr-scanner/bin/welle-cli`. Po
 
 | Reception | Example path under the chosen folder |
 | --- | --- |
-| Analogue | `Recorded Audio/128.1250mhz/143059-13112026.mp3` |
-| DAB with no displayed station name | `Recorded Audio/222.0640mhz/143059-13112026.mp3` |
-| DAB with **RDS** on and a displayed station name | `Recorded Audio/GB News Radio/143059-131126.mp3` |
+| Analogue | `Recorded Audio/446.00625mhz-140915-13112026.mp3` |
+| DAB with no displayed station name | `Recorded Audio/222.0640mhz-143059-13112026.mp3` |
+| DAB with **RDS** on and a displayed station name | `Recorded Audio/GB News Radio-143059-13112026.mp3` |
 
-The filenames use `HHMMSS-DDMMYYYY.mp3` for frequency folders and `HHMMSS-DDMMYY.mp3` for station folders. Times follow the server's local clock. With **RDS** off, recordings of services on the same DAB multiplex share its frequency folder. If you choose an existing folder named `Recorded Audio`, the app uses it directly. The default is `recordings/Recorded Audio` beside the scanner state file.
+New clips go directly into **Recorded Audio** and use the frequency or station name followed by `HHMMSS-DDMMYYYY.mp3`. Times follow the server's local clock. If you choose an existing folder named `Recorded Audio`, the app uses it directly. The default is `recordings/Recorded Audio` beside the scanner state file.
 
-**Play the latest clip.** Tap **PLAY LAST** to loop the latest finished clip across all station and frequency folders in the selected location. Playback takes over live sound and panel tones in that browser. The tuner and recording continue to operate. **MUTE** also silences playback. Tap **PLAY LAST** again to stop the loop and return to live audio.
+**Play the latest clip.** Tap **PLAY LAST** to loop the latest finished clip in the selected location, including older clips saved in station or frequency subfolders. Playback takes over live sound and panel tones in that browser. The tuner and recording continue to operate. **MUTE** also silences playback. Tap **PLAY LAST** again to stop the loop and return to live audio.
 
-**Delete recordings.** Tune to the station or hold the exact frequency, then hold **RECORD** for about 2½ seconds. The scanner clears matching clips from the current station or frequency folder and removes that folder if empty. DAB clips now carry the station ID, so only clips for the selected service are cleared, even when stations share a folder. Older clips without an ID in DAB recording folders remain playable and can be removed manually. Use the same **RDS** setting and displayed name as when you recorded the clip. If recording is armed and audio is open when you delete, the app waits for that audio to end before recording there again.
+**Delete recordings.** Tune to the station or hold the exact frequency, then hold **RECORD** for about 2½ seconds. The scanner clears matching clips in **Recorded Audio** and in any matching legacy subfolder. DAB clips carry the station ID so deletion is limited to the selected service. Older DAB clips without an ID remain playable and can be removed manually. Use the same **RDS** setting and displayed name as when you recorded the clip. If recording is armed and audio is open when you delete, the app waits for that audio to end before recording there again.
+
+## Discovery Log and instant replay
+
+Tap **DISCOVERY** on desktop to open the attached amber LCD. On a phone, tap **ADV** to show the full panel, then hold **PLAY LAST**. Opening the log while powered on starts logging the first time. Tap **PAUSE LOG** to pause or resume. Its LED lights while logging is paused. **CLOSE** hides the display and logging continues in the background if enabled.
+
+Discovery logs analogue reception whenever the receiver's squelch opens, including on held frequencies, manually tuned channels and Close Call hits. It also logs DAB when the selected station is delivering decoded audio. The top of the LCD shows the frequency, mode and any detected tone during reception and clears when it ends. The log lists up to 100 hits, with ten rows per page. **M** shows the mode and **T** shows the tone. Use **PAGE DOWN** for older hits and **PAGE UP** to return to newer ones. Buttons beside empty rows are disabled.
+
+Tap **PLAY** next to a hit to hear audio still in the replay buffer. Tap **REC** to save that buffered audio as an MP3 in the folder selected with **RECORD**. Its red LED lights while saving and stays lit after a successful save. At least two seconds of buffered audio are required. The filename uses the hit's frequency or displayed DAB station name and its original start time, for example `446.00625mhz-140915-13112026.mp3`.
+
+**REPLAY** plays up to 30 seconds of recent received audio, omitting gaps when the audio gate was closed. On mobile, tap **Replay** on the Discovery display. Live audio returns when replay ends. **RECORD** is independent. The replay buffer and Discovery Log stay in memory for each receiver and clear when the scanner service restarts.
 
 ## Close Call
 
@@ -326,7 +386,7 @@ Close Call uses the main SDR to detect strong nearby signals in selected frequen
 | **Priority** | Checks about every two seconds, including during reception. This can cause a brief audio gap. |
 | **Only** | Checks for nearby signals by itself. The LCD shows dashes and a flashing Close Call icon while waiting. |
 
-Tap **CLOSE CALL** to cycle **Off → Do Not Disturb → Priority → Off**. Hold it for about 2½ seconds for **Only**. Select **SCAN**, **SEARCH**, a bank or a frequency to leave Only and return to the previous Close Call mode.
+Tap **CLOSE CALL** to cycle **Off → Do Not Disturb → Priority → Off**. Hold it for about 2½ seconds for **Only**. Select **SCAN**, **SEARCH**, a zone or a frequency to leave Only and return to the previous Close Call mode.
 
 On a hit, the LCD flashes `b1 Found` or the corresponding band number. Press **HOLD** once to reveal the frequency and again to stay on it. Use **PROG** to save the hit or **CLOSE CALL** to dismiss it and continue.
 
@@ -401,11 +461,25 @@ ExecStart=
 ExecStart=/usr/bin/python3 /absolute/path/to/SDR-Scanner/app.py --remote-config /absolute/path/to/remote.json
 ```
 
-Restart the service, then open the numeric address and port in the browser. The example address is `http://192.168.1.20:8766/`. If the host uses a firewall, permit TCP **8766** from the configured client addresses. The app checks both the client and destination addresses. Keep them limited to devices you trust, since an allowed browser can use the controls and recordings without a scanner sign-in. On plain HTTP the app falls back to a browser audio processor when AudioWorklet is unavailable.
+Restart the service, then open the numeric address and port in the browser. The example address is `http://192.168.1.20:8766/`. If the host uses a firewall, permit TCP **8766** from the intended client addresses. Direct connections from the scanner's LAN subnet and known Tailscale peers connecting to its Tailscale IP can use the scanner without a PIN. On plain HTTP the app falls back to a browser audio processor when AudioWorklet is unavailable.
+
+### Set the remote PIN
+
+On the scanner host, open [the local panel](http://127.0.0.1:8766/) and turn **VOLUME** off to show the standby clock. Double-tap **PROG**, enter six digits and press **PROG**. Enter the same digits again and press **PROG** to save. Use **F01–F09** for 1–9 and **F10** for 0, or use the mobile keypad. **L/O** deletes a digit and **HOLD** cancels setup.
+
+You can also set the PIN in CHIRP under [Remote Access](#program-with-chirp). When a remote connection shows `PIN`, enter the digits and press **PROG** or **Return**, then turn on **VOLUME**. Until the PIN is set on the scanner host, remote clients that need it stay locked. Unlocking is per tab and survives a refresh. Changing the PIN or remote URL, or restarting the service, clears remote unlocks.
+
+### Use a domain or forwarded IP address
+
+Point your reverse proxy or tunnel at the scanner's HTTP port, **8766** by default. Preserve the browser's `Host` header and forward the public scheme in `X-Forwarded-Proto`. Set the exact public URL in [CHIRP Remote Access](#program-with-chirp) to block other remote addresses. Use HTTPS on the public side so the PIN and audio are encrypted between the browser and proxy.
+
+A proxy running on the scanner host can reach the default listener at `http://127.0.0.1:8766`. For a proxy on another machine or direct IP forwarding, use `--listen` on the scanner's `ExecStart` line in a systemd drop-in, or use the private-network setup above. `--listen` enables IPv4 listening on all interfaces and lets the scanner identify local connections from its interface subnets and Tailscale routes. The default listener is loopback-only.
 
 ## Share the scanner with multiple listeners
 
-Every new or refreshed browser tab opens at the standby clock. Click **VOLUME** to request a free RTL-SDR. When all receivers are assigned, additional powered-on tabs share the main radio and its tuning.
+A new browser tab opens at the standby clock. Click **VOLUME** to request a free RTL-SDR. When all receivers are assigned, additional powered-on tabs share the main radio and its tuning.
+
+Refreshing the same tab keeps its power, receiver assignment and tuning while its session is still active. The session can also reconnect after a brief network interruption. After the service restarts or the session expires, click **VOLUME** to power on again. Some browsers require a tap before resuming audio after a refresh.
 
 On a shared receiver, changing station, band, squelch or scan mode affects the other listeners using that tuner. **MUTE** acts on the current browser. Turn **VOLUME** to zero to release your assignment. Your tab stays at the clock while other tabs keep listening. When the last listener turns off a radio, the receiver returns to standby and becomes available. The server checks for newly connected and freed receivers automatically. An independent radio has its own saved favourites and recording settings. **WATCH** can use a spare until a listener needs it.
 
@@ -445,12 +519,12 @@ To check USB access, put the panel in clock standby and run `rtl_test -s 2400000
 | --- | --- |
 | **VOLUME/CLOCK**, **SQ** | **VOLUME** retains reception, volume and standby clock. **SQUELCH** sets the receive gate. |
 | **HOLD**, **▲**, **▼** | Hold and stepping remain. In FAV, the arrows recall saved memories and hold them. |
-| **AIR/MARINE**, **CB AM/FM** | Retain both, either bank alone, and off. The Marine list is reconstructed from international channel allocations. |
+| **AIR/MARINE**, **CB AM/FM** | Retain both, either zone alone, and off. The Marine list is reconstructed from international channel allocations. |
 | **FRN/PMR** | **PMR 446** covers all 16 analogue PMR446 channels. |
 | **PRIVATE**, **EMG** | Their panel positions now serve **DAB** and **FAV**. The original Emergency presets were replaced by user favourites. |
 | **SEARCH**, **BAND/STEP** | Retain band selection and step settings. **SEARCH** can also sweep the full SDR range. |
 | **L/O**, **PROG** | Retain skips, programming, Program Lock and clock setting. Holding **L/O** clears all temporary skips and the current permanent lockout. |
 | **Close Call** | Retains Do Not Disturb, Priority, Only, band selection and an alert toggle. Detection runs on the SDR. |
-| **Segmented LCD** | Retains frequency, bank, channel and status indicators and the standby clock. Adds direct tuning, signal strength and RDS text. |
+| **Segmented LCD** | Retains frequency, zone, channel and status indicators and the standby clock. Adds direct tuning, signal strength and RDS text. |
 
 The original hardware and its operating manual are available here. The behaviour reference covers the original button sequences and tables in more detail. [Uniden UBC-355CLT product listing](https://www.hamradio.co.uk/receivers-and-scanners/all-receivers-and-scanners/uniden-ubc-355clt-base-scanner-pd-6780) · [Uniden owner's manual (PDF)](https://www.rigpix.com/bearcat/ubc355clt_manual.pdf) · [Original hardware behaviour reference](reports/Uniden%20UBC355CLT%20behavior%20reference.md)

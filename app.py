@@ -16,21 +16,26 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from ipaddress import IPv4Address, IPv4Network
+from ipaddress import IPv4Address, IPv4Network, IPv6Address
 from pathlib import Path
 
+from access_network import LocalNetworks
+from access_pin import ACCESS_SECONDS, PIN_PATTERN, REMOTE_AUTHORITY, AccessConflict, AccessPin
 from bandplan import BANK_KEYS
 from dab import BAND_III, SERVICE_ID, DabError, DabReceiver
+from discovery import DISCOVERY_URL, MAX_HITS, Discovery, wave_audio
 from folder_picker import browse_folders, select_folder
 from radio_pool import RadioPool
 from receiver import SAMPLE_RATE, Receiver, ReceiverError
-from recording import Recorder, RecordingError
+from recording import MIN_CLIP_PCM_BYTES, Recorder, RecordingError
 from replay import RECORDINGS_URL, byte_range, latest_clip, open_clip
 from scanner import (
     FAVORITE_COUNT, FINE_STEP_HZ, KEY_ALIASES, KEYS, MANUAL_MAX_HZ, MANUAL_MIN_HZ,
-    Scanner, format_frequency, normalize_favorite_name,
+    ChirpConflict, Scanner, format_frequency, normalize_favorite_name,
 )
+from tone_search import normalize_tone_filter
 
 
 ROOT = Path(__file__).resolve().parent
@@ -39,6 +44,10 @@ ASSETS = frozenset({"index.html", "panel.css", "panel.js", "panel.png", "field-b
 SILENCE = bytes(960)
 FREQUENCY_ENTRY = re.compile(r"[0-9]{1,4}(?:\.[0-9]{0,6})?")
 SESSION_QUERY = re.compile(r"session=([0-9a-f]{32})(?:&radio=([1-9][0-9]{0,5}))?")
+CHIRP_ROUTE = "/api/chirp"
+CHIRP_LIMIT = 8 * 1024 * 1024
+PROXY_HEADERS = ("Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Port",
+                 "X-Forwarded-Proto", "X-Real-IP", "CF-Connecting-IP", "CF-Visitor", "CF-Ray")
 WHEEL_STEPS_HZ = frozenset(10 ** position for position in range(10))
 WATCH_INTERVAL = 0.12
 WATCH_LISTENING_INTERVAL = 0.85
@@ -49,9 +58,9 @@ WATCH_ONLY_STALE_SECONDS = 2 * FAVORITE_COUNT * WATCH_ONLY_DWELL
 WATCH_RDS_GRACE = 4.2
 WATCH_RECEIVER_RETRY = 2.0
 WATCH_SECONDARY_START_GRACE = 0.5
-WATCH_EXIT_KEYS = {*BANK_KEYS, "band", "close", "down", "scan", "search", "up"}
+WATCH_EXIT_KEYS = {*BANK_KEYS, "band", "close", "down", "scan", "search", "sideband", "up"}
 DAB_ARROWS = {"up", "down"}
-DAB_EXIT_KEYS = (set(BANK_KEYS) - {"fav"}) | {"band", "close", "watch"}
+DAB_EXIT_KEYS = (set(BANK_KEYS) - {"fav"}) | {"band", "close", "sideband", "watch"}
 DAB_FREQUENCIES = dict(BAND_III)
 WFM_NOISE_MARGIN_DB = 1.5
 TUNING_LIMITS_HZ = {"AM": (350, 3_000), "FM": (900, 4_200), "WFM": (8_000, 40_000)}
@@ -114,6 +123,30 @@ class RemoteAccess:
                 and any(destination in network for network in self.destinations))
 
 
+def request_host_parts(headers):
+    hosts = headers.get_all("Host", ())
+    if len(hosts) != 1 or len(hosts[0]) > 260 or not hosts[0].isascii():
+        return None
+    match = REMOTE_AUTHORITY.fullmatch(hosts[0].lower())
+    if match is None:
+        return None
+    host, port = match.groups()
+    if (port and int(port) > 65535) or len(host) > 254:
+        return None
+    if host.startswith("["):
+        try:
+            host = f"[{IPv6Address(host[1:-1])}]"
+        except ValueError:
+            return None
+    return host, port
+
+
+def request_origin_for(host, port, scheme):
+    default_port = "443" if scheme == "https" else "80"
+    suffix = f":{port}" if port and port != default_port else ""
+    return f"{scheme}://{host}{suffix}"
+
+
 def usable_signal_level(level, modulation, offset, rf_excess):
     if modulation == "WFM" and rf_excess is not None:
         excess = rf_excess - WFM_NOISE_MARGIN_DB
@@ -122,7 +155,7 @@ def usable_signal_level(level, modulation, offset, rf_excess):
         # Estimate wanted power by removing the measured noise contribution.
         signal_fraction = -math.expm1(-excess * math.log(10) / 10)
         level += 10 * math.log10(signal_fraction)
-    if offset is not None:
+    if offset is not None and modulation in TUNING_LIMITS_HZ:
         tolerance, limit = TUNING_LIMITS_HZ[modulation]
         detuned = (abs(offset) - tolerance) / (limit - tolerance)
         level -= 45 * min(1.0, max(0.0, detuned))
@@ -162,6 +195,8 @@ class RecordingRuntime:
         self._suppressed = None
         self._queue = queue.SimpleQueue()
         self._pcm_slots = threading.BoundedSemaphore(150)
+        self._save_slots = threading.BoundedSemaphore(4)
+        self._saved_hits = {}
         self._worker = threading.Thread(target=self._run, name="MP3 recorder", daemon=True)
 
     def state(self):
@@ -296,6 +331,37 @@ class RecordingRuntime:
                     self.message = failure
             reply.put(failure)
 
+    def queue_hit_save(self, hit, chunks):
+        # Called under the scanner lock so shutdown and folder selection keep
+        # their order relative to this save. The caller waits outside the lock.
+        if self.stopped.is_set() or not self._save_slots.acquire(blocking=False):
+            return None
+        reply = queue.SimpleQueue()
+        tuned = RecordingTarget(hit.hz, hit.mode, hit.dab_sid, hit.station_name)
+        self._enqueue("save_hit", hit.id, tuned, hit.time_ms, chunks, reply)
+        return reply
+
+    def _save_hit(self, hit_id, tuned, time_ms, chunks, reply):
+        key = self.recorder.root, hit_id
+        try:
+            filename = self._saved_hits.get(key)
+            if filename is None or not self.recorder.has_saved_hit(filename, tuned.hz, dab_sid=tuned.sid):
+                path = self.recorder.save_received(tuned.hz, time_ms, chunks,
+                                                   station_name=tuned.station_name, dab_sid=tuned.sid)
+                if path is None:
+                    raise RecordingError("Could not save the Discovery clip.")
+                filename = path.name
+                self._saved_hits[key] = filename
+                if len(self._saved_hits) > 4 * MAX_HITS:
+                    self._saved_hits.pop(next(iter(self._saved_hits)))
+            reply.put(({"filename": filename}, HTTPStatus.OK))
+        except (RecordingError, OSError) as error:
+            LOG.warning("Discovery recording failed: %s", error)
+            reply.put(({"error": "Could not save the Discovery clip to the recording folder."},
+                       HTTPStatus.SERVICE_UNAVAILABLE))
+        finally:
+            self._save_slots.release()
+
     def _run(self):
         failed_epoch = None
         while True:
@@ -321,6 +387,8 @@ class RecordingRuntime:
                     self.recorder.finish()
                 elif command == "folder":
                     self._set_parent(*args)
+                elif command == "save_hit":
+                    self._save_hit(*args)
                 elif command == "delete":
                     tuned = args[0]
                     count = self.recorder.clear_frequency(tuned.hz, station_name=tuned.station_name, dab_sid=tuned.sid)
@@ -370,6 +438,7 @@ class ScannerRuntime:
         self.wake = threading.Event()
         self.stopped = threading.Event()
         self.recording = RecordingRuntime(self.scanner, self.lock, self.stopped)
+        self.discovery = Discovery(SAMPLE_RATE)
         self.clients = set()
         self.receiver_status = "standby"
         self._receiver_reopen = False
@@ -377,6 +446,8 @@ class ScannerRuntime:
         self.waterfall = None
         self.rds = None
         self.rds_target = None
+        self.tone_enabled = False
+        self.tone_result = None
         self.dab_enabled = False
         self._dab_status = {}
         self._dab_commands = deque(maxlen=12)
@@ -412,6 +483,31 @@ class ScannerRuntime:
             self._receiver_reopen = True
             self.wake.set()
 
+    def chirp_download(self):
+        with self.lock:
+            return self.scanner.chirp_download()
+
+    def chirp_upload(self, revision, changes, zones, settings, *, commit_access=None):
+        with self.lock:
+            if self.stopped.is_set():
+                raise ChirpConflict("The scanner is shutting down. Download again after restarting it.")
+            previous_watch = self._watch_targets()
+            revision_before = self.scanner.tune_revision
+            rds_before = self.scanner.rds_enabled
+            image = self.scanner.chirp_upload(revision, changes, zones, settings, commit_access=commit_access)
+            retuned = not self.dab_enabled and revision_before != self.scanner.tune_revision
+            if retuned:
+                self.signal = self.waterfall = self.tone_result = None
+                self.discard_audio()
+                self.recording.boundary()
+                self.discovery.boundary()
+            if retuned or rds_before != self.scanner.rds_enabled:
+                self.rds = self.rds_target = None
+            self._watch_lockouts_changed(previous_watch)
+            self.wake.set()
+            self._watch_wake.set()
+            return image
+
     def _rds_for(self, state):
         if (self.rds and state["power"] and state["modulation"] == "WFM"
                 and state["rds_enabled"] and self.receiver_status == "ready"
@@ -441,9 +537,9 @@ class ScannerRuntime:
 
     def resume_dab(self, station, volume):
         with self.lock:
-            if self.act({"knob": "volume", "value": volume}) is None:
+            if self.act({"knob": "volume", "value": volume}, start_favorites=False) is None:
                 return
-            if not self.dab_enabled:
+            if not self.dab_enabled or self._dab_browse_favorites:
                 self._set_dab(True)
             if station:
                 self._recall_dab_favorite(None, {"block": station[0], "sid": station[1]})
@@ -491,15 +587,18 @@ class ScannerRuntime:
         metadata = {"ps": service, "text": text} if not loading and state["rds_enabled"] and (service or text) else None
         recording_target = self._dab_recording_target()
         programming = self.scanner.dab_programming
-        if programming or (state["display"] in ("Pg.L", "OF Pg.L") and self.scanner.notice_until > time.monotonic()):
+        if programming or state["favorite_edit"] == "delete" or (
+                state["display"] in ("Pg.L", "OF Pg.L") and self.scanner.notice_until > time.monotonic()):
             display, channel = state["display"], state["channel"]
         else:
             channel = None if loading else favorite
         show_favorites = favorite or self._dab_browse_favorites or self.scanner.dab_program_slot is not None
         state.update(display=display, channel=channel, upper=["FAV", "DAB"] if show_favorites else ["DAB"],
-                     lower=["HOLD", "CH"] if programming else ["SCAN"] if scanning else [],
+                     lower=["HOLD", "CH"] if programming else ["SCAN"] if scanning
+                     else ["HOLD"] if self._dab_browse_favorites else [],
                      blink_bank=None, blink=False, close_blink=False, scan_scroll=scanning and not programming,
                      scan_active=bool(scanning and hz and not programming), search_active=False, search_full=False,
+                     band_search=None, band_search_range=None,
                      tune_hz=hz, modulation="DAB", active_favorite=favorite if station else None,
                      dab_active_favorites=matches if station else [],
                      can_tune=False,
@@ -518,7 +617,8 @@ class ScannerRuntime:
             if watch_only:
                 state.update(display="-------", channel=None, upper=[], lower=[], blink_bank=None,
                              blink=False, close_blink=False, scan_scroll=False, scan_active=False,
-                             search_active=False, search_full=False, tune_hz=None, modulation="FM",
+                             search_active=False, search_full=False, band_search=None, band_search_range=None,
+                             tune_hz=None, modulation="FM",
                              active_favorite=None, close_probe=None, audio_open=False)
             state["receiver"] = "standby" if parked else self.receiver_status
             current_signal = (self.signal if self.signal and state["receiver"] == "ready"
@@ -529,6 +629,10 @@ class ScannerRuntime:
             state.update(self.recording.state())
             if parked:
                 state.update(record_enabled=False, record_active=False, record_choosing=False)
+            state["discovery_started"] = self.discovery.started and not parked
+            state["discovery_enabled"] = self.discovery.enabled and not parked
+            state["discovery_current"] = self.discovery.current if state["power"] and not parked else None
+            state["replay_available"] = self.discovery.replay_available and not parked
             rds = self._rds_for(state)
             state["rds"] = dict(rds) if rds else None
             state["watch_enabled"] = self.watch_enabled and not parked and not dab_enabled
@@ -545,6 +649,15 @@ class ScannerRuntime:
                 state["watch_active"] = [slot for slot, (signal, expires) in sorted(self._watch_activity.items())
                                          if expires > now and targets.get(slot) == signal]
             state["dab_enabled"] = dab_enabled
+            state["tone_enabled"] = self.tone_enabled and state["power"] and not (dab_enabled or watch_only)
+            tone = self.tone_result
+            if dab_enabled or watch_only:
+                state.update(tone_filter=None, tone_matched=None)
+            state["tone_searching"] = bool((state["tone_enabled"] or state["tone_filter"])
+                                           and state["modulation"] == "FM" and state["tune_hz"] is not None
+                                           and self.scanner.signal_open and not self.scanner.menu)
+            state["channel_tone"] = (tone[1] if state["tone_searching"] and current_signal
+                                     and tone and tone[0] == target(state) else None)
             if dab_enabled:
                 self._show_dab(state)
             elif self.receiver_status == "unavailable" and state["power"]:
@@ -557,7 +670,7 @@ class ScannerRuntime:
                                   and capture[0] == target(state) else None)
             return state
 
-    def act(self, action, *, parked=False, parked_backlight=False):
+    def act(self, action, *, parked=False, parked_backlight=False, start_favorites=True):
         if action.get("record") in ("browse", "select"):
             result = self.recording.folder_action(action, parked=parked)
             if result is None:
@@ -566,19 +679,29 @@ class ScannerRuntime:
         with self.lock:
             if self.stopped.is_set() or (parked and self.scanner.power):
                 return None
+            if "discovery" in action:
+                if parked:
+                    return None
+                self.discovery.control(action["discovery"])
+                return self.state()
             before = self.scanner.snapshot()
+            before_tune_revision = self.scanner.tune_revision
+            tone_filter_saved = None
             was_watch_only = self.watch_only
             was_dab = self.dab_enabled
             gesture = action.get("gesture", "tap")
             key = action.get("key")
             key = KEY_ALIASES.get(key, key)
             favorite = action.get("favorite")
-            recall = favorite is not None and "name" not in action and gesture == "tap"
+            recall = favorite is not None and not ({"name", "tone"} & action.keys()) and gesture == "tap"
+            edit_favorite = favorite is not None and gesture in ("select", "delete")
             if self.dab_enabled and (key in DAB_EXIT_KEYS
+                    or (key == "scan" and gesture == "long" and before["power"] and not self.scanner.menu)
                     or action.get("setting") == "watch" or "tune" in action
-                    or recall and not self.scanner.dab_programming and self.scanner.memories["FAV"][favorite - 1]):
+                    or recall and not self.scanner.dab_programming
+                    and self.scanner.memories["FAV"][favorite - 1]):
                 self._set_dab(False)
-            changes_lockout = key == "lock" or (favorite is not None and gesture == "lock")
+            changes_lockout = key == "lock" or (favorite is not None and gesture in ("delete", "lock"))
             previous_targets = self._watch_targets() if changes_lockout else None
             watch_key = key == "watch"
             watch_changed = watch_key or action.get("setting") == "watch"
@@ -610,15 +733,25 @@ class ScannerRuntime:
                                        audio_open=self.scanner.audio_gate_open)
             elif "key" in action:
                 key = action["key"]
-                if KEY_ALIASES.get(key, key) in WATCH_EXIT_KEYS:
+                if KEY_ALIASES.get(key, key) in WATCH_EXIT_KEYS or (key, gesture) == ("hold", "long"):
                     self._set_watch_only(False)
                 if self.watch_only and key == "lock" and gesture == "long":
                     self.scanner.clear_temporary_lockouts()
                 elif not self.watch_only or key == "mute":
-                    self.scanner.key(key, gesture)
+                    self.scanner.key(key, gesture, recall_favorite=self._recall_saved_favorite)
             elif "favorite" in action:
-                if "name" in action:
+                if "tone" in action:
+                    try:
+                        tone_filter_saved = self.scanner.set_favorite_tone(favorite, action["tone"], action.get("hz"))
+                    except OSError as error:
+                        LOG.warning("Could not save favourite tone: %s", error)
+                        tone_filter_saved = False
+                elif "name" in action:
                     self.scanner.rename_favorite(favorite, action["name"])
+                elif edit_favorite:
+                    deleted = self.scanner.favorite(favorite, gesture)
+                    if deleted and self._dab_favorite_slot == favorite:
+                        self._dab_favorite_slot = None
                 elif recall and before["power"] and not self.scanner.menu and (
                         entry := self.scanner.get_dab_favorite(favorite)):
                     self._recall_dab_favorite(favorite, entry)
@@ -637,7 +770,12 @@ class ScannerRuntime:
                         rds = self._rds_for(before) if gesture == "long" else None
                         self.scanner.favorite(favorite, gesture, rds_ps=rds.get("ps") if rds else None)
             elif "setting" in action:
-                self.scanner.toggle_rds()
+                if action["setting"] == "tone":
+                    if before["power"] and not self.dab_enabled and not self.watch_only:
+                        self.tone_enabled = not self.tone_enabled
+                        self.tone_result = None
+                else:
+                    self.scanner.toggle_rds()
             elif action.get("tune") == "step":
                 self._set_watch_only(False)
                 self.scanner.tune_step(action["direction"], action.get("step_hz", FINE_STEP_HZ))
@@ -647,7 +785,8 @@ class ScannerRuntime:
                 hz = int(whole) * 1_000_000 + int(fraction.ljust(6, "0"))
                 self.scanner.tune_frequency(hz)
             else:
-                self.scanner.knob(action["knob"], action["value"], action.get("held", ()))
+                self.scanner.knob(action["knob"], action["value"], action.get("held", ()),
+                                  start_favorites=self._start_favorites if start_favorites else None)
                 if before["power"] and not self.scanner.power:
                     self.scanner.cancel_dab_program()
                     self._dab_commands.clear()
@@ -665,10 +804,14 @@ class ScannerRuntime:
                 self._next_watch_probe = time.monotonic() + WATCH_SECONDARY_START_GRACE
             watch_mode_changed = was_watch_only != self.watch_only
             dab_changed = was_dab != self.dab_enabled
-            retuned = watch_mode_changed or dab_changed or target(before) != target(after)
+            retuned = (watch_mode_changed or dab_changed or target(before) != target(after)
+                       or (before_tune_revision != self.scanner.tune_revision
+                           and bool(before["tone_filter"] or after["tone_filter"])))
             if retuned:
                 self.signal = None
                 self.waterfall = None
+            if retuned or not after["power"] or not self.scanner.audio_gate_open:
+                self.tone_result = None
             if retuned or before["rds_enabled"] != after["rds_enabled"]:
                 self.rds = None
                 self.rds_target = None
@@ -681,12 +824,18 @@ class ScannerRuntime:
             receiving = self._dab_status.get("audio_open") if self.dab_enabled else self.scanner.audio_gate_open
             if retuned or not after["power"] or not receiving:
                 self.recording.boundary()
+                self.discovery.boundary()
             self.wake.set()
             self._watch_wake.set()
-            return self.state(parked=parked, parked_backlight=parked_backlight)
+            state = self.state(parked=parked, parked_backlight=parked_backlight)
+            if tone_filter_saved is not None:
+                state["tone_filter_saved"] = tone_filter_saved
+            return state
 
     def _set_dab(self, enabled):
         self.scanner.cancel_dab_program()
+        if enabled:
+            self.scanner.exit_selected_scan()
         self.dab_enabled = enabled
         self._dab_epoch += 1
         self._dab_mode_generation += 1
@@ -700,6 +849,7 @@ class ScannerRuntime:
         self._dab_browse_favorites = False
         self.scanner._clear_signal()
         self.scanner.probe_request = None
+        self.discovery.boundary()
 
     def _queue_dab(self, command):
         self._dab_commands.append(command)
@@ -719,6 +869,7 @@ class ScannerRuntime:
             self._dab_status = {"scanning": True, "rescanning": True}
         self.discard_audio()
         self.recording.boundary()
+        self.discovery.boundary()
 
     def _remember_dab(self, station, blocks, service_counts, station_ids):
         now = time.monotonic()
@@ -755,26 +906,34 @@ class ScannerRuntime:
         station = entry["block"], entry["sid"]
         command = ("recall", *station)
         pending = self._dab_status.get("recalling") or not self._dab_status
-        same_favorite = self._dab_favorite_slot == slot
         self._dab_favorite_slot = slot
-        if station != self._dab_station() and not (same_favorite and pending and command == self._dab_recall):
+        if slot is not None:
+            self._dab_browse_favorites = True
+        if station != self._dab_station() and not (pending and command == self._dab_recall):
             self._dab_recall = command
             self._dab_commands.clear()
             self._queue_dab(self._dab_recall)
 
-    def _step_dab_favorite(self, direction):
-        entries = [(slot, entry) for slot, entry in enumerate(self.scanner.dab_favorites, 1) if entry]
-        if not entries:
-            return
-        slots = [slot for slot, _ in entries]
-        station = self._dab_station()
-        current = self._dab_favorite_slot or next((slot for slot, entry in entries
-                                                  if (entry["block"], entry["sid"]) == station), None)
-        if current in slots:
-            index = (slots.index(current) + direction) % len(slots)
+    def _recall_saved_favorite(self, slot):
+        if entry := self.scanner.get_dab_favorite(slot):
+            self._recall_dab_favorite(slot, entry)
         else:
-            index = 0 if direction == 1 else -1
-        self._recall_dab_favorite(*entries[index])
+            if self.dab_enabled:
+                self._set_dab(False)
+            self.scanner._hold_channel(self.scanner.memories["FAV"][slot - 1])
+
+    def _start_favorites(self, slot=None):
+        self._set_watch_only(False)
+        slot = slot or self.scanner.next_favorite_slot(1, include_dab=True)
+        if self.dab_enabled and not (slot and self.scanner.get_dab_favorite(slot)):
+            self._set_dab(False)
+        self.scanner.hold_favorites(slot, recall_favorite=self._recall_saved_favorite)
+
+    def _step_saved_favorite(self, direction):
+        current = self._dab_favorite_slot or self._dab_favorite_slot_for(
+            self._dab_favorite_slots(self._dab_station()))
+        if slot := self.scanner.next_favorite_slot(direction, current, include_dab=True):
+            self._recall_saved_favorite(slot)
 
     def _dab_key(self, key, gesture):
         if not self.scanner.power:
@@ -782,6 +941,10 @@ class ScannerRuntime:
         if self.scanner.dab_programming:
             if slot := self.scanner.dab_program_key(key, gesture):
                 self._dab_favorite_slot = slot
+        elif key == "hold" and gesture == "long":
+            slot = self._dab_favorite_slot or self._dab_favorite_slot_for(
+                self._dab_favorite_slots(self._dab_station()))
+            self._start_favorites(slot)
         elif key == "prog":
             if gesture == "long":
                 self.scanner.key(key, gesture)
@@ -790,15 +953,19 @@ class ScannerRuntime:
                                                hz=self._dab_status["hz"],
                                                name=self._dab_status.get("service", ""))
         elif key == "fav":
+            if gesture == "long":
+                self.scanner.key(key, gesture)
+                return
+            self.scanner.end_favorite_edit()
             self._dab_browse_favorites = not self._dab_browse_favorites
             if self._dab_browse_favorites and not self._dab_favorite_slot:
                 current = self.state()["active_favorite"]
                 if current:
                     self._dab_favorite_slot = current
                 else:
-                    self._step_dab_favorite(1)
+                    self._step_saved_favorite(1)
         elif self._dab_browse_favorites and key in DAB_ARROWS:
-            self._step_dab_favorite(1 if key == "up" else -1)
+            self._step_saved_favorite(1 if key == "up" else -1)
         elif key in DAB_ARROWS:
             self._dab_browse_favorites = False
             self._dab_recall = self._dab_favorite_slot = None
@@ -806,6 +973,8 @@ class ScannerRuntime:
 
     def _set_watch_only(self, enabled):
         if self.watch_only != enabled:
+            if enabled:
+                self.scanner.exit_selected_scan()
             self.watch_only = self.watch_enabled = enabled
             self._watch_mode_epoch += 1
             self._watch_cursor = 1
@@ -1089,6 +1258,7 @@ class ScannerRuntime:
         dab_retry_at = 0.0
         connected = False
         tuned = None
+        tone_revision = None
         rds_since = None
         retry_at = 0.0
         try:
@@ -1102,11 +1272,13 @@ class ScannerRuntime:
                         self.scanner._clear_signal()
                         self.signal = self.rds = self.rds_target = None
                         self.waterfall = None
+                        self.tone_result = None
                         self._dab_status = {}
                         self.discard_audio()
                         self._clear_watch()
                         self._watch_wake.set()
                         self.recording.boundary()
+                        self.discovery.boundary()
                     else:
                         dab_enabled = self.dab_enabled and self.scanner.power
                         dab_epoch = self._dab_epoch
@@ -1115,9 +1287,14 @@ class ScannerRuntime:
                         if not (watch_only or dab_enabled):
                             self.scanner.tick()
                         state = self.scanner.snapshot()
+                        tune_revision = self.scanner.tune_revision
+                        decode_tone = (state["modulation"] == "FM" and self.scanner.signal_open
+                                       and not self.scanner.menu
+                                       and (self.tone_enabled or state["tone_filter"] or self.discovery.enabled))
                         probe = self.scanner.take_close_probe() if connected and not (watch_only or dab_enabled) else None
                         if not dab_enabled and (watch_only or not self.scanner.audio_gate_open):
                             self.recording.boundary()
+                            self.discovery.boundary()
 
                 if mode_generation != dab_generation:
                     if dab is not None:
@@ -1202,16 +1379,20 @@ class ScannerRuntime:
                                 self.waterfall = None
                                 self.discard_audio()
                                 self.recording.boundary()
+                                self.discovery.boundary()
                         dab_retry_at = time.monotonic() + 3.0
                     else:
                         dab_resume = None
                         with self.lock:
                             if (dab_epoch == self._dab_epoch and self.scanner.power
                                     and not self._receiver_reopen and not self._dab_commands):
+                                previous_station = self._dab_station()
                                 self._dab_status = status
                                 frame = dab.waterfall
                                 self.waterfall = ((status["hz"], "DAB"), frame) if frame else None
                                 station = self._dab_station() if status.get("audio_open") else None
+                                if station != previous_station:
+                                    self.discovery.boundary()
                                 if station:
                                     self._dab_recall = ("recall", *station)
                                 elif status.get("target_sid"):
@@ -1222,12 +1403,21 @@ class ScannerRuntime:
                                                        status.get("station_ids", station_ids))
                                 self.receiver_status = "ready"
                                 if pcm and status.get("audio_open"):
+                                    tuned_dab = (self._dab_recording_target()
+                                                 if self.discovery.enabled or self.recording.enabled else None)
+                                    if tuned_dab is None:
+                                        self.discovery.receive(pcm)
+                                    else:
+                                        self.discovery.receive(pcm, channel=(tuned_dab.hz, tuned_dab.modulation),
+                                                               revision=dab_epoch, dab_sid=tuned_dab.sid,
+                                                               station_name=tuned_dab.station_name)
                                     if self.recording.enabled:
-                                        self.recording.receive(self._dab_recording_target(), pcm)
+                                        self.recording.receive(tuned_dab, pcm)
                                     if not self.scanner.muted:
                                         self.publish(pcm)
                                 elif not status.get("audio_open"):
                                     self.recording.boundary()
+                                    self.discovery.boundary()
                     self.wait(0.01)
                     continue
 
@@ -1272,6 +1462,11 @@ class ScannerRuntime:
 
                     decode_rds = state["rds_enabled"] and wanted[1] == "WFM"
                     receiver.set_rds_enabled(decode_rds)
+                    if decode_tone or getattr(receiver, "tone_search_active", False):
+                        receiver.set_tone_search(decode_tone)
+                    if decode_tone and tone_revision != tune_revision:
+                        receiver.reset_tone_search()
+                    tone_revision = tune_revision
                     if not decode_rds:
                         rds_since = None
                     elif rds_since is None:
@@ -1281,26 +1476,35 @@ class ScannerRuntime:
                     rf_excess = getattr(receiver, "tuning_snr_db", None)
                     usable_level = usable_signal_level(level, wanted[1], offset, rf_excess)
                     rds = receiver.rds_status() if decode_rds else None
+                    tone = receiver.tone_status() if decode_tone else None
                     with self.lock:
                         current = self.scanner.snapshot()
                         if (self._receiver_reopen or watch_mode_epoch != self._watch_mode_epoch
                                 or dab_epoch != self._dab_epoch
-                                or not current["power"] or target(current) != wanted):
+                                or not current["power"] or target(current) != wanted
+                                or tune_revision != self.scanner.tune_revision):
                             continue
-                        self.scanner.tick(usable_level if wanted[1] == "WFM" else level)
+                        self.scanner.tick(usable_level if wanted[1] == "WFM" else level, tone)
                         was_open = current["audio_open"]
                         current = self.scanner.snapshot()
                         self.rds = rds if current["rds_enabled"] and target(current) == wanted else None
                         self.rds_target = wanted if self.rds else None
                         primary = target(current)
+                        tone_carrier = bool(current["tone_filter"] and self.scanner.signal_open)
+                        self.tone_result = ((wanted, tone) if tone and primary == wanted and self.scanner.signal_open
+                                            and tune_revision == self.scanner.tune_revision
+                                            and (self.tone_enabled or current["tone_filter"]) else None)
                         self.signal = ((wanted, level, usable_level, offset)
                                        if primary == wanted and math.isfinite(level) else None)
                         frame = receiver.waterfall
                         self.waterfall = (wanted, frame) if primary == wanted and frame else None
-                        audible = primary == wanted and current["audio_open"] and bool(pcm)
-                        capture = (pcm if primary == wanted and self.scanner.audio_gate_open
+                        same_channel = primary == wanted and tune_revision == self.scanner.tune_revision
+                        audible = same_channel and current["audio_open"] and bool(pcm)
+                        capture = (pcm if same_channel and self.scanner.audio_gate_open
                                    and math.isfinite(level) else None)
                         self.recording.receive(RecordingTarget(*primary) if capture else None, capture)
+                        self.discovery.receive(capture, channel=primary,
+                                               revision=tune_revision, signal_dbfs=level, tone=tone)
                         if audible:
                             self.publish(receiver.level_live_audio(pcm))
                         elif was_open:
@@ -1308,7 +1512,7 @@ class ScannerRuntime:
                     if self.watch_enabled and not self._watch_secondary_ready:
                         rds_ready = rds_since is not None and time.monotonic() - rds_since >= WATCH_RDS_GRACE
                         self._watch(receiver, primary, (wanted, level),
-                                    allow_probe=primary == wanted, audible=audible, rds_ready=rds_ready)
+                                    allow_probe=primary == wanted and not tone_carrier, audible=audible, rds_ready=rds_ready)
                 except ReceiverError as exc:
                     LOG.warning("USB SDR unavailable: %s", exc)
                     receiver.close()
@@ -1322,8 +1526,10 @@ class ScannerRuntime:
                         self.waterfall = None
                         self.rds = None
                         self.rds_target = None
+                        self.tone_result = None
                         self._clear_watch()
                         self.recording.boundary()
+                        self.discovery.boundary()
         finally:
             if dab is not None:
                 dab.close()
@@ -1345,6 +1551,8 @@ class ScannerRuntime:
 def valid_action(action):
     if not isinstance(action, dict):
         return False
+    if "discovery" in action:
+        return set(action) == {"discovery"} and action["discovery"] in ("open", "toggle")
     if "record" in action:
         command = action["record"]
         if command == "toggle":
@@ -1367,6 +1575,12 @@ def valid_action(action):
                 and (dab["name"] is None or normalize_favorite_name(dab["name"]) is not None))
     if "name" in action and set(action) != {"favorite", "name"}:
         return False
+    if "tone" in action:
+        favorite, tone, hz = action.get("favorite"), action["tone"], action.get("hz")
+        return (set(action) in ({"favorite", "tone"}, {"favorite", "tone", "hz"})
+                and type(favorite) is int and 1 <= favorite <= FAVORITE_COUNT
+                and ("hz" not in action or type(hz) is int and MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ)
+                and (tone is None or normalize_tone_filter(tone) is not None))
     if "key" in action:
         key = action["key"]
         if key == "watch":
@@ -1379,10 +1593,10 @@ def valid_action(action):
             return False
         if "name" in action:
             return normalize_favorite_name(action["name"]) is not None
-        return action.get("gesture", "tap") in ("tap", "long", "lock")
+        return action.get("gesture", "tap") in ("tap", "long", "lock", "select", "delete")
     if "setting" in action:
         setting = action["setting"]
-        return setting in ("rds", "watch", "dab") and (
+        return setting in ("rds", "watch", "dab", "tone") and (
             "gesture" not in action or (setting == "dab" and action["gesture"] in ("tap", "long")))
     if "tune" in action:
         if action["tune"] == "step":
@@ -1411,42 +1625,217 @@ class PanelHandler(BaseHTTPRequestHandler):
     def log_message(self, format_string, *args):
         LOG.debug(format_string, *args)
 
-    def local_request(self):
+    def accept_request(self):
         port = self.server.server_port
-        # The TCP endpoints are authoritative; forwarded headers cannot grant access.
         peer = IPv4Address(self.client_address[0])
         destination = IPv4Address(self.connection.getsockname()[0])
         loopback = peer.is_loopback and destination.is_loopback
-        hosts = {f"{destination}:{port}"}
-        if loopback:
-            hosts.add(f"localhost:{port}")
-        requested_hosts = self.headers.get_all("Host", ())
-        host = requested_hosts[0].lower() if len(requested_hosts) == 1 else None
+        private_access = getattr(self.server, "remote_access", None)
+        parts = request_host_parts(self.headers)
+        if parts is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Host header")
+            return False
+        host, host_port = parts
+        forwarded = any(header in self.headers for header in PROXY_HEADERS)
+        http_origin = request_origin_for(host, host_port, "http")
+        https_origin = request_origin_for(host, host_port, "https")
+        numeric_destination = (int(host_port or "80") == port
+                               and (host == str(destination) or loopback and host == "localhost"))
         origins = self.headers.get_all("Origin", ())
-        if host not in hosts or len(origins) > 1 or (origins and origins[0] != f"http://{host}"):
+        origin = origins[0] if len(origins) == 1 else None
+        direct = numeric_destination and not forwarded and origin != https_origin
+        if len(origins) > 1 or origins and origin not in (http_origin, https_origin):
             self.send_error(HTTPStatus.FORBIDDEN)
             return False
-        if loopback:
-            return True
+        networks = getattr(self.server, "local_networks", None)
+        local = direct and (loopback or peer == destination
+                            or networks is not None and networks.is_local(peer, destination))
+        allowlist_match = private_access is None or private_access.allows(peer, destination)
+        self.origin_checked = origin is not None
+        self.secure_request = origin == https_origin
+        self.direct_request = direct and (local or allowlist_match)
+        self.trusted_local = local
+        self.request_peer = peer
+        self.request_destination = destination
+        self.pin_admin = self.direct_request and (loopback or peer == destination)
+        protocols = self.headers.get_all("X-Forwarded-Proto", [])
+        self.remote_origin = (https_origin if protocols == ["https"] else
+                              http_origin if protocols in ([], ["http"]) else None)
+        self.request_origin = origin
+        pin = getattr(self.server, "access_pin", None)
+        snapshot = pin.snapshot() if pin is not None else None
+        self.access_revision = snapshot["revision"] if snapshot is not None else None
+        if snapshot is not None and not self.remote_allowed(snapshot["remote_url"]):
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return False
+        return True
 
-        access = getattr(self.server, "remote_access", None)
-        if access is not None and access.allows(peer, destination):
-            return True
-        self.send_error(HTTPStatus.FORBIDDEN)
-        return False
+    def remote_allowed(self, remote_url):
+        return (self.trusted_local or remote_url is None or bool(remote_url)
+                and remote_url == self.remote_origin and self.request_origin in (None, remote_url))
 
-    def response(self, content_type, body, status=HTTPStatus.OK):
+    def response(self, content_type, body, status=HTTPStatus.OK, *, headers=()):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in headers:
+            self.send_header(name, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def json_response(self, result, status=HTTPStatus.OK):
-        self.response("application/json", json.dumps(result).encode("utf-8"), status)
+    def json_response(self, result, status=HTTPStatus.OK, *, headers=()):
+        self.response("application/json", json.dumps(result).encode("utf-8"), status, headers=headers)
+
+    @staticmethod
+    def pin_cookie_name(token):
+        return f"scanner_pin_{token}"
+
+    def pin_capability(self, token):
+        if token is not None:
+            cookies = SimpleCookie()
+            try:
+                cookies.load("; ".join(self.headers.get_all("Cookie", ())))
+            except CookieError:
+                return None
+            cookie = cookies.get(self.pin_cookie_name(token))
+            return cookie.value if cookie else None
+
+    def needs_pin(self, token):
+        if self.trusted_local:
+            return False
+        pin = getattr(self.server, "access_pin", None)
+        if pin is None:
+            return True
+        with pin.guard():
+            return not (self.remote_allowed(pin.remote_url)
+                        and pin.authorized(self.pin_capability(token), token))
+
+    def access_state(self, token, *, unlocked=False):
+        pin = getattr(self.server, "access_pin", None)
+        return {"pin_required": not unlocked and self.needs_pin(token),
+                "pin_configured": bool(pin and pin.configured),
+                "can_program_pin": self.pin_admin and pin is not None}
+
+    def check_pin(self, token):
+        access = self.access_state(token)
+        if access["pin_required"]:
+            self.json_response(access, HTTPStatus.UNAUTHORIZED)
+            return False
+        return True
+
+    def chirp_request(self, *, upload=False):
+        self.close_connection = True
+        if (self.path != CHIRP_ROUTE or not self.direct_request or not self.request_peer.is_loopback
+                or not self.request_destination.is_loopback or self.origin_checked
+                or self.headers.get_all("X-SDR-Scanner-Clone", []) != ["1"]
+                or any(name.lower().startswith("sec-fetch-") for name in self.headers.keys())):
+            self.json_response({"error": "CHIRP programming requires a direct local scanner connection."},
+                               HTTPStatus.FORBIDDEN)
+            return
+        runtime, _, _ = self.radio(None, touch=False)
+        pin = getattr(self.server, "access_pin", None)
+        try:
+            if upload:
+                self.connection.settimeout(5)
+                lengths = self.headers.get_all("Content-Length", [])
+                if (len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,8}", lengths[0])
+                        or not 0 < int(lengths[0]) <= CHIRP_LIMIT or "Transfer-Encoding" in self.headers
+                        or self.headers.get_content_type() != "application/json"):
+                    raise ValueError("Invalid CHIRP request length or content type.")
+                action = json.loads(self.rfile.read(int(lengths[0])))
+                if (not isinstance(action, dict) or type(action.get("version")) is not int
+                        or action["version"] != 1 or not {"version", "revision"} <= action.keys()
+                        or action.keys() - {"version", "revision", "changes", "zones", "settings", "access"}):
+                    raise ValueError("Invalid CHIRP image version or fields.")
+                programming = (action["revision"], action.get("changes", []),
+                               action.get("zones", {}), action.get("settings", {}))
+                if "access" in action:
+                    if pin is None:
+                        raise ValueError("Scanner remote access settings are unavailable.")
+                    access = action["access"]
+                    if (not isinstance(access, dict) or "revision" not in access
+                            or access.keys() - {"revision", "new_pin", "remote_url"}):
+                        raise ValueError("Invalid scanner remote access settings.")
+                    revision = access.pop("revision")
+                    with pin.program(access, revision) as commit:
+                        image = runtime.chirp_upload(*programming, commit_access=commit)
+                        image["access"] = pin.snapshot()
+                else:
+                    image = runtime.chirp_upload(*programming)
+            else:
+                image = runtime.chirp_download()
+            if pin is not None and "access" not in image:
+                image["access"] = pin.snapshot()
+        except (ChirpConflict, AccessConflict) as error:
+            self.json_response({"error": str(error)}, HTTPStatus.CONFLICT)
+        except (ValueError, RecursionError) as error:
+            self.json_response({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        except TimeoutError:
+            self.json_response({"error": "CHIRP transfer timed out."}, HTTPStatus.REQUEST_TIMEOUT)
+        except OSError as error:
+            LOG.warning("Could not complete CHIRP transfer: %s", error)
+            self.json_response({"error": "Could not save scanner programming."}, HTTPStatus.SERVICE_UNAVAILABLE)
+        else:
+            self.json_response(image)
+
+    def program_or_unlock_pin(self, token):
+        self.close_connection = True
+        if token is None or not self.origin_checked:
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        lengths = self.headers.get_all("Content-Length", ())
+        try:
+            if (len(lengths) != 1 or not 0 < int(lengths[0]) <= 64 or "Transfer-Encoding" in self.headers
+                    or self.headers.get_content_type() != "application/json"):
+                raise ValueError
+            action = json.loads(self.rfile.read(int(lengths[0])))
+            if not isinstance(action, dict) or action.keys() not in ({"pin"}, {"new_pin"}):
+                raise ValueError
+            digits = next(iter(action.values()))
+            if not isinstance(digits, str) or not PIN_PATTERN.fullmatch(digits):
+                raise ValueError
+        except (ValueError, RecursionError):
+            self.send_error(HTTPStatus.BAD_REQUEST, "Enter a six-digit PIN")
+            return
+        pin = getattr(self.server, "access_pin", None)
+        if pin is None:
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        if "new_pin" in action:
+            if not self.pin_admin:
+                self.json_response(self.access_state(token), HTTPStatus.FORBIDDEN)
+                return
+            runtime, radio_id, _ = self.radio(token, touch=False)
+            if radio_id is not None and runtime.state()["power"]:
+                self.json_response(self.access_state(token), HTTPStatus.CONFLICT)
+                return
+            try:
+                pin.set_pin(digits)
+            except OSError as error:
+                LOG.warning("Could not save scanner access PIN: %s", error)
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            self.json_response(self.access_state(token))
+            return
+        capability, retry_after = pin.unlock(digits, self.request_peer, token, revision=self.access_revision)
+        if capability is None:
+            if retry_after:
+                self.json_response(self.access_state(token), HTTPStatus.TOO_MANY_REQUESTS,
+                                   headers=(("Retry-After", str(retry_after)),))
+            else:
+                self.json_response(self.access_state(token), HTTPStatus.FORBIDDEN)
+            return
+        cookie = SimpleCookie({self.pin_cookie_name(token): capability})
+        morsel = cookie[self.pin_cookie_name(token)]
+        morsel["path"] = "/"
+        morsel["max-age"] = ACCESS_SECONDS
+        morsel["httponly"] = True
+        morsel["samesite"] = "Strict"
+        morsel["secure"] = self.secure_request
+        self.json_response(self.access_state(token, unlocked=True), headers=(("Set-Cookie", morsel.OutputString()),))
 
     def session_route(self):
         path, separator, query = self.path.partition("?")
@@ -1479,12 +1868,20 @@ class PanelHandler(BaseHTTPRequestHandler):
         return self.radio_state(state, radio_id, shared, token)
 
     def do_GET(self):
-        if not self.local_request():
+        if not self.accept_request():
             return
         route = self.session_route()
         if route is None:
             return
         path, token, expected_radio = route
+        if path == CHIRP_ROUTE:
+            self.chirp_request()
+            return
+        if path == "/api/access":
+            self.json_response(self.access_state(token))
+            return
+        if (path.startswith(("/api/", RECORDINGS_URL)) or path == "/audio") and not self.check_pin(token):
+            return
         if path == "/api/state":
             runtime, radio_id, shared = self.radio(token)
             self.json_response(self.panel_state(runtime, radio_id, shared, token))
@@ -1495,6 +1892,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.CONFLICT, "Scanner panel is in standby")
                 return
             self.stream_audio(runtime, token)
+            return
+        if path == DISCOVERY_URL or path.startswith(f"{DISCOVERY_URL}/"):
+            self.serve_discovery(path, token, expected_radio)
             return
         if path.startswith(RECORDINGS_URL):
             self.replay_recording(path, token, expected_radio)
@@ -1507,16 +1907,74 @@ class PanelHandler(BaseHTTPRequestHandler):
                       (ROOT / "web" / name).read_bytes())
 
     def do_HEAD(self):
-        if not self.local_request():
+        if not self.accept_request():
             return
         route = self.session_route()
         if route is None:
             return
         path, token, expected_radio = route
-        if path.startswith(RECORDINGS_URL):
+        if (path.startswith(("/api/", RECORDINGS_URL)) or path == "/audio") and not self.check_pin(token):
+            return
+        if path == DISCOVERY_URL or path.startswith(f"{DISCOVERY_URL}/"):
+            self.serve_discovery(path, token, expected_radio)
+        elif path.startswith(RECORDINGS_URL):
             self.replay_recording(path, token, expected_radio)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
+
+    def serve_discovery(self, path, token, expected_radio):
+        runtime, radio_id, _ = self.radio(token)
+        if radio_id is None:
+            self.send_error(HTTPStatus.CONFLICT, "Scanner panel is in standby")
+            return
+        if expected_radio is not None and expected_radio != radio_id:
+            self.send_error(HTTPStatus.CONFLICT, "Scanner receiver changed")
+            return
+        route = path.removeprefix(DISCOVERY_URL)
+        if not route:
+            with runtime.lock:
+                status = runtime.discovery.status()
+            self.json_response(status)
+            return
+        hit_id = None
+        if route != "/replay":
+            match = re.fullmatch(r"/hit/([1-9][0-9]{0,17})", route)
+            if match is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            hit_id = int(match[1])
+        with runtime.lock:
+            chunks = runtime.discovery.audio(hit_id)
+        if not chunks:
+            self.send_error(HTTPStatus.NOT_FOUND, "Audio unavailable")
+            return
+        self.response("audio/wav", wave_audio(chunks, SAMPLE_RATE))
+
+    def record_discovery_hit(self, hit_id, token, expected_radio):
+        runtime, radio_id, _ = self.radio(token)
+        with runtime.lock:
+            if radio_id is None or not runtime.scanner.power:
+                failure = ("Power on the scanner first.", HTTPStatus.CONFLICT)
+            elif expected_radio is not None and expected_radio != radio_id:
+                failure = ("Scanner receiver changed.", HTTPStatus.CONFLICT)
+            else:
+                hit = runtime.discovery.hit(hit_id)
+                chunks = runtime.discovery.audio(hit_id) if hit is not None else ()
+                if not chunks:
+                    failure = ("This hit has rolled out of the replay buffer.", HTTPStatus.NOT_FOUND)
+                elif sum(map(len, chunks)) < MIN_CLIP_PCM_BYTES:
+                    failure = ("Saving a clip requires at least two seconds of buffered audio.",
+                               HTTPStatus.UNPROCESSABLE_ENTITY)
+                else:
+                    reply = runtime.recording.queue_hit_save(hit, chunks)
+                    failure = None if reply is not None else (
+                        "The recorder is busy. Try again in a moment.", HTTPStatus.SERVICE_UNAVAILABLE)
+        if failure is not None:
+            message, status = failure
+            self.json_response({"error": message}, status)
+            return
+        body, status = reply.get()
+        self.json_response(body, status)
 
     def replay_recording(self, path, token, expected_radio):
         runtime, radio_id, _ = self.radio(token)
@@ -1571,7 +2029,13 @@ class PanelHandler(BaseHTTPRequestHandler):
             try:
                 stream.seek(start)
                 remaining = length
+                check_at = time.monotonic() + 0.35
                 while remaining:
+                    if time.monotonic() >= check_at:
+                        if self.needs_pin(token):
+                            self.close_connection = True
+                            break
+                        check_at = time.monotonic() + 0.35
                     block = stream.read(min(remaining, 65_536))
                     if not block:
                         self.close_connection = True
@@ -1582,7 +2046,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.close_connection = True
 
     def do_POST(self):
-        if not self.local_request():
+        if not self.accept_request():
             self.close_connection = True
             return
         route = self.session_route()
@@ -1590,7 +2054,30 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         path, token, expected_radio = route
+        if path == CHIRP_ROUTE:
+            self.chirp_request(upload=True)
+            return
+        if path == "/api/access":
+            self.program_or_unlock_pin(token)
+            return
+        if not self.direct_request and not self.origin_checked:
+            self.close_connection = True
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        if not self.check_pin(token):
+            self.close_connection = True
+            return
         pool = getattr(self.server, "radios", None)
+        save_hit = re.fullmatch(DISCOVERY_URL + r"/hit/([1-9][0-9]{0,17})/record", path)
+        if save_hit is not None:
+            lengths = self.headers.get_all("Content-Length", ())
+            if len(lengths) > 1 or any(value != "0" for value in lengths) or "Transfer-Encoding" in self.headers:
+                self.close_connection = True
+                self.json_response({"error": "Discovery recording requires an empty request."},
+                                   HTTPStatus.BAD_REQUEST)
+                return
+            self.record_discovery_hit(int(save_hit[1]), token, expected_radio)
+            return
         if path == "/api/session/leave" and token is not None:
             if self.headers.get("Content-Length", "0") != "0" or "Transfer-Encoding" in self.headers:
                 self.close_connection = True
@@ -1651,9 +2138,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.end_headers()
             check_at = time.monotonic() + 0.35
             while not runtime.stopped.is_set():
-                if token is not None and time.monotonic() >= check_at:
+                if time.monotonic() >= check_at:
                     assigned, radio_id, _ = self.radio(token, touch=False)
-                    if assigned is not runtime or radio_id is None:
+                    if assigned is not runtime or radio_id is None or self.needs_pin(token):
                         break
                     check_at = time.monotonic() + 0.35
                 try:
@@ -1670,6 +2157,7 @@ class PanelHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--listen", action="store_true", help="Listen on all IPv4 interfaces for LAN or forwarding")
     parser.add_argument("--state", type=Path, default=ROOT / ".scanner-state.json")
     parser.add_argument("--remote-config", type=Path, help="Owner-only JSON for private-network access")
     args = parser.parse_args()
@@ -1681,17 +2169,23 @@ def main():
             remote_access = RemoteAccess.load(args.remote_config)
         except (OSError, ValueError) as error:
             parser.error(str(error))
-    bind = "0.0.0.0" if remote_access else "127.0.0.1"
+    try:
+        access_pin = AccessPin(args.state.with_suffix(".access.json"))
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    bind = "0.0.0.0" if args.listen or remote_access else "127.0.0.1"
     with ThreadingHTTPServer((bind, args.port), PanelHandler) as server:
         radios = RadioPool(args.state, ScannerRuntime)
         server.radios = radios
         server.remote_access = remote_access
+        server.local_networks = LocalNetworks()
+        server.access_pin = access_pin
         signal.signal(signal.SIGTERM, lambda *_: threading.Thread(
             target=server.shutdown, daemon=True).start())
         radios.start()
         LOG.info("Panel available at http://127.0.0.1:%d/", server.server_port)
-        if remote_access:
-            LOG.info("Private-network access is enabled for the configured IPv4 ranges.")
+        if bind != "127.0.0.1":
+            LOG.info("The scanner is listening on all IPv4 interfaces. Non-local connections require the PIN.")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
