@@ -43,6 +43,7 @@ AUDIO_START_TIMEOUT = 12.0
 AUDIO_RETRY_INTERVAL = 0.75
 AUDIO_OPEN_HOLD = 0.45
 MAX_MUX_BYTES = 1024 * 1024
+MAX_STATIONS_PER_BLOCK = 256
 
 
 class DabError(RuntimeError):
@@ -111,6 +112,34 @@ def _clean_label(value, limit):
     return " ".join(value[:limit].replace("\x00", " ").split())
 
 
+def normalize_service_id(value):
+    if isinstance(value, str) and SERVICE_ID.fullmatch(value):
+        number = int(value, 16)
+        if number:
+            return f"0x{number:04x}"
+    return None
+
+
+def _ordered_station_ids(ids):
+    return tuple(sorted(ids, key=lambda sid: int(sid, 16))[:MAX_STATIONS_PER_BLOCK])
+
+
+def normalize_station_ids(value, *, blocks=None):
+    if not isinstance(value, dict):
+        return {}
+    catalog = {}
+    for block, _ in BAND_III:
+        if blocks is not None and block not in blocks:
+            continue
+        ids = value.get(block)
+        if isinstance(ids, (list, tuple)):
+            valid = {sid for candidate in ids[:4 * MAX_STATIONS_PER_BLOCK]
+                     if (sid := normalize_service_id(candidate))}
+            if valid:
+                catalog[block] = _ordered_station_ids(valid)
+    return catalog
+
+
 def _multiplex(mux):
     services = mux.get("services") if isinstance(mux, dict) else None
     ensemble = mux.get("ensemble") if isinstance(mux, dict) else None
@@ -125,10 +154,9 @@ def _multiplex(mux):
         stream = STREAM_PATH.fullmatch(path) if isinstance(path, str) else None
         if stream is None:
             continue
-        service_id = int(stream["sid"], 16)
-        if not service_id:
+        sid = normalize_service_id(stream["sid"])
+        if sid is None:
             continue
-        sid = f"0x{service_id:04x}"
         labels = service.get("label")
         labels = labels if isinstance(labels, dict) else {}
         name = next((label for key in ("label", "fig2label", "shortlabel")
@@ -136,7 +164,7 @@ def _multiplex(mux):
         dls = service.get("dls")
         text = _clean_label(dls.get("label"), 256) if isinstance(dls, dict) else ""
         stations[sid] = Station(sid, f"/mp3/{sid}", name, text)
-    return Multiplex(tuple(sorted(stations.values(), key=lambda station: station.sid)), detected)
+    return Multiplex(tuple(stations[sid] for sid in _ordered_station_ids(stations)), detected)
 
 
 def _stop(process):
@@ -159,24 +187,24 @@ def _stop(process):
 
 
 class DabReceiver:
-    def __init__(self, index, *, known_blocks=(), service_counts=None):
+    def __init__(self, index, *, known_blocks=(), service_counts=None, station_ids=None):
         self._index = index
         self._iq = self._decoder = self._audio = None
         self._http = self._pending = None
         self._iq_port = self._http_port = None
         self._gst = self._welle = None
         self._closed = False
-        self._block_index = 0
+        self._block_index = None
         self._generation = 0
         self._retune = False
         self._decoder_block = None
-        self._remaining = len(BAND_III)
-        self._direction = 1
+        self._remaining = 0
         self._recall_sid = None
+        self._browse_target = None
         self._rescan_previous = None
         self._rescan_previous_found = False
         self._rescan_first = None
-        self._rescan_counts = None
+        self._rescan_ids = None
         self._received_service_ids = set()
         self._rescan_services_changed = None
         self._scan_until = None
@@ -188,11 +216,13 @@ class DabReceiver:
         self._known_blocks = {BLOCK_INDEX[block] for block in known_blocks
                               if isinstance(block, str) and block in BLOCK_INDEX}
         self._service_counts = {}
+        self._station_ids = normalize_station_ids(station_ids)
         if isinstance(service_counts, dict):
             self._service_counts = {block: count for block, count in service_counts.items()
                                     if block in BLOCK_INDEX and type(count) is int and count > 0}
-            self._known_blocks.update(BLOCK_INDEX[block] for block in self._service_counts)
-        self._scan_order = tuple(range(len(BAND_III)))
+        for block, ids in self._station_ids.items():
+            self._service_counts[block] = max(self._service_counts.get(block, 0), len(ids))
+        self._known_blocks.update(BLOCK_INDEX[block] for block in self._service_counts)
         self._audio_retry_at = 0.0
         self._audio_until = 0.0
         self._audio_open_until = 0.0
@@ -251,40 +281,28 @@ class DabReceiver:
         self._block_index = index
         self._retune = self._channel != self._decoder_block or bool(self._pending and self._pending[2])
 
-    def _scan_blocks(self, direction, prefer_known):
-        order = tuple((self._block_index + direction * offset) % len(BAND_III)
-                      for offset in range(1, len(BAND_III) + 1))
-        if not prefer_known:
-            return order
-        # Walk known multiplexes before probing frequencies we have never received.
-        # Keep the current block as the final fallback.
-        others = order[:-1]
-        known = tuple(index for index in others if index in self._known_blocks)
-        unknown = tuple(index for index in others if index not in self._known_blocks)
-        return known + unknown + (self._block_index,)
-
     def _cancel_rescan(self):
-        self._rescan_counts = self._rescan_previous = self._rescan_first = None
+        self._rescan_ids = self._rescan_previous = self._rescan_first = None
         self._rescan_previous_found = False
 
     def _start_rescan(self, previous):
         if previous is None and self._station:
             previous = self._block_index, self._station.sid
-        elif previous is None and self._rescan_counts is not None:
+        elif previous is None and self._rescan_ids is not None:
             previous = self._rescan_previous
         self._rescan_previous = previous
         self._rescan_previous_found = False
         self._rescan_first = None
-        self._rescan_counts = {}
+        self._rescan_ids = {}
         self._recall_sid = None
-        self._direction = 1
-        self._scan_order = tuple(range(len(BAND_III)))
-        self._remaining = len(self._scan_order)
-        self._tune_block(self._scan_order[0])
+        self._browse_target = None
+        self._remaining = len(BAND_III)
+        self._tune_block(0)
 
     def _finish_rescan(self, now):
         previous = self._rescan_previous if self._rescan_previous_found else self._rescan_first
-        self._service_counts = self._rescan_counts
+        self._station_ids = self._rescan_ids
+        self._service_counts = {block: len(ids) for block, ids in self._station_ids.items()}
         self._known_blocks = {BLOCK_INDEX[block] for block in self._service_counts}
         self._cancel_rescan()
         if previous is None:
@@ -292,25 +310,16 @@ class DabReceiver:
             return
         self._recall(*previous, now)
 
-    def _advance_block(self, now, *, direction=None, prefer_known=False):
-        self._recall_sid = None
-        if direction is not None:
-            self._cancel_rescan()
-            self._direction = direction
-            self._scan_order = self._scan_blocks(direction, prefer_known)
-            self._remaining = len(BAND_III)
+    def _advance_block(self, now):
+        self._remaining -= 1
+        if self._remaining:
+            self._tune_block(self._block_index + 1)
         else:
-            self._remaining -= 1
-        if not self._remaining:
-            if self._rescan_counts is not None:
-                self._finish_rescan(now)
-            else:
-                self._error = "No DAB stations found."
-            return
-        self._tune_block(self._scan_order[-self._remaining])
+            self._finish_rescan(now)
 
     def _recall(self, index, sid, now):
         self._cancel_rescan()
+        self._browse_target = index, sid
         if self._block_index == index:
             if self._recall_sid == sid or (self._station and self._station.sid == sid and not self._error):
                 return
@@ -326,6 +335,7 @@ class DabReceiver:
     def _select(self, station, now):
         self._clear_audio()
         self._station = station
+        self._browse_target = self._block_index, station.sid
         self._remaining = 0
         self._recall_sid = None
         self._scan_until = None
@@ -335,15 +345,11 @@ class DabReceiver:
 
     def _start_scan_dwell(self, now):
         self._scan_started = now
-        dwell = RECALL_DWELL if self._recall_sid else SCAN_DWELL
-        if (not self._recall_sid and self._rescan_counts is None
-                and self._block_index in self._known_blocks):
-            dwell = ENSEMBLE_DWELL
-        self._scan_until = now + dwell
+        self._scan_until = now + (RECALL_DWELL if self._recall_sid else SCAN_DWELL)
 
     def _update_stations(self, multiplex, now):
         stations = multiplex.stations
-        if self._rescan_counts is None and (multiplex.detected or stations):
+        if self._rescan_ids is None and (multiplex.detected or stations):
             self._known_blocks.add(self._block_index)
         if self._remaining and multiplex.detected:
             self._scan_until = self._scan_started + ENSEMBLE_DWELL
@@ -353,11 +359,11 @@ class DabReceiver:
         previous_count = len(self._received_service_ids)
         self._received_service_ids.update(station.sid for station in stations)
         count = len(self._received_service_ids)
-        if self._rescan_counts is not None:
+        if self._rescan_ids is not None:
             self._scan_until = self._scan_started + ENSEMBLE_DWELL
             if count > previous_count:
                 self._rescan_services_changed = now
-                self._rescan_counts[self._channel] = count
+                self._rescan_ids[self._channel] = _ordered_station_ids(self._received_service_ids)
             if self._rescan_first is None:
                 self._rescan_first = self._block_index, stations[0].sid
             waiting_for_previous = False
@@ -368,13 +374,14 @@ class DabReceiver:
                 self._advance_block(now)
             return
 
-        self._service_counts[self._channel] = max(self._service_counts.get(self._channel, 0), count)
+        known_ids = self._received_service_ids.union(self._station_ids.get(self._channel, ()))
+        self._station_ids[self._channel] = _ordered_station_ids(known_ids)
+        self._service_counts[self._channel] = max(self._service_counts.get(self._channel, 0),
+                                                   len(self._station_ids[self._channel]))
         if self._recall_sid:
             station = next((item for item in stations if item.sid == self._recall_sid), None)
             if station:
                 self._select(station, now)
-        elif self._remaining:
-            self._select(stations[0 if self._direction > 0 else -1], now)
         elif self._station:
             for station in stations:
                 if station.path == self._station.path:
@@ -419,24 +426,16 @@ class DabReceiver:
             self._poll_at = now + POLL_INTERVAL
 
     def _step_station(self, direction, now):
-        if self._station is None:
-            if not self._remaining and not self._recall_sid:
-                self._advance_block(now, direction=direction, prefer_known=True)
+        stations = [(index, sid) for index, (block, _) in enumerate(BAND_III)
+                    for sid in self._station_ids.get(block, ())]
+        if not stations:
             return
-        if self._error:
-            self._select(self._station, now)
-            return
-        next_station = next((index + direction for index, station in enumerate(self._stations)
-                             if station.sid == self._station.sid),
-                            0 if direction > 0 else len(self._stations) - 1)
-        if 0 <= next_station < len(self._stations):
-            self._select(self._stations[next_station], now)
-        elif direction < 0 and self._known_blocks == {self._block_index}:
-            station = self._stations[-1]
-            if station.sid != self._station.sid:
-                self._select(station, now)
+        current = self._browse_target
+        if current in stations:
+            index = (stations.index(current) + direction) % len(stations)
         else:
-            self._advance_block(now, direction=direction, prefer_known=True)
+            index = 0 if direction > 0 else -1
+        self._recall(*stations[index], now)
 
     def _read_audio(self, now):
         if self._station is None:
@@ -484,33 +483,32 @@ class DabReceiver:
             if len(command) != 3 or command[0] not in ("recall", "rescan"):
                 raise DabError("Invalid DAB station command.")
             command, block, sid = command
-            if (not isinstance(block, str) or block not in BLOCK_INDEX
-                    or not isinstance(sid, str) or not SERVICE_ID.fullmatch(sid)):
+            sid = normalize_service_id(sid)
+            if not isinstance(block, str) or block not in BLOCK_INDEX or sid is None:
                 raise DabError("Invalid DAB block or service ID.")
             station_command = BLOCK_INDEX[block], sid
         now = time.monotonic()
         try:
-            if self._iq is None:
-                self._start_iq(now)
-            if self._iq.poll() is not None:
-                raise DabError("Could not open the assigned RTL-SDR for DAB.")
-            if self._decoder is not None and self._decoder.poll() is not None:
-                raise DabError("The welle-cli DAB decoder stopped.")
-            if command == "search":
-                self._advance_block(now, direction=1)
-            elif command == "rescan":
+            if command == "rescan":
                 self._start_rescan(station_command)
             elif command == "recall" and station_command:
                 self._recall(*station_command, now)
             elif command in ("up", "down"):
                 self._step_station(1 if command == "up" else -1, now)
-            if self._decoder is None:
-                if _rtl_tcp_listening(self._iq_port):
-                    self._start_decoder(now)
-                elif now >= self._startup_until:
-                    raise DabError("The DAB IQ receiver did not start.")
-            if self._decoder is not None:
-                self._poll_decoder(now)
+            if self._block_index is not None:
+                if self._iq is None:
+                    self._start_iq(now)
+                if self._iq.poll() is not None:
+                    raise DabError("Could not open the assigned RTL-SDR for DAB.")
+                if self._decoder is None:
+                    if _rtl_tcp_listening(self._iq_port):
+                        self._start_decoder(now)
+                    elif now >= self._startup_until:
+                        raise DabError("The DAB IQ receiver did not start.")
+                if self._decoder is not None:
+                    if self._decoder.poll() is not None:
+                        raise DabError("The welle-cli DAB decoder stopped.")
+                    self._poll_decoder(now)
             pcm = self._read_audio(now)
         except (DabError, OSError) as exc:
             self.close()
@@ -518,15 +516,18 @@ class DabReceiver:
                 raise
             raise DabError(f"Could not run the DAB receiver: {exc}") from exc
 
-        block, hz = BAND_III[self._block_index]
+        block, hz = BAND_III[self._block_index] if self._block_index is not None else (None, None)
         status = {"hz": hz, "block": block, "sid": self._station.sid if self._station else None,
                   "service": self._station.name if self._station else "",
                   "text": self._station.text if self._station else "",
-                  "scanning": bool(self._remaining or self._recall_sid),
+                  "scanning": bool(self._remaining),
                   "recalling": self._recall_sid is not None,
-                  "rescanning": self._rescan_counts is not None,
+                  "recall_sid": self._recall_sid,
+                  "rescanning": self._rescan_ids is not None,
                   "known_blocks": tuple(BAND_III[index][0] for index in sorted(self._known_blocks)),
                   "service_counts": self._service_counts.copy(),
+                  "station_ids": {block: self._station_ids[block] for block, _ in BAND_III
+                                  if block in self._station_ids},
                   "audio_open": now < self._audio_open_until, "error": self._error}
         return status, pcm
 

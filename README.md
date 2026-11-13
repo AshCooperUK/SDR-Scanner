@@ -2,13 +2,13 @@
 
 SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can use in a web browser. Install it on an Ubuntu or Debian desktop or headless Linux server, plug in a receiver such as the **Nooelec NESDR SMArt v5**, and listen from a computer, phone or tablet. The browser panel is modelled on the Uniden UBC-355CLT and includes DAB and DAB+ digital radio, broadcast FM with RDS, AM airband, marine VHF, PMR446 and CB radio.
 
-[Download v5.0](https://github.com/AshCooperUK/SDR-Scanner/releases/tag/v5.0) · [Install on Ubuntu or Debian](#install-on-ubuntu-or-debian) · [Quick start](#open-the-panel-and-tune-your-first-station) · [Operating manual](#front-panel-controls) · [DAB setup](#install-the-optional-dab-decoder)
+[Download v5.0.1](https://github.com/AshCooperUK/SDR-Scanner/releases/tag/v5.0.1) · [Install on Ubuntu or Debian](#install-on-ubuntu-or-debian) · [Upgrade](#upgrade-an-existing-installation) · [Quick start](#open-the-panel-and-tune-your-first-station) · [Operating manual](#front-panel-controls) · [DAB setup](#install-the-optional-dab-decoder)
 
-![SDr Scanner v5.0 web radio showing DAB station details, favourite channel buttons and recording controls](docs/screenshots/scanner-dab.png)
+![SDr Scanner web radio showing a DAB station, favourite channel buttons and recording controls](docs/screenshots/scanner-dab.png)
 
 ## Features
 
-- **Receive DAB and DAB+ digital radio.** Scan Band III, browse multiplexes, display station names and scrolling text, and resume the exact station after switching modes or restarting. DAB uses the [optional headless decoder](#install-the-optional-dab-decoder).
+- **Receive DAB and DAB+ digital radio.** Hold **DAB** to scan Band III, then browse the discovered station list with **UP** and **DOWN**. See station names and scrolling text, save exact stations, and resume the last station after switching modes or restarting. DAB uses the [optional headless decoder](#install-the-optional-dab-decoder).
 - **Listen to broadcast FM with RDS.** Tune wide FM and display the station name and RadioText when the broadcaster transmits them. Use the LCD digits for fine tuning and copy frequencies in MHz.
 - **Scan AM airband, marine VHF, PMR446 and CB radio.** Scan presets or search **100 kHz to 1.75 GHz** with compatible hardware. Use adjustable squelch, a signal meter, temporary and permanent lockouts, and Close Call for strong nearby signals.
 - **Save and watch favourites.** Store 124 analogue channels or DAB stations with 24 front-panel shortcuts. Use **WATCH** to check analogue favourites for activity, using a spare SDR when available.
@@ -42,7 +42,7 @@ Use Ubuntu 22.04 or newer, or Debian 12 or newer, with Python 3.10 or newer and 
 
 **Recommended receiver** is the **Nooelec NESDR SMArt v5 SDR** for **100 kHz–1.75 GHz** coverage. Below 25 MHz the app uses direct sampling, which requires a receiver that supports it and an antenna suited to the frequency. [Nooelec receiver specifications](https://www.nooelec.com/store/nesdr-smart-sdr.html)
 
-### 1. Install the packages and clone v5.0
+### 1. Install the packages and clone v5.0.1
 
 Run these commands on the Linux machine that will host the scanner.
 
@@ -50,7 +50,7 @@ Run these commands on the Linux machine that will host the scanner.
 sudo apt update
 sudo apt install --no-install-recommends git ca-certificates python3 python3-numpy \
   python3-scipy rtl-sdr libmp3lame0 libpam-systemd dbus-user-session
-git clone --branch v5.0 --depth 1 https://github.com/AshCooperUK/SDR-Scanner.git
+git clone --branch v5.0.1 --depth 1 https://github.com/AshCooperUK/SDR-Scanner.git
 cd SDR-Scanner
 ```
 
@@ -60,7 +60,7 @@ On hosts where the `rtl-sdr` rule assigns the dongle to `plugdev`, add the servi
 
 ### 2. Choose headless server or desktop
 
-Run the installer as your normal user.
+Return to the `SDR-Scanner` checkout if you signed out or reconnected over SSH. Run the installer as your normal user.
 
 **Headless server**
 
@@ -83,19 +83,25 @@ With no flag, `launcher.py install` adds the icon if it detects a local X11 or W
 
 ### 3. Enable DAB and DAB+ if you want digital radio
 
-Follow the [optional DAB decoder setup](#install-the-optional-dab-decoder) on the Linux machine with the receiver. The decoder runs without a desktop and uses the same scanner panel.
+Follow the [optional DAB decoder setup](#install-the-optional-dab-decoder) on the Linux machine with the receiver. The decoder runs without a desktop and uses the same scanner panel. For your first digital station, turn on **VOLUME**, hold **DAB** for about a second, and wait for the sweep to finish.
 
 ## Upgrade an existing installation
 
-Back up `.scanner-state.json`, `.scanner-radios/` if present, and your recording folder. Open a terminal in your existing checkout. Once you have saved any local source edits, fetch and check out the release, then restart the service.
+Open a terminal in your existing `SDR-Scanner` checkout. Run `git status --short` and save any local source edits before switching releases. Stop the service, then back up `.scanner-state.json`, `.scanner-radios/` if present, and your recording folders.
 
 ```bash
-git fetch origin tag v5.0
-git switch --detach v5.0
-systemctl --user restart local-sdr-scanner.service
+systemctl --user stop local-sdr-scanner.service
 ```
 
-Refresh your browser after the restart. The panel opens in clock standby. The app keeps your favourites, recording location and other saved settings in the existing checkout. If you use a private-network systemd drop-in, an in-place upgrade keeps its paths valid. To enable digital radio for the first time, follow the [DAB decoder setup](#install-the-optional-dab-decoder).
+After backing up your data, fetch the release and start the scanner again.
+
+```bash
+git fetch origin tag v5.0.1
+git switch --detach v5.0.1
+systemctl --user start local-sdr-scanner.service
+```
+
+Refresh your browser after the restart. The panel opens in clock standby. The app keeps your favourites, recording location and other saved settings in the existing checkout. An in-place upgrade also keeps the paths in any private-network systemd drop-in valid. After upgrading from v5.0, hold **DAB** once to populate the full station list for the arrows. If this is your first DAB setup, [install the decoder](#install-the-optional-dab-decoder) first.
 
 ## Open the panel and tune your first station
 
@@ -107,7 +113,7 @@ Refresh your browser after the restart. The panel opens in clock standby. The ap
 
 | To do this | Start here |
 | --- | --- |
-| Listen to local digital radio | Install the [DAB decoder](#install-the-optional-dab-decoder), power on, and tap **DAB**. Hold **DAB** to refresh the local station count. |
+| Listen to local digital radio | Install the [DAB decoder](#install-the-optional-dab-decoder), power on, and hold **DAB** once. When the sweep finishes, browse stations with **UP** and **DOWN**. |
 | Listen to aircraft or PMR446 | Press **AIR/MARINE** or **PMR 446** to [scan a preset bank](#scan-presets-or-favourites). Press **HOLD** to stay on a channel. |
 | Save a station for later | Hold one of **F01–F24**, or use **PROG → FAV** to [choose any memory slot](#save-or-erase-a-numbered-slot). |
 | Record and listen back | Choose a destination with a right-click on **RECORD**, tap it to arm, then use **PLAY LAST** after the clip has finished. See [Recording and playback](#recording-and-playback). |
@@ -136,13 +142,13 @@ Hover over a control for its tooltip. **Tab** moves keyboard focus, and **Space*
 | **MUTE** | Silences this browser and switches off its panel LEDs. The LCD stays readable at about 10% brightness. Other listeners and any armed recording continue. |
 | **FAV / PMR 446 / AIR/MARINE / CB AM/FM** | Select banks and start scanning. **FAV** also selects the memory destination during programming. |
 | **CLOSE CALL** | Tap to cycle nearby-signal modes. Hold for about 2½ seconds for Close Call Only. Tap again in Only mode to open setup. |
-| **SEARCH** | Sweeps a frequency range and advances past a hit on a second press. |
+| **SEARCH** | Sweeps an analogue frequency range and advances past a hit on a second press. |
 | **L/O** | Tap for a temporary skip, double-tap for a permanent skip, or hold for about 2½ seconds to clear temporary skips and the current permanent lockout. |
 | **BAND/STEP** | Tap to select a search range. Hold for about a second during Search to edit step sizes. It also backs out of Close Call setup or cancels a clock edit. |
 | **PROG** | Starts or confirms memory programming. Hold for about 2½ seconds to toggle Program Lock in radio mode or set the clock in standby. It also confirms step, band-plan and Close Call settings. |
 | **F01–F24** | Tap to recall, hold for about a second to save an analogue frequency or DAB station, and right-click to name it. Middle-click temporarily locks out an analogue slot. |
 | **RDS** | Shows or hides FM RDS, DAB station details and custom favourite names on the LCD. |
-| **SCAN** | Starts or resumes scanning the selected banks or saved favourites. |
+| **SCAN** | Starts or resumes analogue scanning. Hold **DAB** to discover digital stations. |
 | **WATCH** | Tap while tuned to check F01–F24 in the background. Hold, or tap with no frequency tuned, to monitor those favourites in silent Watch mode. |
 | **RECORD** | Tap to arm or stop recording clips of at least two seconds, right-click to choose the server folder, or hold for about 2½ seconds to delete clips for the tuned station or frequency. |
 | **PLAY LAST** | Loops the latest saved recording in this browser. Press again for live audio. |
@@ -226,12 +232,24 @@ Hold **L/O** during silent Watch mode to clear temporary lockouts.
 
 ## DAB and DAB+
 
-1. Tap **DAB** while powered on. On first use, the scanner looks for a Band III multiplex, which is a group of stations broadcast on the same frequency. Later, it returns to the last playable station. The station and discovered multiplexes are saved across service restarts.
-2. Use **UP** and **DOWN** to move through stations and remembered multiplexes. Press **SEARCH** or **SCAN** to look for the next receivable multiplex.
+1. On first use, hold **DAB** to discover stations on Band III. Each multiplex is a group of stations broadcast on the same frequency. After discovery, tap **DAB** to return to the last playable station. The station list is saved across service restarts.
+2. Use **UP** and **DOWN** to browse the discovered station list. The arrows wrap at either end and tune the selected station directly.
 3. Turn **RDS** on to show the DAB station name and scrolling broadcast text on the LCD. Hold a favourite button to save the exact station, or use **PROG → FAV** for a numbered slot.
 4. Tap **DAB** again to return to analogue reception. Tap a saved DAB favourite from analogue mode to go straight to that station.
 
-**Find more stations.** Hold **DAB** for about a second to run one sweep of all 38 Band III blocks. Audio pauses during the sweep, which can take several minutes. The scanner checks UK national and Norfolk blocks early and allows extra time when a detected multiplex is still identifying stations. It then resumes the previous station if available. Hover over **DAB** to see the total number of audio services discovered across multiplexes. The count updates after a full rescan and as you find stations during normal tuning.
+**Find more stations.** Hold **DAB** for about a second to run one sweep of all 38 Band III blocks. Audio pauses during the sweep, which can take several minutes. The scanner checks UK national and Norfolk blocks early and allows extra time when a detected multiplex is still identifying stations. When it finishes, it refreshes the station list and resumes the previous station if available, or tunes the first discovered station. Hover over **DAB** to see the total number of discovered audio services. During the sweep, the tooltip shows the last completed count.
+
+![SDr Scanner in a Band III DAB sweep, with the discovered digital radio station count in the DAB button tooltip](docs/screenshots/scanner-dab-scan.png)
+
+| DAB control | What to expect |
+| --- | --- |
+| **Hold DAB** | Discover stations across Band III and refresh the stored list. |
+| **Tap DAB** | Switch between analogue reception and the last playable digital station. `no Ch` means there is no saved station to resume. |
+| **UP / DOWN** | Move to the next or previous discovered service, including across multiplexes. The list wraps at both ends. |
+| **FAV** | Switch between the full discovered list and saved DAB favourites. |
+| **RDS** | Show or hide the station name and scrolling digital broadcast text. |
+
+**SCAN** and **SEARCH** are analogue controls. For digital station discovery, hold **DAB**.
 
 DAB playback and recordings are mono. Audio opens when the decoder receives valid audio from the selected service.
 
@@ -260,7 +278,7 @@ sudo apt install --no-install-recommends build-essential cmake xxd \
 )
 ```
 
-If the panel is already open, return to analogue mode and tap **DAB** again. If the LCD shows `Err`, hover over **DAB** for the decoder message. The build installs the decoder to `~/.local/share/sdr-scanner/bin/welle-cli`.
+The build installs the decoder to `~/.local/share/sdr-scanner/bin/welle-cli`. Power on the panel and hold **DAB** to discover your first stations. If the LCD shows `Err`, hover over **DAB** for the decoder message.
 
 ## Recording and playback
 
@@ -387,6 +405,7 @@ On a shared receiver, changing station, band, squelch or scan mode affects the o
 | Silent or noisy reception | Interact with the panel to enable browser audio. Check **MUTE**, **VOLUME**, squelch, the antenna and the tuned frequency. Use the meter tooltip to check carrier offset, then tune the exact frequency or make a small wheel adjustment. |
 | FM audio without RDS | Check for **WFM**, turn **RDS** on, hold the station for several seconds and check reception. A station needs to transmit RDS for the receiver to decode it. |
 | `Err` in DAB mode | Hover over **DAB** for the decoder message. Follow the [decoder setup](#install-the-optional-dab-decoder) if the helper is missing. |
+| `no Ch` after tapping DAB | Hold **DAB** until the sweep starts, then wait for it to finish. |
 | Too few DAB stations | Hold **DAB** to sweep Band III once, then hover over it for the discovered total. Check that the antenna receives VHF Band III and give the sweep time to finish. |
 | Search stops on noise | Raise **SQUELCH** slightly. Try a narrower **BAND/STEP** range or change the spacing if you are looking for a specific channel grid. |
 | No recording to play | Arm **RECORD**, wait for a signal to pass squelch and then end, and check that the chosen server folder is writable. The **PLAY LAST** tooltip reports when no finished recording is available. |
@@ -407,7 +426,7 @@ To check USB access, put the panel in clock standby and run `rtl_test -s 2400000
 
 ## Uniden control reference
 
-| Original UBC-355CLT control | SDr Scanner v5.0 |
+| Original UBC-355CLT control | SDr Scanner |
 | --- | --- |
 | **VOLUME/CLOCK**, **SQ** | **VOLUME** retains reception, volume and standby clock. **SQUELCH** sets the receive gate. |
 | **HOLD**, **▲**, **▼** | Hold and stepping remain. In FAV, the arrows recall saved memories and hold them. |

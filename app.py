@@ -50,7 +50,7 @@ WATCH_RDS_GRACE = 4.2
 WATCH_RECEIVER_RETRY = 2.0
 WATCH_SECONDARY_START_GRACE = 0.5
 WATCH_EXIT_KEYS = {*BANK_KEYS, "band", "close", "down", "scan", "search", "up"}
-DAB_CONTROLS = {"up", "down", "search", "scan"}
+DAB_ARROWS = {"up", "down"}
 DAB_EXIT_KEYS = (set(BANK_KEYS) - {"fav"}) | {"band", "close", "watch"}
 DAB_FREQUENCIES = dict(BAND_III)
 WFM_NOISE_MARGIN_DB = 1.5
@@ -449,7 +449,7 @@ class ScannerRuntime:
         recall = self._dab_recall if status.get("recalling") or not status else None
         hz = DAB_FREQUENCIES[recall[1]] if recall else status.get("hz")
         error = status.get("error")
-        scanning = status.get("scanning", True) and not (recall or status.get("recalling") or error)
+        scanning = status.get("scanning", False) and not (recall or status.get("recalling") or error)
         display = "Err" if error else "SCAN" if scanning else format_frequency(hz) if hz else "no Ch"
         service, text = status.get("service", ""), status.get("text", "")
         station = self._dab_station()
@@ -661,17 +661,19 @@ class ScannerRuntime:
         self._dab_epoch += 1
         if isinstance(command, tuple) and command[0] == "recall":
             block = command[1]
-            self._dab_status = {"hz": DAB_FREQUENCIES[block], "block": block, "scanning": True, "recalling": True}
-        elif (command in ("up", "down") and self._dab_status.get("hz")
-              and not self._dab_status.get("scanning")):
-            self._dab_status = {"hz": self._dab_status["hz"], "scanning": False}
+            self._dab_status = {"hz": DAB_FREQUENCIES[block], "block": block, "scanning": True,
+                                "recalling": True, "recall_sid": command[2]}
+        elif command in DAB_ARROWS:
+            status = self._dab_status
+            scanning = status.get("scanning", False) and not status.get("recalling")
+            self._dab_status = {"hz": status.get("hz"), "scanning": scanning,
+                                "rescanning": status.get("rescanning", False)}
         else:
-            self._dab_status = {"rescanning": command == "rescan" or (
-                isinstance(command, tuple) and command[0] == "rescan")}
+            self._dab_status = {"scanning": True, "rescanning": True}
         self.discard_audio()
         self.recording.boundary()
 
-    def _remember_dab(self, station, blocks, service_counts):
+    def _remember_dab(self, station, blocks, service_counts, station_ids):
         now = time.monotonic()
         if now < self._dab_save_retry_at:
             return
@@ -679,11 +681,12 @@ class ScannerRuntime:
         if not station and previous and previous[0] not in blocks:
             previous = None
         station = station or previous
-        if (station, blocks, service_counts) == (
-                self.scanner.dab_last_station, self.scanner.dab_known_blocks, self.scanner.dab_service_counts):
+        if (station, blocks, service_counts, station_ids) == (
+                self.scanner.dab_last_station, self.scanner.dab_known_blocks,
+                self.scanner.dab_service_counts, self.scanner.dab_station_ids):
             return
         try:
-            self.scanner.remember_dab(station, blocks, service_counts)
+            self.scanner.remember_dab(station, blocks, service_counts, station_ids)
         except OSError as error:
             self._dab_save_retry_at = now + 5.0
             LOG.warning("Could not remember DAB reception: %s", error)
@@ -746,12 +749,12 @@ class ScannerRuntime:
                     self._dab_favorite_slot = current
                 else:
                     self._step_dab_favorite(1)
-        elif self._dab_browse_favorites and key in ("up", "down"):
+        elif self._dab_browse_favorites and key in DAB_ARROWS:
             self._step_dab_favorite(1 if key == "up" else -1)
-        elif key in DAB_CONTROLS:
+        elif key in DAB_ARROWS:
             self._dab_browse_favorites = False
             self._dab_recall = self._dab_favorite_slot = None
-            self._queue_dab("search" if key == "scan" else key)
+            self._queue_dab(key)
 
     def _set_watch_only(self, enabled):
         if self.watch_only != enabled:
@@ -1112,10 +1115,11 @@ class ScannerRuntime:
                             self._dab_recall if dab is None else None)
                         known_blocks = self.scanner.dab_known_blocks
                         service_counts = self.scanner.dab_service_counts
+                        station_ids = self.scanner.dab_station_ids
                     try:
                         if dab is None:
                             dab = DabReceiver(self.receiver_index, known_blocks=known_blocks,
-                                              service_counts=service_counts)
+                                              service_counts=service_counts, station_ids=station_ids)
                         status, pcm = dab.step(command)
                     except DabError as error:
                         LOG.warning("DAB receiver unavailable: %s", error)
@@ -1136,9 +1140,12 @@ class ScannerRuntime:
                                 station = self._dab_station() if status.get("audio_open") else None
                                 if station:
                                     self._dab_recall = ("recall", *station)
+                                elif status.get("recall_sid"):
+                                    self._dab_recall = ("recall", status["block"], status["recall_sid"])
                                 if not status.get("rescanning"):
                                     self._remember_dab(station, status.get("known_blocks", known_blocks),
-                                                       status.get("service_counts", service_counts))
+                                                       status.get("service_counts", service_counts),
+                                                       status.get("station_ids", station_ids))
                                 self.receiver_status = "ready"
                                 if pcm and status.get("audio_open"):
                                     if self.recording.enabled:

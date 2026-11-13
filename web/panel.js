@@ -257,6 +257,9 @@ function tooltipMessage(target) {
     const count = `${stations} DAB ${stations === 1 ? "station" : "stations"} discovered.`;
     return `${count} ${state.dab_error || controlHelp.dab}`;
   }
+  if ((control === "scan" || control === "search") && state.dab_enabled) {
+    return "Hold DAB to scan for digital stations.";
+  }
   if (control === "watch" && state.watch_receiver) {
     const receiver = state.watch_receiver === "secondary" ? "Using a spare SDR." : "Using this panel’s SDR.";
     return controlHelp.watch + " " + receiver;

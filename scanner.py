@@ -12,7 +12,7 @@ from bandplan import (
     FULL_LOCKOUT, GENERAL_STEPS, GERMAN_BANDS, SLOTS, WRITABLE, Channel,
     factory_banks,
 )
-from dab import BAND_III, SERVICE_ID
+from dab import BAND_III, normalize_service_id, normalize_station_ids
 
 KEYS = {*BANK_KEYS, "hold", "up", "down", "mute", "close", "scan", "search", "lock", "band", "prog"}
 KEY_ALIASES = {"frn": "pmr", "emg": "fav"}
@@ -45,11 +45,10 @@ def _normalize_dab_station(station):
     if not isinstance(station, (list, tuple)) or len(station) != 2:
         return None
     block, sid = station
-    if (not isinstance(block, str) or block not in DAB_FREQUENCIES
-            or not isinstance(sid, str) or not SERVICE_ID.fullmatch(sid)):
+    if not isinstance(block, str) or block not in DAB_FREQUENCIES:
         return None
-    service_id = int(sid, 16)
-    return (block, f"0x{service_id:04x}") if service_id else None
+    service_id = normalize_service_id(sid)
+    return (block, service_id) if service_id else None
 
 
 def _normalize_dab_blocks(blocks, station):
@@ -254,6 +253,7 @@ class Scanner:
         self.dab_known_blocks = _normalize_dab_blocks(
             dab_known_blocks if isinstance(dab_known_blocks, list) else (), self.dab_last_station)
         self.dab_service_counts = _normalize_dab_service_counts(raw.get("dab_service_counts"), self.dab_known_blocks)
+        self.dab_station_ids = normalize_station_ids(raw.get("dab_station_ids"), blocks=self.dab_known_blocks)
         frequencies = raw.get("permanent_frequencies")
         self.permanent_frequencies = {}
         if isinstance(frequencies, list):
@@ -322,6 +322,7 @@ class Scanner:
             "dab_last_station": self.dab_last_station,
             "dab_known_blocks": self.dab_known_blocks,
             "dab_service_counts": self.dab_service_counts,
+            "dab_station_ids": self.dab_station_ids,
             "favorite_names": self.favorite_names,
             "permanent_frequencies": list(self.permanent_frequencies),
             "permanent_slots": sorted(locks),
@@ -353,7 +354,7 @@ class Scanner:
         return [{"hz": entry.hz, "mode": entry.modulation} if entry else None
                 for entry in self.memories["FAV"][:FAVORITE_COUNT]]
 
-    def remember_dab(self, station, blocks, service_counts=None):
+    def remember_dab(self, station, blocks, service_counts=None, station_ids=None):
         """Persist the last playable service and observed multiplex data when they change."""
         normalized_station = _normalize_dab_station(station)
         if station is not None and normalized_station is None:
@@ -364,14 +365,16 @@ class Scanner:
         known = _normalize_dab_blocks(blocks, normalized_station)
         counts = _normalize_dab_service_counts(
             self.dab_service_counts if service_counts is None else service_counts, known)
-        previous = self.dab_last_station, self.dab_known_blocks, self.dab_service_counts
-        if previous == (normalized_station, known, counts):
+        directory = normalize_station_ids(self.dab_station_ids if station_ids is None else station_ids, blocks=known)
+        previous = self.dab_last_station, self.dab_known_blocks, self.dab_service_counts, self.dab_station_ids
+        updated = normalized_station, known, counts, directory
+        if previous == updated:
             return False
-        self.dab_last_station, self.dab_known_blocks, self.dab_service_counts = normalized_station, known, counts
+        self.dab_last_station, self.dab_known_blocks, self.dab_service_counts, self.dab_station_ids = updated
         try:
             self._save()
         except OSError:
-            self.dab_last_station, self.dab_known_blocks, self.dab_service_counts = previous
+            self.dab_last_station, self.dab_known_blocks, self.dab_service_counts, self.dab_station_ids = previous
             raise
         return True
 
