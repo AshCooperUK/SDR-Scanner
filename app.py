@@ -34,8 +34,8 @@ from scanner import (
 
 
 ROOT = Path(__file__).resolve().parent
-ASSETS = frozenset({"index.html", "panel.css", "panel.js", "panel.png", "field-background.webp",
-                    "pcm-buffer.js", "pcm-worklet.js", "ashcooperuk-avatar.png"})
+ASSETS = frozenset({"index.html", "panel.css", "panel.js", "panel.png", "field-background.webp", "workbench.webp",
+                    "waterfall.js", "pcm-buffer.js", "pcm-worklet.js", "ashcooperuk-avatar.png"})
 SILENCE = bytes(960)
 FREQUENCY_ENTRY = re.compile(r"[0-9]{1,4}(?:\.[0-9]{0,6})?")
 SESSION_QUERY = re.compile(r"session=([0-9a-f]{32})(?:&radio=([1-9][0-9]{0,5}))?")
@@ -313,7 +313,7 @@ class RecordingRuntime:
                         continue
                     _, tuned, pcm = args
                     self.recorder.feed(tuned.hz, pcm, skip_tone_only=tuned.modulation in ("AM", "FM"),
-                                       station_name=tuned.station_name)
+                                       station_name=tuned.station_name, dab_sid=tuned.sid)
                     with self.lock:
                         if epoch == self._epoch and self._capture == tuned:
                             self._writing = True
@@ -323,7 +323,7 @@ class RecordingRuntime:
                     self._set_parent(*args)
                 elif command == "delete":
                     tuned = args[0]
-                    count = self.recorder.clear_frequency(tuned.hz, station_name=tuned.station_name)
+                    count = self.recorder.clear_frequency(tuned.hz, station_name=tuned.station_name, dab_sid=tuned.sid)
                     with self.lock:
                         files = "recording" if count == 1 else "recordings"
                         label = tuned.station_name or f"{tuned.hz / 1_000_000:.6f} MHz"
@@ -374,6 +374,7 @@ class ScannerRuntime:
         self.receiver_status = "standby"
         self._receiver_reopen = False
         self.signal = None
+        self.waterfall = None
         self.rds = None
         self.rds_target = None
         self.dab_enabled = False
@@ -383,6 +384,7 @@ class ScannerRuntime:
         self._dab_favorite_slot = None
         self._dab_browse_favorites = False
         self._dab_epoch = 0
+        self._dab_mode_generation = 0
         self._dab_save_retry_at = 0.0
         self.watch_enabled = False
         self.watch_only = False
@@ -427,6 +429,27 @@ class ScannerRuntime:
         return [slot for slot, entry in enumerate(self.scanner.dab_favorites, 1)
                 if entry and (entry["block"], entry["sid"]) == station]
 
+    def dab_handoff_station(self):
+        with self.lock:
+            if not (self.scanner.power and self.dab_enabled):
+                return None
+            status = self._dab_status
+            if status.get("block") and status.get("target_sid"):
+                return status["block"], status["target_sid"]
+            return self._dab_station() or (self._dab_recall[1:] if self._dab_recall
+                                           else self.scanner.dab_last_station)
+
+    def resume_dab(self, station, volume):
+        with self.lock:
+            if self.act({"knob": "volume", "value": volume}) is None:
+                return
+            if not self.dab_enabled:
+                self._set_dab(True)
+            if station:
+                self._recall_dab_favorite(None, {"block": station[0], "sid": station[1]})
+            self.wake.set()
+            self._watch_wake.set()
+
     def _dab_favorite_slot_for(self, matches):
         return self._dab_favorite_slot if self._dab_favorite_slot in matches else next(iter(matches), None)
 
@@ -446,25 +469,32 @@ class ScannerRuntime:
 
     def _show_dab(self, state):
         status = self._dab_status
-        recall = self._dab_recall if status.get("recalling") or not status else None
+        recall = (("recall", status["block"], status["recall_sid"]) if status.get("recall_sid")
+                  else self._dab_recall if status.get("recalling") or not status else None)
         hz = DAB_FREQUENCIES[recall[1]] if recall else status.get("hz")
         error = status.get("error")
         scanning = status.get("scanning", False) and not (recall or status.get("recalling") or error)
-        display = "Err" if error else "SCAN" if scanning else format_frequency(hz) if hz else "no Ch"
+        loading = bool(recall or status.get("audio_pending")) and not (error or scanning or status.get("audio_open"))
+        if error:
+            display = "Err"
+        elif scanning:
+            display = "SCAN"
+        elif loading:
+            display = "LOADING"
+        else:
+            display = format_frequency(hz) if hz else "no Ch"
         service, text = status.get("service", ""), status.get("text", "")
         station = self._dab_station()
         selected = station or (recall[1:] if recall else None)
         matches = self._dab_favorite_slots(selected)
         favorite = self._dab_favorite_slot_for(matches)
-        if recall and favorite and not service:
-            service = self._dab_favorite_name(favorite) or state["dab_favorites"][favorite - 1]["name"]
-        metadata = {"ps": service, "text": text} if state["rds_enabled"] and (service or text) else None
+        metadata = {"ps": service, "text": text} if not loading and state["rds_enabled"] and (service or text) else None
         recording_target = self._dab_recording_target()
         programming = self.scanner.dab_programming
         if programming or (state["display"] in ("Pg.L", "OF Pg.L") and self.scanner.notice_until > time.monotonic()):
             display, channel = state["display"], state["channel"]
         else:
-            channel = favorite
+            channel = None if loading else favorite
         show_favorites = favorite or self._dab_browse_favorites or self.scanner.dab_program_slot is not None
         state.update(display=display, channel=channel, upper=["FAV", "DAB"] if show_favorites else ["DAB"],
                      lower=["HOLD", "CH"] if programming else ["SCAN"] if scanning else [],
@@ -475,6 +505,9 @@ class ScannerRuntime:
                      can_tune=False,
                      close_probe=None, audio_open=bool(status.get("audio_open") and not state["muted"]),
                      rds=metadata, dab_error=error, dab_rescanning=bool(status.get("rescanning")),
+                     dab_tuning=loading,
+                     dab_target_sid=status.get("target_sid") or (recall[2] if recall else None),
+                     dab_browse_favorites=self._dab_browse_favorites, dab_programming=programming,
                      dab_recording_identity=recording_target.dab_identity if recording_target else None)
 
     def state(self, *, parked=False, parked_backlight=False):
@@ -518,6 +551,10 @@ class ScannerRuntime:
                 state["audio_open"] = False
                 if watch_only or state.get("audio_expected", state["tune_hz"] is not None):
                     state["display"] = "Err"
+            capture = self.waterfall
+            state["waterfall"] = (capture[1] if capture and state["power"] and state["receiver"] == "ready"
+                                  and not (state["scan_active"] or state["search_active"] or state.get("dab_rescanning"))
+                                  and capture[0] == target(state) else None)
             return state
 
     def act(self, action, *, parked=False, parked_backlight=False):
@@ -611,9 +648,15 @@ class ScannerRuntime:
                 self.scanner.tune_frequency(hz)
             else:
                 self.scanner.knob(action["knob"], action["value"], action.get("held", ()))
-                if not self.scanner.power:
+                if before["power"] and not self.scanner.power:
                     self.scanner.cancel_dab_program()
                     self._dab_commands.clear()
+                    self._dab_status = {}
+                    if self.dab_enabled:
+                        last = self.scanner.dab_last_station
+                        self._dab_recall = ("recall", *last) if last else None
+                    self._dab_mode_generation += 1
+                    self._dab_epoch += 1
             if previous_targets is not None:
                 self._watch_lockouts_changed(previous_targets)
             after = self.scanner.snapshot()
@@ -625,6 +668,7 @@ class ScannerRuntime:
             retuned = watch_mode_changed or dab_changed or target(before) != target(after)
             if retuned:
                 self.signal = None
+                self.waterfall = None
             if retuned or before["rds_enabled"] != after["rds_enabled"]:
                 self.rds = None
                 self.rds_target = None
@@ -645,6 +689,7 @@ class ScannerRuntime:
         self.scanner.cancel_dab_program()
         self.dab_enabled = enabled
         self._dab_epoch += 1
+        self._dab_mode_generation += 1
         self._dab_commands.clear()
         self._dab_status = {}
         last_station = self.scanner.dab_last_station
@@ -659,6 +704,7 @@ class ScannerRuntime:
     def _queue_dab(self, command):
         self._dab_commands.append(command)
         self._dab_epoch += 1
+        self.waterfall = None
         if isinstance(command, tuple) and command[0] == "recall":
             block = command[1]
             self._dab_status = {"hz": DAB_FREQUENCIES[block], "block": block, "scanning": True,
@@ -667,7 +713,8 @@ class ScannerRuntime:
             status = self._dab_status
             scanning = status.get("scanning", False) and not status.get("recalling")
             self._dab_status = {"hz": status.get("hz"), "scanning": scanning,
-                                "rescanning": status.get("rescanning", False)}
+                                "rescanning": status.get("rescanning", False),
+                                "audio_pending": not scanning and bool(self.scanner.dab_station_ids)}
         else:
             self._dab_status = {"scanning": True, "rescanning": True}
         self.discard_audio()
@@ -705,11 +752,12 @@ class ScannerRuntime:
         self._set_watch_only(False)
         if not self.dab_enabled:
             self._set_dab(True)
-        self._dab_favorite_slot = slot
         station = entry["block"], entry["sid"]
         command = ("recall", *station)
         pending = self._dab_status.get("recalling") or not self._dab_status
-        if station != self._dab_station() and not (pending and command == self._dab_recall):
+        same_favorite = self._dab_favorite_slot == slot
+        self._dab_favorite_slot = slot
+        if station != self._dab_station() and not (same_favorite and pending and command == self._dab_recall):
             self._dab_recall = command
             self._dab_commands.clear()
             self._queue_dab(self._dab_recall)
@@ -1036,6 +1084,8 @@ class ScannerRuntime:
     def run(self):
         receiver = Receiver(index=self.receiver_index) if self.receiver_index else Receiver()
         dab = None
+        dab_generation = None
+        dab_resume = None
         dab_retry_at = 0.0
         connected = False
         tuned = None
@@ -1045,11 +1095,13 @@ class ScannerRuntime:
             while not self.stopped.is_set():
                 with self.lock:
                     reopen = self._receiver_reopen
+                    mode_generation = self._dab_mode_generation
                     if reopen:
                         self._receiver_reopen = False
                         self.receiver_status = "standby"
                         self.scanner._clear_signal()
                         self.signal = self.rds = self.rds_target = None
+                        self.waterfall = None
                         self._dab_status = {}
                         self.discard_audio()
                         self._clear_watch()
@@ -1067,8 +1119,17 @@ class ScannerRuntime:
                         if not dab_enabled and (watch_only or not self.scanner.audio_gate_open):
                             self.recording.boundary()
 
+                if mode_generation != dab_generation:
+                    if dab is not None:
+                        dab.close()
+                        dab = None
+                    dab_generation = mode_generation
+                    dab_resume = None
+                    dab_retry_at = 0.0
+
                 if reopen:
                     if dab is not None:
+                        dab_resume = dab.recovery_command() or dab_resume
                         dab.close()
                         dab = None
                     dab_retry_at = 0.0
@@ -1094,6 +1155,7 @@ class ScannerRuntime:
                     with self.lock:
                         self.receiver_status = "standby"
                         self.signal = None
+                        self.waterfall = None
                         self.rds = None
                         self.rds_target = None
                         self._dab_status = {}
@@ -1111,37 +1173,49 @@ class ScannerRuntime:
                     with self.lock:
                         if dab_epoch != self._dab_epoch or not self.scanner.power:
                             continue
+                        resume = dab_resume or self._dab_recall
                         command = self._dab_commands.popleft() if self._dab_commands else (
-                            self._dab_recall if dab is None else None)
+                            resume if dab is None else None)
                         known_blocks = self.scanner.dab_known_blocks
                         service_counts = self.scanner.dab_service_counts
                         station_ids = self.scanner.dab_station_ids
                     try:
                         if dab is None:
+                            anchor = resume[1:] if isinstance(resume, tuple) else None
                             dab = DabReceiver(self.receiver_index, known_blocks=known_blocks,
-                                              service_counts=service_counts, station_ids=station_ids)
+                                              service_counts=service_counts, station_ids=station_ids,
+                                              browse_anchor=anchor)
                         status, pcm = dab.step(command)
                     except DabError as error:
                         LOG.warning("DAB receiver unavailable: %s", error)
+                        dab_resume = (dab.recovery_command() if dab is not None else None) or command or resume
                         if dab is not None:
                             dab.close()
                             dab = None
                         with self.lock:
                             if dab_epoch == self._dab_epoch:
                                 self._dab_status = {"error": str(error)}
+                                if isinstance(dab_resume, tuple) and dab_resume[0] == "recall":
+                                    _, block, sid = dab_resume
+                                    self._dab_status.update(block=block, hz=DAB_FREQUENCIES[block], target_sid=sid)
                                 self.receiver_status = "unavailable"
+                                self.waterfall = None
+                                self.discard_audio()
                                 self.recording.boundary()
                         dab_retry_at = time.monotonic() + 3.0
                     else:
+                        dab_resume = None
                         with self.lock:
                             if (dab_epoch == self._dab_epoch and self.scanner.power
                                     and not self._receiver_reopen and not self._dab_commands):
                                 self._dab_status = status
+                                frame = dab.waterfall
+                                self.waterfall = ((status["hz"], "DAB"), frame) if frame else None
                                 station = self._dab_station() if status.get("audio_open") else None
                                 if station:
                                     self._dab_recall = ("recall", *station)
-                                elif status.get("recall_sid"):
-                                    self._dab_recall = ("recall", status["block"], status["recall_sid"])
+                                elif status.get("target_sid"):
+                                    self._dab_recall = ("recall", status["block"], status["target_sid"])
                                 if not status.get("rescanning"):
                                     self._remember_dab(station, status.get("known_blocks", known_blocks),
                                                        status.get("service_counts", service_counts),
@@ -1221,12 +1295,14 @@ class ScannerRuntime:
                         primary = target(current)
                         self.signal = ((wanted, level, usable_level, offset)
                                        if primary == wanted and math.isfinite(level) else None)
+                        frame = receiver.waterfall
+                        self.waterfall = (wanted, frame) if primary == wanted and frame else None
                         audible = primary == wanted and current["audio_open"] and bool(pcm)
                         capture = (pcm if primary == wanted and self.scanner.audio_gate_open
                                    and math.isfinite(level) else None)
                         self.recording.receive(RecordingTarget(*primary) if capture else None, capture)
                         if audible:
-                            self.publish(pcm)
+                            self.publish(receiver.level_live_audio(pcm))
                         elif was_open:
                             self.discard_audio()
                     if self.watch_enabled and not self._watch_secondary_ready:
@@ -1243,6 +1319,7 @@ class ScannerRuntime:
                         self.receiver_status = "unavailable"
                         self._watch_wake.set()
                         self.signal = None
+                        self.waterfall = None
                         self.rds = None
                         self.rds_target = None
                         self._clear_watch()

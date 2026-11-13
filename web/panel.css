@@ -11,24 +11,32 @@ body {
   min-block-size: 100vh;
   min-block-size: 100svh;
   margin: 0;
-  padding: 3svh clamp(.4rem, 2vmin, 1.25rem) 30svh;
+  padding: 3svh clamp(.4rem, 2vmin, 1.25rem) max(14svh, 5rem);
   background: linear-gradient(rgb(21 22 17 / 16%), rgb(21 22 17 / 16%)),
-    url("field-background.webp") center 56% / cover no-repeat fixed;
+    url("workbench.webp") center 62% / cover no-repeat fixed;
+  background-color: #29241f;
 }
 
 .radio {
   --signal-strip: 104;
-  --panel-width: calc(1629 + var(--signal-strip));
+  --panel-width: calc(1629 + var(--signal-strip) + 126);
+  --panel-height: 1797;
+  --upper-height: 1130;
+  --lcd-left: 746;
+  --lcd-top: 248;
+  --lcd-width: 854;
+  --left-key-offset: 39;
+  --dial-offset: calc(var(--signal-strip) + 126);
   position: relative;
   isolation: isolate;
-  width: min(100%, calc(72rem * var(--panel-width) / 1629), calc(81svh * var(--panel-width) / 1629));
-  aspect-ratio: var(--panel-width) / 1306;
+  width: min(100%, 66rem, calc(82svh * var(--panel-width) / var(--panel-height)));
+  aspect-ratio: var(--panel-width) / var(--panel-height);
   filter: drop-shadow(0 .8rem 1rem rgb(0 0 0 / 49%));
 }
 
 .radio::before {
   position: absolute;
-  inset: 11.85% 1.41% 1.25% 1.72%;
+  inset: calc(154.75 / var(--panel-height) * 100%) 1.41% 1.25% 1.72%;
   z-index: -1;
   border: 1px solid #101110;
   border-radius: .65rem .65rem .8rem .8rem;
@@ -38,12 +46,25 @@ body {
   content: "";
 }
 
+.radio::after {
+  position: absolute;
+  inset: auto 3% .3%;
+  z-index: -2;
+  height: 2%;
+  border-radius: 50%;
+  background: #100b07;
+  filter: blur(.45rem);
+  content: "";
+}
+
 .upper-panel {
+  --face-label-size: max(4px, 1.45cqw);
+  --face-label-gap: .82cqw;
   position: absolute;
   inset: 0 0 auto;
   z-index: 1;
   width: 100%;
-  aspect-ratio: var(--panel-width) / 965;
+  aspect-ratio: var(--panel-width) / var(--upper-height);
   container-type: inline-size;
   user-select: none;
   -webkit-user-select: none;
@@ -54,14 +75,18 @@ body {
   position: absolute;
   inset: 0;
   background: linear-gradient(165deg, #464645, #343433 46%, #2c2c2b 68%);
-  clip-path: polygon(1.72% 16.3%, 9.5% 4.2%, 10% 3.95%, 90.3% 3.95%, 91% 4.2%, 98.59% 16.3%);
+  --roof-rim: calc(157.3 / var(--upper-height) * 100%);
+  --roof-corner: calc(40.5 / var(--upper-height) * 100%);
+  --roof-top: calc(38.1 / var(--upper-height) * 100%);
+  clip-path: polygon(1.72% var(--roof-rim), 9.5% var(--roof-corner), 10% var(--roof-top),
+    90.3% var(--roof-top), 91% var(--roof-corner), 98.59% var(--roof-rim));
   pointer-events: none;
   content: "";
 }
 
 .upper-panel::after {
   position: absolute;
-  inset: 16.2% 1.41% auto 1.72%;
+  inset: calc(156.3 / var(--upper-height) * 100%) 1.41% auto 1.72%;
   height: .65cqw;
   border-radius: .5cqw .5cqw 0 0;
   background: linear-gradient(#555553, #272726);
@@ -70,7 +95,7 @@ body {
 
 .extension {
   position: absolute;
-  inset: 47.4% 1.41% 1.25% 1.72%;
+  inset: calc(1110 / var(--panel-height) * 100%) 1.41% 1.25% 1.72%;
   box-sizing: border-box;
   display: grid;
   grid-template-rows: minmax(0, 1fr) 22%;
@@ -91,9 +116,15 @@ body {
   padding-block-end: 1%;
 }
 
-.settings-bank {
+.favorite-bank,
+.settings-bank,
+.control-divider {
   border-top: 1px solid #090a09;
   box-shadow: inset 0 1px #ffffff12;
+}
+
+.favorite-bank,
+.settings-bank {
   padding-block-start: 1%;
 }
 
@@ -154,7 +185,8 @@ body {
 }
 
 .extension-button.is-stored .button-cap::after,
-.setting-button[aria-pressed="true"] .button-cap::after {
+.setting-button[aria-pressed="true"] .button-cap::after,
+#dab-toggle[aria-pressed="true"]::before {
   position: absolute;
   top: 42%;
   left: 47%;
@@ -187,7 +219,8 @@ body {
   animation: watch-flash .8s step-end infinite;
 }
 
-.radio.is-muted .button-cap::after {
+.radio.is-muted .button-cap::after,
+.radio.is-muted #dab-toggle::before {
   content: none;
 }
 
@@ -363,9 +396,9 @@ body {
 .dial {
   position: absolute;
   left: calc((var(--x) + var(--position-x, 0)) / var(--panel-width) * 100%);
-  top: calc(var(--y) / 965 * 100%);
+  top: calc(var(--y) / var(--upper-height) * 100%);
   width: calc(var(--w) / var(--panel-width) * 100%);
-  height: calc(var(--h) / 965 * 100%);
+  height: calc(var(--h) / var(--upper-height) * 100%);
   box-sizing: border-box;
   border: 0;
   border-radius: 50%;
@@ -381,12 +414,17 @@ body {
   cursor: pointer;
 }
 
+.left-controls .key {
+  --position-x: var(--left-key-offset);
+  top: calc((var(--y) + var(--lcd-top)) / var(--upper-height) * 100% + var(--face-label-size) + var(--face-label-gap));
+}
+
 .face-label {
   position: absolute;
-  bottom: calc(100% + .82cqw);
+  bottom: calc(100% + var(--face-label-gap));
   left: 50%;
   color: #f1f1ee;
-  font: 700 max(4px, 1.45cqw) / 1 Arial, sans-serif;
+  font: 700 var(--face-label-size) / 1 Arial, sans-serif;
   letter-spacing: .015em;
   text-shadow: 0 1px #000;
   text-transform: uppercase;
@@ -415,13 +453,20 @@ body {
   clip-path: polygon(2% 17%, 10% 6%, 90% 6%, 98% 17%, 100% 33%, 91% 53%, 58% 94%, 50% 99%, 41% 94%, 9% 53%, 0 33%);
 }
 
-.key[data-key="mute"],
+#dab-toggle,
+.preset-key,
 .key[data-key="fav"],
 .key[data-key="pmr"],
 .key[data-key="close"],
 .key[data-key="air"],
 .key[data-key="cb"] {
-  border-radius: 26% / 50%;
+  --cap-radius: 26% / 50%;
+  border-radius: var(--cap-radius);
+}
+
+#dab-toggle::before {
+  z-index: 1;
+  pointer-events: none;
 }
 
 .key:active::after,
@@ -457,7 +502,7 @@ body {
 }
 
 .dial {
-  --position-x: var(--signal-strip);
+  --position-x: var(--dial-offset);
   background: radial-gradient(circle at 47% 40%, #30302f, #131313 70%);
   box-shadow: inset 0 0 .35cqw #000, 0 .14cqw .32cqw #0009;
   cursor: grab;
@@ -469,7 +514,7 @@ body {
 
 .dial::after {
   position: absolute;
-  top: calc((var(--cap-y) - var(--y)) / var(--h) * 100%);
+  top: calc((var(--h) - var(--cap-size)) / 2 / var(--h) * 100%);
   left: calc((var(--cap-x) - var(--x)) / var(--w) * 100%);
   width: calc(var(--cap-size) / var(--w) * 100%);
   height: calc(var(--cap-size) / var(--h) * 100%);
@@ -482,14 +527,24 @@ body {
   pointer-events: none;
 }
 
+.control-divider {
+  position: absolute;
+  left: calc(var(--lcd-left) / var(--panel-width) * 100%);
+  width: calc(var(--lcd-width) / var(--panel-width) * 100%);
+  top: calc(902 / var(--upper-height) * 100%);
+  height: 2px;
+  box-sizing: border-box;
+}
+
 .lcd {
-  --lcd-width: calc(721 + var(--signal-strip));
+  --lcd-height: 610;
+  --lcd-header-height: 185;
   --lcd-unit: calc(1cqw * 1629 / var(--panel-width));
   position: absolute;
-  left: calc(649 / var(--panel-width) * 100%);
-  top: calc(248 / 965 * 100%);
+  left: calc(var(--lcd-left) / var(--panel-width) * 100%);
+  top: calc(var(--lcd-top) / var(--upper-height) * 100%);
   width: calc(var(--lcd-width) / var(--panel-width) * 100%);
-  height: calc(185 / 965 * 100%);
+  height: calc(var(--lcd-height) / var(--upper-height) * 100%);
   box-sizing: border-box;
   overflow: hidden;
   border-radius: .3cqw;
@@ -514,12 +569,98 @@ body {
 
 .lcd-content {
   position: absolute;
-  inset: 0 calc(var(--signal-strip) / var(--lcd-width) * 100%) 0 0;
+  inset: 0 calc(var(--signal-strip) / var(--lcd-width) * 100%) auto 0;
+  height: calc(var(--lcd-header-height) / var(--lcd-height) * 100%);
+}
+
+.lcd-divider {
+  position: absolute;
+  inset: calc((var(--lcd-header-height) + 5) / var(--lcd-height) * 100%) 4% auto;
+  border-top: 1px solid #572b046b;
+}
+
+.waterfall {
+  position: absolute;
+  inset: calc((var(--lcd-header-height) + 15) / var(--lcd-height) * 100%) 0 4%;
+  margin: 0;
+  pointer-events: none;
+  color: #3e2308;
+  font: 700 max(5.5px, 1.2cqw) / 1 ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.waterfall-frequencies {
+  position: absolute;
+  inset: 0 6.5% auto 10.5%;
+  height: 11%;
+}
+.waterfall-frequencies span {
+  position: absolute;
+  top: 50%;
+  left: var(--position);
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+}
+.waterfall-history i:nth-of-type(2)::before {
+  position: absolute;
+  inset: 0 auto auto 0;
+  transform: translateX(-50%);
+  border: .23cqw solid transparent;
+  border-top-color: currentColor;
+  content: "";
+}
+.waterfall-history {
+  position: absolute;
+  inset: 15% 6.5% 6% 10.5%;
+  border: 1px solid #6a370994;
+  overflow: hidden;
+  background: #66320730;
+}
+.waterfall-history canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+.waterfall.can-tune .waterfall-history canvas {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.waterfall-history i {
+  position: absolute;
+  inset: 0 auto 0 25%;
+  border-left: 1px solid #62300825;
+}
+.waterfall-history i:nth-of-type(2) {
+  left: var(--tuned-position, 50%);
+  border-left: 1px dashed #4f290b91;
+}
+.waterfall-history i:nth-of-type(3) { left: 75%; }
+.waterfall-time {
+  position: absolute;
+  inset: 17% auto 6% 1.7%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  width: 7%;
+  white-space: nowrap;
+  color: #663506;
+  font-size: .9em;
+}
+.waterfall-unit {
+  position: absolute;
+  bottom: 5.7%;
+  right: 1.05%;
+  color: #663506;
+  font-size: .82em;
 }
 
 .signal-meter:not([hidden]) {
   position: absolute;
-  inset-block: 12%;
+  inset-block: calc(22 / var(--lcd-height) * 100%) auto;
+  height: calc(140 / var(--lcd-height) * 100%);
   inset-inline-end: 0;
   box-sizing: border-box;
   display: flex;
@@ -561,6 +702,8 @@ body {
 .lcd-banks {
   top: 7%;
   height: 14%;
+  inset-inline: 4%;
+  font-size: calc(1.4 * var(--lcd-unit));
 }
 
 .lcd-status {
@@ -809,6 +952,211 @@ body {
 @keyframes scan-scroll {
   from { transform: translateX(70%); }
   to { transform: translateX(-88%); }
+}
+
+@media (max-width: 960px) and (pointer: coarse) {
+  body {
+    display: block;
+    padding: 0;
+    background: #1d1d1c;
+  }
+
+  .profile-footer,
+  .radio::after,
+  .upper-panel::before,
+  .upper-panel::after,
+  .control-divider {
+    display: none;
+  }
+
+  .radio {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 34%);
+    gap: 6px;
+    box-sizing: border-box;
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+    padding: clamp(6px, 1.8vmin, 12px);
+    aspect-ratio: auto;
+    filter: none;
+  }
+
+  .radio::before {
+    inset: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .upper-panel,
+  .extension {
+    position: relative;
+    inset: auto;
+    min-height: 0;
+  }
+
+  .upper-panel {
+    --face-label-size: clamp(8px, 2.6cqw, 12px);
+    --face-label-gap: 2px;
+    display: grid;
+    grid-template: "lcd lcd" minmax(0, 1fr)
+                   "bank dials" minmax(0, 1.3fr)
+                   "search search" clamp(34px, 6dvh, 55px) / minmax(0, 1fr) 23%;
+    gap: 6px;
+    aspect-ratio: auto;
+  }
+
+  .lcd {
+    --lcd-header-height: 255;
+    --lcd-unit: clamp(3px, 1.6cqw, 6px);
+    grid-area: lcd;
+    position: relative;
+    inset: auto;
+    width: auto;
+    height: auto;
+    border-radius: 3px;
+  }
+
+  .waterfall {
+    font-size: clamp(7px, 1.7cqw, 10px);
+  }
+
+  .left-controls,
+  .control-keys,
+  .dials {
+    display: grid;
+    gap: 3px;
+    min-height: 0;
+  }
+
+  .left-controls {
+    grid-area: bank;
+    grid-template: repeat(5, minmax(0, 1fr)) / repeat(3, minmax(0, 1fr));
+  }
+
+  .control-keys {
+    grid-area: search;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-top: 1px solid #090a09;
+    box-shadow: inset 0 1px #ffffff12;
+    padding-top: 3px;
+  }
+
+  .upper-panel .key {
+    position: relative;
+    inset: auto;
+    display: grid;
+    grid-template-rows: var(--face-label-size) minmax(0, 1fr);
+    gap: var(--face-label-gap);
+    justify-items: center;
+    width: 100%;
+    height: 100%;
+    border-radius: 5px;
+  }
+
+  .key .face-label {
+    position: static;
+    transform: none;
+  }
+
+  .key::after {
+    position: static;
+    align-self: center;
+    width: auto;
+    height: 100%;
+    max-width: 88%;
+    max-height: 29px;
+    aspect-ratio: var(--w) / var(--h);
+    border-radius: var(--cap-radius, 50%);
+  }
+
+  #dab-toggle[aria-pressed="true"]::before,
+  .radio.is-muted .key[data-key="hold"]::before {
+    top: calc((100% + var(--face-label-size) + var(--face-label-gap)) / 2);
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  .radio.is-muted .key[data-key="hold"]::before {
+    width: min(19%, 13px);
+  }
+
+  .dials {
+    grid-area: dials;
+    grid-template-rows: repeat(3, minmax(0, 1fr));
+    place-items: center;
+    padding-block-start: calc(var(--face-label-size) + var(--face-label-gap));
+  }
+
+  .dial {
+    position: relative;
+    inset: auto;
+    width: min(72%, 45px, 10.5dvh);
+    height: auto;
+    aspect-ratio: 1;
+  }
+
+  .extension {
+    grid-template-rows: minmax(0, 4fr) minmax(0, 1fr);
+    padding: 0;
+  }
+
+  .favorite-bank,
+  .settings-bank {
+    min-height: 0;
+    padding-block: 3px 1px;
+  }
+
+  .settings-bank {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .extension-button {
+    min-height: 0;
+  }
+
+  .button-label {
+    white-space: nowrap;
+  }
+
+  .button-cap {
+    width: auto;
+    height: 100%;
+    max-width: 88%;
+    max-height: 25px;
+  }
+
+  .setting-button .button-cap {
+    width: auto;
+    max-width: 78%;
+    max-height: 32px;
+  }
+}
+
+@media (max-width: 960px) and (pointer: coarse) and (orientation: landscape) {
+  .radio {
+    grid-template-rows: minmax(0, 1fr) minmax(0, 36%);
+  }
+
+  .upper-panel {
+    --face-label-size: clamp(8px, 2.6dvh, 11px);
+    grid-template: "bank lcd dials" minmax(0, 1fr)
+                   "bank search dials" clamp(29px, 12dvh, 48px) / 32% minmax(0, 1fr) 13%;
+  }
+
+  .lcd {
+    --lcd-unit: clamp(3px, .8cqw, 5px);
+  }
+
+  .extension {
+    grid-template: minmax(0, 1fr) / minmax(0, 2fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .settings-bank {
+    grid-template: repeat(2, minmax(0, 1fr)) / repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

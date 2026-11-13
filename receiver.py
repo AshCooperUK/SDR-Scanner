@@ -30,12 +30,22 @@ TUNER_LIMIT = 1_750_000_000
 PROBE_FFT = 8192
 PROBE_HALF_WIDTH = 900_000
 PROBE_STRIDE = 1_600_000
+WATERFALL_BINS = 172
+WATERFALL_SPAN_HZ = 1_000_000
+WATERFALL_INTERVAL = 1 / 7
 WATCH_HALF_WIDTH = {"AM": 7_000, "FM": 9_000, "WFM": 120_000}
 METER_NOISE_BANDWIDTH = {"AM": 7_400, "FM": 10_600, "WFM": 200_000}
 METER_SPECTRUM_INTERVAL = 4
 METER_MIN_EXCESS_DB = 5
 NFM_DEEMPHASIS_SECONDS = 200e-6
 WFM_DEEMPHASIS_SECONDS = 50e-6
+NFM_AUDIO_MIN_SNR_DB = 16
+NFM_AUDIO_MAX_OFFSET_HZ = 2_700
+NFM_AUDIO_MIN_RMS = .012
+NFM_AUDIO_TARGET_RMS = .12
+NFM_AUDIO_MAX_GAIN = 2.5
+NFM_AUDIO_GAIN_RISE = 1 - np.exp(-IQ_SAMPLES / (IQ_RATE * .12))
+NFM_AUDIO_ENVELOPE_DECAY = np.exp(-IQ_SAMPLES / (IQ_RATE * .35))
 TUNER_GAIN_TARGET = 280  # Librtlsdr expresses gain in tenths of a dB.
 GAIN_RECOVERY_BLOCKS = IQ_RATE // IQ_SAMPLES
 IQ_BLOCK_BYTES = 2 * IQ_SAMPLES
@@ -312,6 +322,9 @@ class Receiver:
         self._probe_pass = 0
         self._probe_window = np.hanning(PROBE_FFT)
         self._probe_offsets = np.fft.fftshift(np.fft.fftfreq(PROBE_FFT, 1 / IQ_RATE))
+        self._waterfall = None
+        self._waterfall_at = 0.0
+        self._waterfall_sequence = 0
         self._watch_iq = None
         self._watch_responses = {}
         self._meter_noise_bins = ((np.abs(self._probe_offsets) >= 20_000)
@@ -434,11 +447,20 @@ class Receiver:
         """Selected-channel power above the estimated receiver noise floor."""
         return self._tuning_snr_db if self._prepared else None
 
+    @property
+    def waterfall(self):
+        """Return the most recent display row measured on the audio tuning."""
+        return self._waterfall if self._prepared else None
+
     def _reset_tuning_measurement(self):
         self._tuning_offset_hz = None
         self._tuning_snr_db = None
+        self._nfm_audio_envelope = 0.0
+        self._nfm_audio_gain = 1.0
         self._meter_blocks_until_spectrum = 0
         self._meter_offsets.clear()
+        self._waterfall = None
+        self._waterfall_at = 0.0
 
     def _stop_stream(self):
         if self._stream is not None and not self._stream.stop():
@@ -515,11 +537,42 @@ class Receiver:
         self._measure_tuning(level)
         return level, pcm
 
+    def level_live_audio(self, pcm):
+        """Raise quiet narrow-FM audio for live listening."""
+        offset = self._tuning_offset_hz
+        snr = self._tuning_snr_db
+        if (self._tuning[1] != "FM" or offset is None or abs(offset) > NFM_AUDIO_MAX_OFFSET_HZ
+                or snr is None or snr < NFM_AUDIO_MIN_SNR_DB):
+            self._nfm_audio_envelope = 0.0
+            self._nfm_audio_gain = 1.0
+            return pcm
+
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
+        rms = float(np.sqrt(np.mean(samples * samples)))
+        # A slow envelope release holds through syllable gaps. Below the floor
+        # leave the audio untouched so an idle carrier does not bring up hiss.
+        self._nfm_audio_envelope = max(rms, self._nfm_audio_envelope * NFM_AUDIO_ENVELOPE_DECAY)
+        if rms < NFM_AUDIO_MIN_RMS:
+            return pcm
+
+        peak = float(np.max(np.abs(samples)))
+        ceiling = max(1.0, .95 / peak)
+        gain = max(1.0, min(NFM_AUDIO_TARGET_RMS / self._nfm_audio_envelope, NFM_AUDIO_MAX_GAIN, ceiling))
+        start_gain = min(self._nfm_audio_gain, gain)
+        self._nfm_audio_gain = start_gain + (gain - start_gain) * NFM_AUDIO_GAIN_RISE
+        if self._nfm_audio_gain == 1:
+            return pcm
+        ramp = np.linspace(start_gain, self._nfm_audio_gain, samples.size, dtype=np.float32)
+        return (samples * ramp * 32768).astype("<i2").tobytes()
+
     def _measure_tuning(self, level):
         hz, mode = self._tuning
         offset = hz - self._center
         if self._meter_blocks_until_spectrum == 0:
             spectrum = self._watch_spectrum(self._watch_iq)
+            now = monotonic()
+            if now >= self._waterfall_at:
+                self._update_waterfall(spectrum, hz, now)
             relative = self._probe_offsets - offset
             noise_bins = self._meter_noise_bins & (np.abs(relative) > WATCH_HALF_WIDTH[mode])
             noise = np.median(spectrum[noise_bins]) * (METER_NOISE_BANDWIDTH[mode] * PROBE_FFT / IQ_RATE)
@@ -536,6 +589,33 @@ class Receiver:
             self._meter_offsets.append(self._decoder.block_offset_hz)
             if len(self._meter_offsets) >= (6 if mode == "WFM" else 4):
                 self._tuning_offset_hz = sum(self._meter_offsets) / len(self._meter_offsets)
+
+    def _update_waterfall(self, spectrum, hz, now):
+        # Stay away from passband edges and keep the full plot in the tuning
+        # range. Near a band limit, shift the view so the selected RF stays visible.
+        low_limit, high_limit = (100_000, DIRECT_LIMIT) if self._direct else (DIRECT_LIMIT, TUNER_LIMIT)
+        low = max(low_limit, self._center - PROBE_HALF_WIDTH)
+        high = min(high_limit, self._center + PROBE_HALF_WIDTH)
+        span = min(WATERFALL_SPAN_HZ, high - low)
+        left = min(max(hz - span // 2, low), high - span)
+        edges = np.linspace(left - self._center, left + span - self._center, WATERFALL_BINS + 1)
+        boundaries = np.searchsorted(self._probe_offsets, edges)
+        first, last = boundaries[0], boundaries[-1]
+        visible_power = spectrum[first:last]
+        # The tuner can leave a strong DC spike at its LO, which is offset
+        # from the selected frequency. Do not show it as a received carrier.
+        dc = PROBE_FFT // 2 - first
+        if -3 <= dc < len(visible_power) + 3:
+            visible_power = visible_power.copy()
+            dc_left = spectrum[PROBE_FFT // 2 - 5]
+            dc_right = spectrum[PROBE_FFT // 2 + 5]
+            visible_power[max(0, dc - 3):dc + 4] = (dc_left + dc_right) / 2
+        grouped = np.maximum.reduceat(visible_power, boundaries[:-1] - first)
+        levels = np.rint(10 * np.log10(np.clip(grouped, 1e-12, 1))).astype(int)
+        self._waterfall_sequence += 1
+        self._waterfall = {"sequence": self._waterfall_sequence, "center_hz": left + span // 2,
+                           "span_hz": span, "levels": tuple(levels.tolist()), "time_ms": round(now * 1000)}
+        self._waterfall_at = now + WATERFALL_INTERVAL
 
     @staticmethod
     def _am_offset(spectrum, relative):

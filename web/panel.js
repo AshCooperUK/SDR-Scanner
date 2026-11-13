@@ -1,7 +1,9 @@
 import { PcmBuffer } from "./pcm-buffer.js";
+import { Waterfall } from "./waterfall.js";
 
 const radio = document.querySelector(".radio");
 const lcd = document.querySelector("#lcd");
+const waterfall = new Waterfall(document.querySelector(".waterfall"));
 const signalMeter = document.querySelector("#signal-meter");
 const signalBars = signalMeter.querySelectorAll("[data-signal-bar]");
 const display = document.querySelector("#display");
@@ -42,9 +44,15 @@ const favorites = Array.from({ length: 24 }, (_, index) => {
 });
 document.querySelector("#favorite-bank").append(...favorites);
 const keys = [...document.querySelectorAll("[data-key]"), ...favorites, dabToggle];
+const presetBanks = {
+  business: "BUS", amateur: "HAM", fmradio: "BCAST", rail: "RAIL", events: "EVT", utilities: "UTIL",
+};
+const presetKeys = document.querySelectorAll(".preset-key");
 const dials = new Map();
 const presses = new Map();
 const audioRate = 24000;
+const maxBoostDb = 12;
+const maxBoostGain = 10 ** (maxBoostDb / 20);
 const favoriteHoldDelay = 850;
 const lockInterval = 280;
 const wheelQuietPeriod = 110;
@@ -81,6 +89,12 @@ const legendNames = {
   AIR: "Airband",
   MRN: "Marine",
   CB: "CB Radio",
+  BUS: "Business Radio",
+  HAM: "Amateur Radio",
+  BCAST: "FM Radio",
+  RAIL: "Railway Radio",
+  EVT: "Event Radio",
+  UTIL: "Utility Radio",
   AM: "AM",
   NFM: "Narrow FM",
   WFM: "Wide FM",
@@ -98,20 +112,27 @@ const legendNames = {
 
 const controlHelp = {
   hold: "Pause or resume scanning on the current frequency.",
-  up: "Hold the next saved favourite in FAV mode. Elsewhere, step or search up.",
-  down: "Hold the previous saved favourite in FAV mode. Elsewhere, step or search down.",
+  up: "Step to the next channel, skip forward during Scan, or search up.",
+  down: "Step to the previous channel, skip backward during Scan, or search down.",
   mute: "Toggle audio and panel LEDs. The LCD stays on.",
   fav: "Toggle scanning of the FAV memories.",
-  pmr: "Toggle scanning of the PMR446 preset channels.",
+  pmr: "Toggle scanning of all 16 analogue PMR446 channels.",
   close: "Cycle nearby-signal modes. Hold for Close Call Only.",
   air: "Cycle Air and Marine, Air only, Marine only, and off.",
   cb: "Cycle the CB AM and FM scan banks.",
+  business: "Toggle the UK business radio preset bank.",
+  amateur: "Toggle the UK amateur radio preset bank.",
+  fmradio: "Toggle the FM broadcast preset bank.",
+  rail: "Toggle UK railway and tram analogue radio presets.",
+  events: "Toggle UK venue and event analogue radio presets.",
+  utilities: "Toggle UK water and power utility analogue radio presets.",
   scan: "Start or resume scanning the selected presets or saved favourites.",
   search: "Sweep the selected range or start a full-range search.",
   lock: "Tap to skip. Double-tap to lock out permanently. Hold to clear temporary skips and unlock the current channel.",
   band: "Choose a search band. Hold to change the frequency step.",
   prog: "Program a memory. Hold to toggle Program Lock.",
   squelch: "Set how strong a signal must be to open audio. Scroll for 0.5 dB steps.",
+  boost: "Drag or scroll to raise live audio in this browser.",
   volume: "Click to switch between radio and clock. Drag or scroll to adjust volume.",
   rds: "Toggle station names and text from FM RDS and DAB.",
   dab: "Tap to switch between DAB and analogue. Hold to rescan for local DAB stations.",
@@ -134,6 +155,7 @@ let audioContext;
 let audioReady;
 let pcmOutput;
 let volumeNode;
+let liveGainNode;
 let audioStream;
 let audioRetry;
 let replayRequest;
@@ -183,6 +205,11 @@ function canTune() {
   return state.can_tune ?? state.power;
 }
 
+function canTuneWaterfall() {
+  return Boolean(state.power && state.waterfall && !editingFavorite
+    && (state.dab_enabled ? !state.dab_programming : canTune()));
+}
+
 function newScannerSession() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)),
     byte => byte.toString(16).padStart(2, "0")).join("");
@@ -228,7 +255,8 @@ function tooltipMessage(target) {
       return `F${String(watched.slot).padStart(2, "0")} · ${formatMHz(watched.hz)}`;
     }
     const frequency = Number.isInteger(state.tune_hz) ? formatMHz(state.tune_hz) : "";
-    return [frequency, rdsMessage].filter(Boolean).join(" · ");
+    const tuning = state.dab_tuning ? "Acquiring DAB audio…" : "";
+    return [frequency, rdsMessage, state.dab_error || tuning].filter(Boolean).join(" · ");
   }
   if (target.dataset.favorite !== undefined) {
     const index = Number(target.dataset.favorite) - 1;
@@ -246,6 +274,9 @@ function tooltipMessage(target) {
     const level = state.squelch === 0 ? "Squelch open." : `Squelch threshold ${state.squelch_db.toFixed(1)} dBFS.`;
     return `${level} ${controlHelp.squelch}`;
   }
+  if (control === "boost") {
+    return `Audio boost ${target.getAttribute("aria-valuetext")}. ${controlHelp.boost}`;
+  }
   if (control === "record") {
     return [controlHelp.record, state.record_message].filter(Boolean).join(" · ");
   }
@@ -259,6 +290,14 @@ function tooltipMessage(target) {
   }
   if ((control === "scan" || control === "search") && state.dab_enabled) {
     return "Hold DAB to scan for digital stations.";
+  }
+  if (state.dab_enabled && !state.dab_programming) {
+    if (control === "fav") return "Switch between discovered DAB stations and saved DAB favourites.";
+    if (control === "up" || control === "down") {
+      const direction = control === "up" ? "next" : "previous";
+      const list = state.dab_browse_favorites ? "saved DAB favourite" : "discovered DAB station";
+      return `Tune to the ${direction} ${list}.`;
+    }
   }
   if (control === "watch" && state.watch_receiver) {
     const receiver = state.watch_receiver === "secondary" ? "Using a spare SDR." : "Using this panel’s SDR.";
@@ -374,7 +413,7 @@ function tunedFavoriteName(next) {
 }
 
 function renderRds(next, entering) {
-  const showDetails = next.power && next.rds_enabled && !entering && !editingFavorite;
+  const showDetails = next.power && next.rds_enabled && !next.dab_tuning && !entering && !editingFavorite;
   const rds = showDetails ? next.rds : null;
   const favoriteName = showDetails ? tunedFavoriteName(next) : "";
   const pi = Number.isInteger(rds?.pi) ? rds.pi.toString(16).toUpperCase().padStart(4, "0") : rds?.pi;
@@ -390,6 +429,7 @@ function renderRds(next, entering) {
 
 function resetRadioInteraction() {
   disconnectAudio();
+  waterfall.update(null);
   if (replayRequest) stopReplay();
   replayMessage = "";
   lastToneId = undefined;
@@ -447,6 +487,9 @@ function render(next) {
   }
   const visibleChannel = !entering && next.channel !== null && next.channel !== undefined;
   if (visibleChannel) active.add("CH");
+  for (const button of presetKeys) {
+    button.setAttribute("aria-pressed", String(active.has(presetBanks[button.dataset.key])));
+  }
   const modeLegend = active.has("DAB") ? "DAB" : active.has("WFM") ? "WFM" : "NFM";
   for (const element of legends) {
     const name = element.dataset.lcd;
@@ -458,6 +501,8 @@ function render(next) {
   }
 
   lcd.classList.toggle("is-unlit", !(next.backlight ?? next.power));
+  waterfall.update(next.waterfall ?? null, next.tune_hz);
+  waterfall.element.classList.toggle("can-tune", canTuneWaterfall());
   renderRds(next, entering);
   const readout = entering ? frequencyEntry : next.display;
   lcd.setAttribute("aria-label", entering ? `${readout} MHz`
@@ -644,8 +689,19 @@ favoriteNameEditor.addEventListener("keydown", (event) => {
 });
 
 lcd.addEventListener("click", (event) => {
+  if (event.target === waterfall.canvas && event.button === 0 && canTuneWaterfall()) {
+    const hz = waterfall.frequencyAt(event.clientX);
+    if (hz !== null) tuneFromLCD((hz / 1_000_000).toFixed(6));
+  }
   if (event.target !== favoriteNameEditor) focusLCD();
 });
+
+function tuneFromLCD(mhz) {
+  editFrequency("");
+  void enableAudio();
+  flushLockTap();
+  void postAction({ tune: "frequency", mhz });
+}
 
 async function copyFrequency(hz) {
   const frequency = `${hz / 1_000_000} MHz`;
@@ -752,12 +808,8 @@ window.addEventListener("keydown", (event) => {
     editFrequency(frequencyEntry.slice(0, -1));
   } else {
     const mhz = frequencyEntry.replace(/\.$/, "");
-    editFrequency("");
-    if (key === "Enter") {
-      void enableAudio();
-      flushLockTap();
-      void postAction({ tune: "frequency", mhz });
-    }
+    if (key === "Enter") tuneFromLCD(mhz);
+    else editFrequency("");
   }
 }, { capture: true });
 
@@ -852,7 +904,10 @@ for (const button of keys) {
     button.setPointerCapture(event.pointerId);
     beginPress(event.pointerId, button);
   });
-  button.addEventListener("pointerup", (event) => endPress(event.pointerId));
+  button.addEventListener("pointerup", (event) => {
+    if (event.pointerType === "touch" && button !== playLast && presses.has(event.pointerId)) void enableAudio();
+    endPress(event.pointerId);
+  });
   button.addEventListener("pointercancel", (event) => endPress(event.pointerId, true));
   button.addEventListener("lostpointercapture", (event) => endPress(event.pointerId, true));
   if (button.dataset.favorite !== undefined) {
@@ -931,6 +986,12 @@ function paintDial(dial, value) {
   if (typeof value !== "number") return;
   dial.value = limit(value);
   dial.element.style.setProperty("--rotation", (-90 + dial.value * 270) + "deg");
+  if (dial.name === "boost") {
+    const db = Number((dial.value * maxBoostDb).toFixed(1));
+    dial.element.setAttribute("aria-valuenow", String(db));
+    dial.element.setAttribute("aria-valuetext", db ? `+${db} dB` : "0 dB");
+    return;
+  }
   const percent = Number((dial.value * 100).toFixed(dial.name === "squelch" ? 1 : 0));
   dial.element.setAttribute("aria-valuenow", String(percent));
   dial.element.setAttribute("aria-valuetext",
@@ -972,6 +1033,11 @@ function changeDial(dial, value) {
   const rounded = Math.round(limit(value) * 1000) / 1000;
   if (previous === rounded) return;
   paintDial(dial, rounded);
+  if (dial.name === "boost") {
+    updateAudioGain();
+    updateTooltip();
+    return;
+  }
   const action = { knob: dial.name, value: rounded };
   if (dial.name === "volume" && previous === 0 && rounded > 0 && !state.power) {
     const held = heldBootChord();
@@ -1030,7 +1096,10 @@ for (const element of document.querySelectorAll("[data-knob]")) {
     const { moved } = dial.drag;
     dial.drag = null;
     element.classList.remove("is-dragging");
-    if (!moved && event.type === "pointerup") tapDial(dial, event);
+    if (event.type === "pointerup") {
+      if (event.pointerType === "touch") void enableAudio();
+      if (!moved) tapDial(dial, event);
+    }
     if (!dial.busy) paintDial(dial, state[dial.name]);
   };
   element.addEventListener("pointerup", finishDrag);
@@ -1104,7 +1173,20 @@ async function enableAudio() {
     audioReady ??= createPcmOutput(audioContext).then(output => {
       volumeNode = audioContext.createGain();
       volumeNode.gain.value = 0;
-      output.node.connect(volumeNode).connect(audioContext.destination);
+      volumeNode.connect(audioContext.destination);
+      liveGainNode = audioContext.createGain();
+      liveGainNode.gain.value = 0;
+      const limiter = audioContext.createWaveShaper();
+      // The shaper input spans the full boost range. Leave headroom at the
+      // loudest peaks with a smooth transition to full scale.
+      const curve = new Float32Array(4097);
+      for (let index = 0; index < curve.length; index += 1) {
+        const sample = (2 * index / (curve.length - 1) - 1) * maxBoostGain;
+        const magnitude = Math.abs(sample);
+        curve[index] = magnitude <= .9 ? sample : Math.sign(sample) * (.9 + .1 * Math.tanh((magnitude - .9) / .1));
+      }
+      limiter.curve = curve;
+      output.node.connect(liveGainNode).connect(limiter).connect(audioContext.destination);
       pcmOutput = output;
     }).catch(error => {
       audioReady = undefined;
@@ -1178,11 +1260,23 @@ function disconnectAudio() {
   pcmOutput?.reset();
 }
 
+function liveAudioEnabled() {
+  return pageActive && !awaitingState && state.power && !state.watch_only && !replayRequest;
+}
+
+function updateAudioGain(live = liveAudioEnabled()) {
+  if (!pcmOutput) return;
+  const gain = live && !state.muted ? state.volume ** 1.45 : 0;
+  const boostGain = maxBoostGain ** dials.get("boost").value;
+  const now = audioContext.currentTime;
+  volumeNode.gain.setTargetAtTime(gain, now, 0.015);
+  liveGainNode.gain.setTargetAtTime(gain * boostGain / maxBoostGain, now, 0.015);
+}
+
 function updateAudio(previous = state) {
   if (!pcmOutput) return;
-  const live = pageActive && !awaitingState && state.power && !state.watch_only && !replayRequest;
-  const gain = live && !state.muted ? state.volume ** 1.45 : 0;
-  volumeNode.gain.setTargetAtTime(gain, audioContext.currentTime, 0.015);
+  const live = liveAudioEnabled();
+  updateAudioGain(live);
   if (state.tune_hz !== previous.tune_hz || state.muted !== previous.muted
       || (!state.audio_open && previous.audio_open)) {
     pcmOutput.reset();

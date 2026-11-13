@@ -4,6 +4,7 @@ import ctypes as c
 import errno
 import os
 import re
+import stat
 import sys
 from array import array
 from contextlib import ExitStack, suppress
@@ -16,6 +17,7 @@ from typing import BinaryIO
 from unicodedata import category, normalize
 from uuid import uuid4
 
+from dab import BAND_III, normalize_service_id
 from recording_tones import ToneOnlyClip
 
 
@@ -25,11 +27,13 @@ RECORDINGS_FOLDER = "Recorded Audio"
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 CLIP_NAME = re.compile(r"[0-9]{6}-[0-9]{8}(?:-[0-9]+)?\.mp3")
 DAB_CLIP_NAME = re.compile(r"[0-9]{6}-[0-9]{6}(?:-[0-9]+)?\.mp3")
-PARTIAL_NAME = re.compile(r"\.scanner-recording-[0-9a-f]{32}\.part")
 FREQUENCY_NAME = re.compile(r"([0-9]{1,4})\.([0-9]{4,6})mhz")
 STATION_NAME_BYTES = 120
 STATION_FORBIDDEN = frozenset('/\\<>:"|?*')
 WINDOWS_DEVICE = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.IGNORECASE)
+DAB_FREQUENCIES = frozenset(hz for _, hz in BAND_III)
+ID3_HEADER = b"ID3\x03\x00\x00"
+CLIP_OWNER = b"sdr-scanner\x00v1:"
 
 
 class RecordingError(RuntimeError):
@@ -145,6 +149,38 @@ def _recording_folder(hz, station_name):
     return (station, True) if station else (frequency, False)
 
 
+def _recording_identity(hz, dab_sid):
+    if dab_sid is None:
+        return b"analogue"
+    sid = normalize_service_id(dab_sid)
+    if sid is None or type(hz) is not int or hz not in DAB_FREQUENCIES:
+        raise RecordingError("Invalid DAB recording identity.")
+    return f"dab:{hz}:{sid}".encode("ascii")
+
+
+def _recording_tag(identity):
+    owner_data = CLIP_OWNER + identity
+    frame = b"PRIV" + len(owner_data).to_bytes(4, "big") + b"\0\0" + owner_data
+    size = bytes((len(frame) >> shift) & 0x7F for shift in (21, 14, 7, 0))
+    return ID3_HEADER + size + frame
+
+
+def _has_identity(directory, name, identity, *, legacy=False):
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(name, flags, dir_fd=directory)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return False
+        expected = _recording_tag(identity)
+        header = os.read(fd, len(expected))
+        if header == expected:
+            return True
+        return legacy and not header.startswith(b"ID3")
+    finally:
+        os.close(fd)
+
+
 def _open_directory(path, *, create=False):
     # Walk with directory descriptors so symlinks and concurrent path replacement
     # cannot redirect the next operation outside the selected directory tree.
@@ -202,7 +238,7 @@ class _PendingClip:
     hz: int
     path: Path
     skip_tone_only: bool
-    dab: bool
+    identity: bytes
     pcm: bytearray = field(default_factory=bytearray)
 
 
@@ -216,7 +252,7 @@ class _Clip:
     encoder: _Encoder
     cleanup: ExitStack
     tone_analysis: ToneOnlyClip | None
-    dab: bool
+    identity: bytes
 
 
 class Recorder:
@@ -281,16 +317,18 @@ class Recorder:
                 os.close(fd)
                 raise
             cleanup.callback(_close_stream, stream)
+            stream.write(_recording_tag(pending.identity))
             analysis = ToneOnlyClip(SAMPLE_RATE) if pending.skip_tone_only else None
             return _Clip(pending.hz, pending.path, directory, partial, stream,
-                         encoder, cleanup.pop_all(), analysis, pending.dab)
+                         encoder, cleanup.pop_all(), analysis, pending.identity)
 
-    def feed(self, hz, pcm, *, skip_tone_only=False, station_name=None):
+    def feed(self, hz, pcm, *, skip_tone_only=False, station_name=None, dab_sid=None):
         if not pcm:
             return
         if len(pcm) % 2:
             raise RecordingError("Received an incomplete audio sample.")
         name, dab = _recording_folder(hz, station_name)
+        identity = _recording_identity(hz, dab_sid)
         folder = self.root / name
         active = self._active_clip
         active_tone_filter = None
@@ -298,14 +336,14 @@ class Recorder:
             active_tone_filter = self._clip.tone_analysis is not None
         elif self._pending:
             active_tone_filter = self._pending.skip_tone_only
-        if active and (active.hz != hz or active.path.parent != folder or active.dab != dab
+        if active and (active.hz != hz or active.path.parent != folder or active.identity != identity
                        or active_tone_filter != skip_tone_only):
             self.finish()
         try:
             if self._clip is None:
                 if self._pending is None:
                     timestamp = datetime.now().strftime("%H%M%S-%d%m%y" if dab else "%H%M%S-%d%m%Y")
-                    self._pending = _PendingClip(hz, folder / f"{timestamp}.mp3", skip_tone_only, dab)
+                    self._pending = _PendingClip(hz, folder / f"{timestamp}.mp3", skip_tone_only, identity)
                 pending = self._pending
                 if len(pending.pcm) + len(pcm) < MIN_CLIP_PCM_BYTES:
                     pending.pcm.extend(pcm)
@@ -337,7 +375,7 @@ class Recorder:
                     return None
                 clip.stream.write(clip.encoder.finish())
                 clip.stream.flush()
-                if clip.stream.tell() == 0:
+                if clip.stream.tell() <= len(_recording_tag(clip.identity)):
                     return None
                 os.fsync(clip.stream.fileno())
                 path = clip.path
@@ -352,11 +390,13 @@ class Recorder:
         except OSError as exc:
             raise RecordingError(f"Could not save the MP3 clip ({exc.strerror}).") from exc
 
-    def clear_frequency(self, hz, *, station_name=None):
+    def clear_frequency(self, hz, *, station_name=None, dab_sid=None):
         name, dab = _recording_folder(hz, station_name)
+        identity = _recording_identity(hz, dab_sid)
+        legacy = not dab and dab_sid is None and hz not in DAB_FREQUENCIES
         clip_name = DAB_CLIP_NAME if dab else CLIP_NAME
         active = self._active_clip
-        if active and active.path.parent.name == name and active.dab == dab:
+        if active and active.hz == hz and active.path.parent.name == name and active.identity == identity:
             self.finish()
         removed = 0
         try:
@@ -370,14 +410,16 @@ class Recorder:
                     return 0
                 with os.scandir(folder) as entries:
                     for entry in entries:
-                        clip = clip_name.fullmatch(entry.name)
-                        if (clip or PARTIAL_NAME.fullmatch(entry.name)) and entry.is_file(follow_symlinks=False):
+                        if clip_name.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
                             try:
+                                if not _has_identity(folder, entry.name, identity, legacy=legacy):
+                                    continue
                                 os.unlink(entry.name, dir_fd=folder)
-                            except FileNotFoundError:
+                            except OSError as exc:
+                                if exc.errno not in (errno.ENOENT, errno.ELOOP):
+                                    raise
                                 continue
-                            if clip:
-                                removed += 1
+                            removed += 1
                 try:
                     os.rmdir(name, dir_fd=root)
                 except OSError as exc:

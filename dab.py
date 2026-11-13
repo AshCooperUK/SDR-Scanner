@@ -1,6 +1,6 @@
 """Receive Band III DAB and DAB+ through the scanner's assigned RTL-SDR."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass
 from http.client import HTTPConnection, HTTPException
 import json
@@ -12,6 +12,10 @@ import socket
 import subprocess
 from threading import Thread
 import time
+
+import numpy as np
+
+from receiver import WATERFALL_BINS
 
 
 LOOPBACK = "127.0.0.1"
@@ -34,16 +38,31 @@ BLOCK_INDEX = {block: index for index, (block, _) in enumerate(BAND_III)}
 SERVICE_ID = re.compile(r"0x[0-9a-f]{4,8}")
 STREAM_PATH = re.compile(rf"/mp3/(?P<sid>{SERVICE_ID.pattern})")
 STARTUP_TIMEOUT = 8.0
+DECODER_RESPONSE_TIMEOUT = 8.0
 SCAN_DWELL = 4.0
 ENSEMBLE_DWELL = 8.0
-RECALL_DWELL = 8.0
+KNOWN_ENSEMBLE_DWELL = 14.0
+RECALL_DWELL = 14.0
+# After a retune, synchronizing to a different multiplex can take longer.
+CROSS_BLOCK_RECALL_DWELL = 22.0
 POLL_INTERVAL = 0.35
+RECALL_RECOVERY_INTERVAL = 1.0
 RESCAN_SERVICE_SETTLE = 2.0
 AUDIO_START_TIMEOUT = 12.0
-AUDIO_RETRY_INTERVAL = 0.75
+AUDIO_RETRY_INTERVAL = 0.25
 AUDIO_OPEN_HOLD = 0.45
 MAX_MUX_BYTES = 1024 * 1024
 MAX_STATIONS_PER_BLOCK = 256
+DAB_SPECTRUM_FFT = 2048
+DAB_SPECTRUM_SPAN_HZ = 1_800_000
+DAB_SPECTRUM_INTERVAL = 0.4
+DAB_SPECTRUM_TIMEOUT = 0.25
+DAB_SPECTRUM_RETRY = 1.5
+
+_DAB_SPECTRUM_HALF_BINS = DAB_SPECTRUM_SPAN_HZ // 2000
+_DAB_SPECTRUM_START = DAB_SPECTRUM_FFT // 2 - _DAB_SPECTRUM_HALF_BINS
+_DAB_SPECTRUM_STOP = DAB_SPECTRUM_FFT // 2 + _DAB_SPECTRUM_HALF_BINS
+_DAB_SPECTRUM_GROUPS = np.arange(WATERFALL_BINS) * (2 * _DAB_SPECTRUM_HALF_BINS) // WATERFALL_BINS
 
 
 class DabError(RuntimeError):
@@ -56,6 +75,7 @@ class Station:
     path: str
     name: str
     text: str
+    audio_ready: bool = True
 
 
 @dataclass(frozen=True)
@@ -101,9 +121,39 @@ def _request(port, block):
             payload = response.read(MAX_MUX_BYTES + 1)
             if len(payload) > MAX_MUX_BYTES:
                 raise DabError("DAB station list is too large.")
-            return _multiplex(json.loads(payload))
+            try:
+                mux = json.loads(payload)
+            except (ValueError, RecursionError) as exc:
+                raise DabError("Invalid DAB station list.") from exc
+            if not isinstance(mux, dict) or not isinstance(mux.get("services"), list):
+                raise DabError("Invalid DAB station list.")
+            return _multiplex(mux)
     finally:
         connection.close()
+
+
+def _request_spectrum(port):
+    # welle-cli's Mode I endpoint returns the shifted FFT magnitudes as
+    # native float32. Its RTL-TCP samples are scaled to ADC full scale.
+    connection = HTTPConnection(LOOPBACK, port, timeout=DAB_SPECTRUM_TIMEOUT)
+    try:
+        connection.request("GET", "/spectrum")
+        with connection.getresponse() as response:
+            if response.status != 200:
+                return None
+            data = response.read(DAB_SPECTRUM_FFT * 4 + 1)
+    except (OSError, HTTPException):
+        return None
+    finally:
+        connection.close()
+    if len(data) != DAB_SPECTRUM_FFT * 4:
+        return None
+    magnitudes = np.frombuffer(data, dtype=np.float32)[_DAB_SPECTRUM_START:_DAB_SPECTRUM_STOP]
+    if not np.all(np.isfinite(magnitudes)) or np.any(magnitudes < 0):
+        return None
+    peaks = np.maximum.reduceat(magnitudes, _DAB_SPECTRUM_GROUPS)
+    levels = np.rint(20 * np.log10(np.clip(peaks / DAB_SPECTRUM_FFT, 1e-6, 1))).astype(int)
+    return tuple(levels.tolist())
 
 
 def _clean_label(value, limit):
@@ -118,6 +168,13 @@ def normalize_service_id(value):
         if number:
             return f"0x{number:04x}"
     return None
+
+
+def _station_location(block, sid):
+    sid = normalize_service_id(sid)
+    if not isinstance(block, str) or block not in BLOCK_INDEX or sid is None:
+        raise DabError("Invalid DAB block or service ID.")
+    return BLOCK_INDEX[block], sid
 
 
 def _ordered_station_ids(ids):
@@ -163,7 +220,8 @@ def _multiplex(mux):
                      if (label := _clean_label(labels.get(key), 64))), "")
         dls = service.get("dls")
         text = _clean_label(dls.get("label"), 256) if isinstance(dls, dict) else ""
-        stations[sid] = Station(sid, f"/mp3/{sid}", name, text)
+        audio_ready = "audiolevel" not in service or isinstance(service["audiolevel"], dict)
+        stations[sid] = Station(sid, f"/mp3/{sid}", name, text, audio_ready)
     return Multiplex(tuple(stations[sid] for sid in _ordered_station_ids(stations)), detected)
 
 
@@ -187,10 +245,14 @@ def _stop(process):
 
 
 class DabReceiver:
-    def __init__(self, index, *, known_blocks=(), service_counts=None, station_ids=None):
+    def __init__(self, index, *, known_blocks=(), service_counts=None, station_ids=None, browse_anchor=None):
         self._index = index
         self._iq = self._decoder = self._audio = None
         self._http = self._pending = None
+        self._spectrum_executor = self._spectrum_pending = None
+        self._waterfall = None
+        self._waterfall_sequence = 0
+        self._spectrum_at = 0.0
         self._iq_port = self._http_port = None
         self._gst = self._welle = None
         self._closed = False
@@ -200,7 +262,13 @@ class DabReceiver:
         self._decoder_block = None
         self._remaining = 0
         self._recall_sid = None
+        self._recall_timed_out = False
+        self._recall_restart_at = None
         self._browse_target = None
+        if browse_anchor is not None:
+            if not isinstance(browse_anchor, (list, tuple)) or len(browse_anchor) != 2:
+                raise DabError("Invalid DAB browsing anchor.")
+            self._browse_target = _station_location(*browse_anchor)
         self._rescan_previous = None
         self._rescan_previous_found = False
         self._rescan_first = None
@@ -210,6 +278,8 @@ class DabReceiver:
         self._scan_until = None
         self._scan_started = None
         self._startup_until = None
+        self._request_until = None
+        self._response_until = None
         self._poll_at = 0.0
         self._station = None
         self._stations = ()
@@ -269,11 +339,15 @@ class DabReceiver:
 
     def _tune_block(self, index):
         self._clear_audio()
+        self._waterfall = None
+        self._spectrum_at = 0.0
         self._station = None
         self._stations = ()
         self._scan_until = None
         self._scan_started = None
         self._received_service_ids.clear()
+        self._recall_timed_out = False
+        self._recall_restart_at = None
         self._rescan_services_changed = None
         self._poll_at = 0.0
         self._error = None
@@ -300,10 +374,14 @@ class DabReceiver:
         self._tune_block(0)
 
     def _finish_rescan(self, now):
-        previous = self._rescan_previous if self._rescan_previous_found else self._rescan_first
-        self._station_ids = self._rescan_ids
-        self._service_counts = {block: len(ids) for block, ids in self._station_ids.items()}
-        self._known_blocks = {BLOCK_INDEX[block] for block in self._service_counts}
+        previous = self._rescan_first
+        if self._rescan_previous_found or previous is None:
+            previous = self._rescan_previous
+        # One sweep can miss a multiplex that was receivable earlier. Replace
+        # entries only where the current sweep decoded a station list.
+        self._station_ids.update(self._rescan_ids)
+        self._service_counts.update((block, len(ids)) for block, ids in self._rescan_ids.items())
+        self._known_blocks.update(BLOCK_INDEX[block] for block in self._rescan_ids)
         self._cancel_rescan()
         if previous is None:
             self._error = "No DAB stations found."
@@ -321,7 +399,9 @@ class DabReceiver:
         self._cancel_rescan()
         self._browse_target = index, sid
         if self._block_index == index:
-            if self._recall_sid == sid or (self._station and self._station.sid == sid and not self._error):
+            if self._recall_sid == sid and not self._recall_timed_out:
+                return
+            if self._station and self._station.sid == sid and not self._error:
                 return
             if self._decoder_block == self._channel and not self._retune and not (self._pending and self._pending[2]):
                 station = next((item for item in self._stations if item.sid == sid), None)
@@ -338,39 +418,53 @@ class DabReceiver:
         self._browse_target = self._block_index, station.sid
         self._remaining = 0
         self._recall_sid = None
+        self._recall_timed_out = False
         self._scan_until = None
         self._error = None
         self._audio_retry_at = now
         self._audio_until = now + AUDIO_START_TIMEOUT
 
-    def _start_scan_dwell(self, now):
+    def _start_scan_dwell(self, now, *, retuned=False):
         self._scan_started = now
-        self._scan_until = now + (RECALL_DWELL if self._recall_sid else SCAN_DWELL)
+        if self._recall_sid:
+            dwell = CROSS_BLOCK_RECALL_DWELL if retuned else RECALL_DWELL
+            if retuned and self._block_index in self._known_blocks:
+                self._recall_restart_at = now + RECALL_DWELL
+        elif self._rescan_ids is not None and self._block_index in self._known_blocks:
+            dwell = KNOWN_ENSEMBLE_DWELL
+        else:
+            dwell = SCAN_DWELL
+        self._scan_until = now + dwell
 
     def _update_stations(self, multiplex, now):
         stations = multiplex.stations
-        if self._rescan_ids is None and (multiplex.detected or stations):
+        self._stations = stations
+        detected = multiplex.detected or bool(stations)
+        if detected:
+            self._recall_restart_at = None
+        if self._rescan_ids is None and detected:
             self._known_blocks.add(self._block_index)
-        if self._remaining and multiplex.detected:
-            self._scan_until = self._scan_started + ENSEMBLE_DWELL
+        if self._remaining and detected:
+            self._scan_until = max(self._scan_until, self._scan_started + ENSEMBLE_DWELL)
         if not stations:
             return
-        self._stations = stations
         previous_count = len(self._received_service_ids)
         self._received_service_ids.update(station.sid for station in stations)
         count = len(self._received_service_ids)
         if self._rescan_ids is not None:
-            self._scan_until = self._scan_started + ENSEMBLE_DWELL
+            block = self._channel
             if count > previous_count:
                 self._rescan_services_changed = now
-                self._rescan_ids[self._channel] = _ordered_station_ids(self._received_service_ids)
+                self._rescan_ids[block] = _ordered_station_ids(self._received_service_ids)
             if self._rescan_first is None:
                 self._rescan_first = self._block_index, stations[0].sid
-            waiting_for_previous = False
             if self._rescan_previous and self._rescan_previous[0] == self._block_index:
                 self._rescan_previous_found = self._rescan_previous[1] in self._received_service_ids
-                waiting_for_previous = not self._rescan_previous_found
-            if not waiting_for_previous and now - self._rescan_services_changed >= RESCAN_SERVICE_SETTLE:
+            waiting_for_previous = (self._rescan_previous and self._rescan_previous[0] == self._block_index
+                                    and not self._rescan_previous_found)
+            partial = (count < self._service_counts.get(block, 0)
+                       or not self._received_service_ids.issuperset(self._station_ids.get(block, ())))
+            if not (waiting_for_previous or partial) and now - self._rescan_services_changed >= RESCAN_SERVICE_SETTLE:
                 self._advance_block(now)
             return
 
@@ -389,45 +483,72 @@ class DabReceiver:
                     break
 
     def _poll_decoder(self, now):
-        if self._pending:
+        if self._pending and self._pending[0].done():
             future, generation, block = self._pending
-            if not future.done():
-                return
             self._pending = None
-            if generation == self._generation:
-                try:
-                    multiplex = future.result()
-                except (DabError, OSError, HTTPException, ValueError) as exc:
-                    if block:
-                        raise DabError(f"Could not tune DAB block {block}.") from exc
+            self._request_until = None
+            try:
+                multiplex = future.result()
+            except (CancelledError, DabError, OSError, HTTPException, ValueError) as exc:
+                if block and generation == self._generation:
+                    raise DabError(f"Could not tune DAB block {block}.") from exc
+            else:
+                if block:
+                    # The hardware changed even if a later command superseded this request.
+                    self._decoder_block = block
+                    self._retune = block != self._channel
+                    if not self._retune:
+                        self._start_scan_dwell(now, retuned=True)
                 else:
-                    if block:
-                        self._retune = False
-                        self._decoder_block = block
-                        self._start_scan_dwell(now)
-                    else:
-                        self._startup_until = None
-                        if self._scan_until is None and (self._remaining or self._recall_sid):
+                    self._startup_until = None
+                    self._response_until = None
+                    if generation == self._generation:
+                        if self._scan_until is None and not self._recall_timed_out and (
+                                self._remaining or self._recall_sid):
                             self._start_scan_dwell(now)
                         self._update_stations(multiplex, now)
 
-        if self._startup_until and now >= self._startup_until:
+        if self._startup_until is not None and now >= self._startup_until:
             raise DabError("The DAB decoder did not respond.")
+        if any(deadline is not None and now >= deadline
+               for deadline in (self._request_until, self._response_until)):
+            raise DabError("The DAB decoder stopped responding.")
+        if self._pending:
+            return
+        if self._recall_restart_at is not None and now >= self._recall_restart_at:
+            # A known multiplex never synchronized after the retune. Reopen the
+            # IQ stream once on that same target to discard queued tuner data.
+            self._stop_helpers()
+            self._decoder_block = None
+            self._tune_block(self._block_index)
+            return
         if self._scan_until and now >= self._scan_until:
             if self._recall_sid:
-                self._recall_sid = None
                 self._scan_until = None
-                self._error = f"Saved DAB station is unavailable on block {self._channel}."
+                self._recall_timed_out = True
+                self._error = f"DAB station is unavailable on block {self._channel}."
             elif self._remaining:
                 self._advance_block(now)
         if now >= self._poll_at and (self._remaining or self._recall_sid or self._station):
             block = self._channel if self._retune else None
+            if block is not None and self._spectrum_pending is not None:
+                # The decoder resets its spectrum ring on retune. Let the
+                # short read finish before asking it to reset the same ring.
+                spectrum, _, _, deadline = self._spectrum_pending
+                if not spectrum.done() and now < deadline:
+                    return
+            self._request_until = now + DECODER_RESPONSE_TIMEOUT
+            if block is None and self._response_until is None:
+                self._response_until = self._request_until
             self._pending = (self._http.submit(_request, self._http_port, block), self._generation, block)
-            self._poll_at = now + POLL_INTERVAL
+            self._poll_at = now + (RECALL_RECOVERY_INTERVAL if self._recall_timed_out else POLL_INTERVAL)
+
+    def _station_order(self):
+        return [(index, sid) for index, (block, _) in enumerate(BAND_III)
+                for sid in self._station_ids.get(block, ())]
 
     def _step_station(self, direction, now):
-        stations = [(index, sid) for index, (block, _) in enumerate(BAND_III)
-                    for sid in self._station_ids.get(block, ())]
+        stations = self._station_order()
         if not stations:
             return
         current = self._browse_target
@@ -447,12 +568,12 @@ class DabReceiver:
             self._audio_until = self._audio_retry_at + AUDIO_START_TIMEOUT
             return b""
         if self._audio is None:
-            if now < self._audio_retry_at:
+            if not self._station.audio_ready or now < self._audio_retry_at:
                 return b""
             location = f"http://{LOOPBACK}:{self._http_port}{self._station.path}"
             self._audio = subprocess.Popen(
                 [self._gst, "-q", "souphttpsrc", f"location={location}", "timeout=5",
-                 "automatic-redirect=false", "!",
+                 "automatic-redirect=false", "blocksize=1024", "retries=0", "!",
                  "mpegaudioparse", "!", "mpg123audiodec", "!", "audioconvert", "!", "audioresample",
                  "!", "audio/x-raw,format=S16LE,channels=1,rate=24000", "!", "fdsink", "fd=1", "sync=true"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -475,6 +596,45 @@ class DabReceiver:
         self._partial_sample = pcm[complete:]
         return pcm[:complete]
 
+    @property
+    def waterfall(self):
+        """Return the latest live spectrum for the selected multiplex."""
+        return self._waterfall
+
+    def _poll_spectrum(self, now):
+        ready = bool(self._station and now < self._audio_open_until and not self._retune)
+        if not ready:
+            self._waterfall = None
+        if self._spectrum_pending is not None:
+            future, generation, center, _ = self._spectrum_pending
+            if not future.done():
+                return
+            self._spectrum_pending = None
+            if ready and generation == self._generation:
+                try:
+                    levels = future.result()
+                except (CancelledError, OSError, HTTPException, ValueError):
+                    levels = None
+                if levels is None:
+                    self._waterfall = None
+                    self._spectrum_at = now + DAB_SPECTRUM_RETRY
+                else:
+                    self._waterfall_sequence += 1
+                    self._waterfall = {"sequence": self._waterfall_sequence, "center_hz": center,
+                                       "span_hz": DAB_SPECTRUM_SPAN_HZ, "levels": levels,
+                                       "time_ms": round(now * 1000)}
+        if ready and now >= self._spectrum_at:
+            try:
+                if self._spectrum_executor is None:
+                    self._spectrum_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dab-spectrum")
+                future = self._spectrum_executor.submit(_request_spectrum, self._http_port)
+            except RuntimeError:
+                self._spectrum_at = now + DAB_SPECTRUM_RETRY
+                return
+            self._spectrum_pending = (future, self._generation, BAND_III[self._block_index][1],
+                                      now + DAB_SPECTRUM_TIMEOUT)
+            self._spectrum_at = now + DAB_SPECTRUM_INTERVAL
+
     def step(self, command=None):
         if self._closed:
             raise DabError("The DAB receiver is closed.")
@@ -483,10 +643,7 @@ class DabReceiver:
             if len(command) != 3 or command[0] not in ("recall", "rescan"):
                 raise DabError("Invalid DAB station command.")
             command, block, sid = command
-            sid = normalize_service_id(sid)
-            if not isinstance(block, str) or block not in BLOCK_INDEX or sid is None:
-                raise DabError("Invalid DAB block or service ID.")
-            station_command = BLOCK_INDEX[block], sid
+            station_command = _station_location(block, sid)
         now = time.monotonic()
         try:
             if command == "rescan":
@@ -510,6 +667,7 @@ class DabReceiver:
                         raise DabError("The welle-cli DAB decoder stopped.")
                     self._poll_decoder(now)
             pcm = self._read_audio(now)
+            self._poll_spectrum(now)
         except (DabError, OSError) as exc:
             self.close()
             if isinstance(exc, DabError):
@@ -517,26 +675,50 @@ class DabReceiver:
             raise DabError(f"Could not run the DAB receiver: {exc}") from exc
 
         block, hz = BAND_III[self._block_index] if self._block_index is not None else (None, None)
+        recalling = self._recall_sid is not None and not self._recall_timed_out
         status = {"hz": hz, "block": block, "sid": self._station.sid if self._station else None,
+                  "target_sid": self._browse_target[1] if self._browse_target else None,
                   "service": self._station.name if self._station else "",
                   "text": self._station.text if self._station else "",
                   "scanning": bool(self._remaining),
-                  "recalling": self._recall_sid is not None,
-                  "recall_sid": self._recall_sid,
+                  "recalling": recalling,
+                  "recall_sid": self._recall_sid if recalling else None,
                   "rescanning": self._rescan_ids is not None,
                   "known_blocks": tuple(BAND_III[index][0] for index in sorted(self._known_blocks)),
                   "service_counts": self._service_counts.copy(),
                   "station_ids": {block: self._station_ids[block] for block, _ in BAND_III
                                   if block in self._station_ids},
+                  "audio_pending": bool(recalling or (self._station and not self._error
+                                                       and now >= self._audio_open_until)),
                   "audio_open": now < self._audio_open_until, "error": self._error}
         return status, pcm
+
+    def recovery_command(self):
+        """Return the exact operation to restart after a decoder failure."""
+        if self._rescan_ids is not None:
+            if self._rescan_previous:
+                index, sid = self._rescan_previous
+                return "rescan", BAND_III[index][0], sid
+            return "rescan"
+        if self._browse_target:
+            index, sid = self._browse_target
+            return "recall", BAND_III[index][0], sid
+        return None
 
     def close(self):
         if self._closed:
             return
         self._closed = True
+        self._stop_helpers()
+
+    def _stop_helpers(self):
         self._clear_audio()
         _stop(self._decoder)
         _stop(self._iq)
         if self._http is not None:
             self._http.shutdown(wait=False, cancel_futures=True)
+        if self._spectrum_executor is not None:
+            self._spectrum_executor.shutdown(wait=False, cancel_futures=True)
+        self._spectrum_executor = self._spectrum_pending = self._waterfall = None
+        self._decoder = self._iq = self._http = self._pending = None
+        self._startup_until = self._request_until = self._response_until = None

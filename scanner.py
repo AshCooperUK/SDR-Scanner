@@ -8,7 +8,7 @@ from time import localtime, monotonic
 from unicodedata import category
 
 from bandplan import (
-    AIR_INDEX, AIR_STEP, AIR_STEPS, BANK_KEYS, BANKS, BANDS, CLOSE_GROUPS,
+    AIR_INDEX, AIR_STEP, AIR_STEPS, BAND_ORDER, BANK_KEYS, BANKS, BANDS, CLOSE_GROUPS,
     FULL_LOCKOUT, GENERAL_STEPS, GERMAN_BANDS, SLOTS, WRITABLE, Channel,
     factory_banks,
 )
@@ -163,9 +163,10 @@ class Scanner:
     def search_step(self):
         if self.full_search:
             return self.general_step or FULL_SEARCH_STEP_HZ
-        if self.band_index == AIR_INDEX:
-            return self.air_step
-        return self.general_step or self.band.step
+        return self._band_step(self.band_index)
+
+    def _band_step(self, index):
+        return self.air_step if index == AIR_INDEX else self.general_step or self.bands[index].step
 
     @property
     def tuned(self):
@@ -195,9 +196,9 @@ class Scanner:
         self.air_step = raw.get("air_step", AIR_STEP)
         if type(self.air_step) is not int or self.air_step not in AIR_STEPS:
             self.air_step = AIR_STEP
-        self.band_index = raw.get("band_index", 0)
+        self.band_index = raw.get("band_index", BAND_ORDER[0])
         if type(self.band_index) is not int or not 0 <= self.band_index < len(BANDS):
-            self.band_index = 0
+            self.band_index = BAND_ORDER[0]
         self.clock_offset = raw.get("clock_offset", 0)
         if type(self.clock_offset) is not int or abs(self.clock_offset) >= 1440:
             self.clock_offset = 0
@@ -650,7 +651,7 @@ class Scanner:
                 self.tune_frequency(hz)
             return
         band = bands[index]
-        step = self.air_step if index == AIR_INDEX else self.general_step or band.step
+        step = self._band_step(index)
         count = band.count(step)
         frequency = lambda position: band.frequency(position, step)
         if direction > 0:
@@ -658,13 +659,16 @@ class Scanner:
         else:
             position = bisect_left(range(count), hz, key=frequency) - 1
         if not 0 <= position < count:
-            index = (index + direction) % len(bands)
+            adjacent = BAND_ORDER.index(index) + direction
+            if not 0 <= adjacent < len(BAND_ORDER):
+                return
+            index = BAND_ORDER[adjacent]
             band = bands[index]
-            step = self.air_step if index == AIR_INDEX else self.general_step or band.step
+            step = self._band_step(index)
             position = 0 if direction > 0 else band.count(step) - 1
         modulation = band.modulation
-        if (self.direct_frequency and hz < 30_000_000
-                and band.lower < 30_000_000):
+        if (self.direct_frequency and 25_000_000 <= hz < 30_000_000
+                and 25_000_000 <= band.lower < 30_000_000):
             modulation = self.current.modulation
         self._hold_frequency(band.frequency(position, step), modulation)
 
@@ -676,8 +680,10 @@ class Scanner:
             if self.activity == "search" and self.full_search:
                 self.tune_frequency(MANUAL_MIN_HZ if direction > 0 else MANUAL_MAX_HZ)
             else:
-                hz = self.band.lower if direction > 0 else self.band.upper
-                self._hold_frequency(hz, self.band.modulation)
+                band = self.band
+                step = self._band_step(self.band_index)
+                position = 0 if direction > 0 else band.count(step) - 1
+                self._hold_frequency(band.frequency(position, step), band.modulation)
             return
         hz = channel.hz + direction * step_hz
         if not MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ:
@@ -734,14 +740,15 @@ class Scanner:
     def _preview_band(self, delta=0):
         self._leave_only()
         self._drop_capture()
-        band_count = len(self.bands)
-        index = band_count if self.activity == "search" and self.full_search else self.band_index
-        index = (index + delta) % (band_count + 1)
+        band_count = len(BAND_ORDER)
+        position = (band_count if self.activity == "search" and self.full_search
+                    else BAND_ORDER.index(self.band_index))
+        position = (position + delta) % (band_count + 1)
         self.activity = "search"
         self.hold = False
-        self.full_search = index == band_count
+        self.full_search = position == band_count
         if not self.full_search:
-            self.band_index = index
+            self.band_index = BAND_ORDER[position]
         self.preview_until = monotonic() + 3
         self._retune(None)
         if delta and not self.full_search:
@@ -1254,9 +1261,9 @@ class Scanner:
             self.direction = direction
             self._drop_capture()
             self._advance()
-        elif direction > 0:
+        elif self.activity == "scan":
             self._drop_capture()
-            self._advance()
+            self._advance(direction=direction)
 
     def tick(self, level=None):
         """Apply a fresh current-channel dBFS measurement, or refresh only the timers."""
@@ -1323,7 +1330,7 @@ class Scanner:
         if group is None:
             return False
         _, lower, upper = group
-        candidate_bands = (band for band in self.bands if lower <= band.lower and band.upper <= upper)
+        candidate_bands = (band for band in self.bands if lower <= band.lower <= upper)
         band = min(candidate_bands, key=lambda item: max(item.lower - hz, hz - item.upper, 0))
         step = self.air_step if band.modulation == "AM" and band.lower == 108_000_000 else self.general_step or band.step
         channel = Channel(band.nearest(hz, step), band.modulation)

@@ -12,31 +12,39 @@
 <body>
   <main class="radio" aria-label="Scanner front panel">
     <div class="upper-panel">
-      <button type="button" class="key" data-key="hold" style="--x:99;--y:230;--w:145;--h:96;--sprite-y:254"><span class="face-label">Hold</span></button>
-      <button type="button" class="key" data-key="up" style="--x:278;--y:230;--w:138;--h:100;--sprite-y:251"><span class="face-label">Up</span></button>
-      <button type="button" class="key" data-key="down" style="--x:454;--y:230;--w:143;--h:100;--sprite-y:251"><span class="face-label">Down</span></button>
-      <button type="button" class="key" data-key="mute" aria-pressed="false" style="--x:98;--y:381;--w:147;--h:69;--sprite-y:389"><span class="face-label">Mute</span></button>
-      <button type="button" class="key" data-key="fav" style="--x:275;--y:381;--w:148;--h:69;--sprite-y:389"><span class="face-label">FAV</span></button>
-      <button type="button" class="key" data-key="pmr" style="--x:450;--y:381;--w:151;--h:69;--sprite-y:389"><span class="face-label">PMR 446</span></button>
-      <button type="button" class="key" data-key="close" style="--x:98;--y:511;--w:149;--h:73;--sprite-y:491"><span class="face-label">Close Call</span></button>
-      <button type="button" class="key" data-key="air" style="--x:275;--y:511;--w:149;--h:73;--sprite-y:491"><span class="face-label">Air/Marine</span></button>
-      <button type="button" class="key" data-key="cb" style="--x:450;--y:511;--w:152;--h:73;--sprite-y:491"><span class="face-label">CB AM/FM</span></button>
-      <button type="button" class="key" data-key="search" style="--x:660;--y:513;--w:134;--h:98;--sprite-y:493"><span class="face-label">Search</span></button>
-      <button type="button" class="key" data-key="lock" style="--x:834;--y:515;--w:135;--h:97;--sprite-y:495"><span class="face-label">L/O</span></button>
-      <button type="button" class="key" data-key="band" style="--x:1015;--y:515;--w:133;--h:97;--sprite-y:495"><span class="face-label">Band/Step</span></button>
-      <button type="button" class="key" data-key="prog" style="--x:1188;--y:514;--w:135;--h:98;--sprite-y:494"><span class="face-label">Prog</span></button>
-
-      <div class="dial" data-knob="squelch" role="slider" tabindex="0" aria-label="Squelch" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="--x:1405;--y:230;--w:164;--h:164;--cap-x:1413;--cap-y:238;--cap-size:148">
-        <span class="face-label" aria-hidden="true">Squelch</span>
+      <div class="left-controls">
+        <button type="button" class="key" data-key="hold" style="--x:99;--y:0;--w:145;--h:96;--sprite-y:254"><span class="face-label">Hold</span></button>
+        <button type="button" class="key" data-key="up" style="--x:278;--y:0;--w:138;--h:100;--sprite-y:251"><span class="face-label">Up</span></button>
+        <button type="button" class="key" data-key="down" style="--x:454;--y:0;--w:143;--h:100;--sprite-y:251"><span class="face-label">Down</span></button>
+        <button type="button" id="dab-toggle" class="key" data-setting="dab" aria-pressed="false" style="--x:98;--y:151;--w:147;--h:69;--sprite-y:389"><span class="face-label">DAB</span></button>
+        <button type="button" class="key" data-key="fav" style="--x:275;--y:151;--w:148;--h:69;--sprite-y:389"><span class="face-label">FAV</span></button>
+        <button type="button" class="key" data-key="pmr" style="--x:450;--y:151;--w:151;--h:69;--sprite-y:389"><span class="face-label">PMR 446</span></button>
+        <button type="button" class="key preset-key" data-key="business" aria-pressed="false" style="--x:98;--y:281;--w:147;--h:69;--sprite-y:389"><span class="face-label">Business</span></button>
+        <button type="button" class="key preset-key" data-key="amateur" aria-pressed="false" style="--x:275;--y:281;--w:148;--h:69;--sprite-y:389"><span class="face-label">Amateur</span></button>
+        <button type="button" class="key preset-key" data-key="fmradio" aria-pressed="false" style="--x:450;--y:281;--w:151;--h:69;--sprite-y:389"><span class="face-label">FM Radio</span></button>
+        <button type="button" class="key preset-key" data-key="rail" aria-pressed="false" style="--x:98;--y:415;--w:147;--h:69;--sprite-y:389"><span class="face-label">Rail</span></button>
+        <button type="button" class="key preset-key" data-key="events" aria-pressed="false" style="--x:275;--y:415;--w:148;--h:69;--sprite-y:389"><span class="face-label">Events</span></button>
+        <button type="button" class="key preset-key" data-key="utilities" aria-pressed="false" style="--x:450;--y:415;--w:151;--h:69;--sprite-y:389"><span class="face-label">Utilities</span></button>
+        <button type="button" class="key" data-key="close" style="--x:98;--y:549;--w:149;--h:73;--sprite-y:491"><span class="face-label">Close Call</span></button>
+        <button type="button" class="key" data-key="air" style="--x:275;--y:549;--w:149;--h:73;--sprite-y:491"><span class="face-label">Air/Marine</span></button>
+        <button type="button" class="key" data-key="cb" style="--x:450;--y:549;--w:152;--h:73;--sprite-y:491"><span class="face-label">CB AM/FM</span></button>
       </div>
-      <div class="dial" data-knob="volume" role="slider" tabindex="0" aria-label="Volume/Clock" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Clock standby" style="--x:1405;--y:442;--w:164;--h:164;--cap-x:1413;--cap-y:450;--cap-size:148">
-        <span class="face-label" aria-hidden="true">Volume</span>
+      <div class="dials">
+        <div class="dial" data-knob="squelch" role="slider" tabindex="0" aria-label="Squelch" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="--x:1405;--y:293;--w:152;--h:152;--cap-x:1413;--cap-y:238;--cap-size:148">
+          <span class="face-label" aria-hidden="true">Squelch</span>
+        </div>
+        <div class="dial" data-knob="boost" role="slider" tabindex="0" aria-label="Audio boost" aria-valuemin="0" aria-valuemax="12" aria-valuenow="0" aria-valuetext="0 dB" style="--x:1405;--y:497;--w:152;--h:152;--cap-x:1413;--cap-y:450;--cap-size:148">
+          <span class="face-label" aria-hidden="true">Audio Boost</span>
+        </div>
+        <div class="dial" data-knob="volume" role="slider" tabindex="0" aria-label="Volume/Clock" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Clock standby" style="--x:1405;--y:701;--w:152;--h:152;--cap-x:1413;--cap-y:450;--cap-size:148">
+          <span class="face-label" aria-hidden="true">Volume</span>
+        </div>
       </div>
 
       <div id="lcd" class="lcd" role="group" tabindex="0" aria-label="Scanner display" aria-description="Scroll to tune, or type a frequency in MHz and press Enter.">
         <div class="lcd-content">
           <div class="lcd-banks" aria-hidden="true">
-            <span data-lcd="PVT">PVT</span><span data-lcd="FAV">FAV</span><span data-lcd="PMR">PMR</span><span data-lcd="AIR">AIR</span><span data-lcd="MRN">MRN</span><span data-lcd="CB">CB</span><span data-lcd="AM">AM</span><span data-lcd="NFM">NFM</span>
+            <span data-lcd="PVT">PVT</span><span data-lcd="FAV">FAV</span><span data-lcd="PMR">PMR</span><span data-lcd="AIR">AIR</span><span data-lcd="MRN">MRN</span><span data-lcd="CB">CB</span><span data-lcd="BUS">BUS</span><span data-lcd="HAM">HAM</span><span data-lcd="BCAST">FM</span><span data-lcd="RAIL">RAIL</span><span data-lcd="EVT">EVT</span><span data-lcd="UTIL">UTIL</span><span data-lcd="AM">AM</span><span data-lcd="NFM">NFM</span>
           </div>
           <div class="lcd-readout" aria-hidden="true">
             <div class="lcd-channel"><span data-lcd="CH">CH</span><div id="channel"></div></div>
@@ -58,6 +66,29 @@
           <span data-signal-bar></span><span data-signal-bar></span><span data-signal-bar></span>
           <span data-signal-bar></span>
         </div>
+        <div class="lcd-divider" aria-hidden="true"></div>
+        <figure class="waterfall" aria-label="Radio signal history">
+          <div class="waterfall-frequencies" aria-hidden="true">
+            <span style="--position:0%">—</span>
+            <span style="--position:25%">—</span>
+            <span class="waterfall-centre" style="--position:50%">—</span>
+            <span style="--position:75%">—</span>
+            <span style="--position:100%">—</span>
+          </div>
+          <div class="waterfall-time" aria-hidden="true"><span>Now</span><span></span></div>
+          <div class="waterfall-history">
+            <canvas aria-label="Signal plot. Click or tap to tune to the frequency at that point."></canvas>
+            <i></i><i></i><i></i>
+          </div>
+          <span class="waterfall-unit" aria-hidden="true">MHz</span>
+        </figure>
+      </div>
+      <div class="control-divider" aria-hidden="true"></div>
+      <div class="control-keys">
+        <button type="button" class="key" data-key="search" style="--x:660;--position-x:126;--y:975;--w:134;--h:98;--sprite-y:493"><span class="face-label">Search</span></button>
+        <button type="button" class="key" data-key="lock" style="--x:834;--position-x:165;--y:976;--w:135;--h:97;--sprite-y:495"><span class="face-label">L/O</span></button>
+        <button type="button" class="key" data-key="band" style="--x:1015;--position-x:198;--y:976;--w:133;--h:97;--sprite-y:495"><span class="face-label">Band/Step</span></button>
+        <button type="button" class="key" data-key="prog" style="--x:1188;--position-x:238;--y:975;--w:135;--h:98;--sprite-y:494"><span class="face-label">Prog</span></button>
       </div>
     </div>
     <div class="extension">
@@ -78,8 +109,8 @@
         <button type="button" id="play-last" class="extension-button setting-button" data-key="play-last" aria-pressed="false">
           <span class="button-label">PLAY LAST</span><span class="button-cap" aria-hidden="true"></span>
         </button>
-        <button type="button" id="dab-toggle" class="extension-button setting-button" data-setting="dab" aria-pressed="false">
-          <span class="button-label">DAB</span><span class="button-cap" aria-hidden="true"></span>
+        <button type="button" class="extension-button setting-button" data-key="mute" aria-pressed="false">
+          <span class="button-label">MUTE</span><span class="button-cap" aria-hidden="true"></span>
         </button>
       </div>
     </div>
