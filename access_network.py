@@ -1,6 +1,7 @@
 """Classify direct IPv4 scanner connections using the host's interface prefixes."""
 
 import json
+from functools import lru_cache
 from ipaddress import IPv4Address, IPv4Interface, IPv4Network
 import subprocess
 from threading import Lock
@@ -9,14 +10,22 @@ from time import monotonic
 
 TAILSCALE_RANGE = IPv4Network("100.64.0.0/10")
 TAILSCALE_ROUTE_TABLE = "52"
+LAN_RANGES = tuple(IPv4Network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 NETWORK_REFRESH_SECONDS = 5.0
+NAME_REFRESH_SECONDS = 60
+
+
+def _command_output(*args):
+    try:
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=1).stdout
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return ""
 
 
 def _command_json(*args):
     try:
-        output = subprocess.run(args, check=True, capture_output=True, timeout=1)
-        return json.loads(output.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError):
+        return json.loads(_command_output(*args))
+    except ValueError:
         return None
 
 
@@ -44,11 +53,32 @@ def _tailnet_ipv4(*nodes):
 
 def _tailnet_devices():
     status = _command_json("tailscale", "status", "--json")
+    if status is None:
+        # The standard host-network Docker deployment keeps the CLI inside the container.
+        status = _command_json("docker", "exec", "tailscale", "tailscale", "status", "--json")
     if not isinstance(status, dict) or status.get("BackendState") != "Running":
-        return set(), set()
+        return set(), set(), set()
+    own_node = status.get("Self")
     peers = status.get("Peer")
-    return (_tailnet_ipv4(status.get("Self")),
-            _tailnet_ipv4(*peers.values()) if isinstance(peers, dict) else set())
+    name = own_node.get("DNSName") if isinstance(own_node, dict) else None
+    names = set()
+    if isinstance(name, str) and (name := name.lower().rstrip(".")):
+        names.update((name, name.split(".", 1)[0]))
+    return (_tailnet_ipv4(own_node), _tailnet_ipv4(*peers.values()) if isinstance(peers, dict) else set(), names)
+
+
+@lru_cache(maxsize=32)
+def _lan_name(destination, _refresh_bucket):
+    # Ask the system resolver for this server address, never for the request's Host.
+    address = str(destination)
+    for line in _command_output("getent", "hosts", address).splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == address:
+            name = fields[1].lower().rstrip(".")
+            answers = _command_output("getent", "--", "ahostsv4", name)
+            if any(answer.split(maxsplit=1)[:1] == [address] for answer in answers.splitlines()):
+                return name
+    return None
 
 
 class LocalNetworks:
@@ -57,6 +87,7 @@ class LocalNetworks:
         self._refresh_at = 0.0
         self._subnets = {}
         self._tailnet_peers = {}
+        self._tailnet_names = {}
 
     def _refresh(self):
         subnets = {}
@@ -78,10 +109,13 @@ class LocalNetworks:
                     tunnel_addresses.setdefault(name, set()).add(entry.ip)
 
         tailnet_peers = {}
+        tailnet_names = {}
         if tunnel_addresses:
             # Tailscale configures a /32 on its tunnel and places peer routes in table 52.
             # A routed subnet can also appear there, so require a known peer IP.
-            own_ips, peer_ips = _tailnet_devices()
+            own_ips, peer_ips, own_names = _tailnet_devices()
+            tailnet_names = {address: own_names for addresses in tunnel_addresses.values()
+                             for address in addresses & own_ips}
             for route in _ip_json("route", "show", "table", TAILSCALE_ROUTE_TABLE):
                 addresses = tunnel_addresses.get(route.get("dev"), ())
                 if not addresses or "gateway" in route or route.get("type", "unicast") != "unicast":
@@ -97,6 +131,7 @@ class LocalNetworks:
 
         self._subnets = subnets
         self._tailnet_peers = tailnet_peers
+        self._tailnet_names = tailnet_names
         self._refresh_at = monotonic() + NETWORK_REFRESH_SECONDS
 
     def is_local(self, peer: IPv4Address, destination: IPv4Address) -> bool:
@@ -109,3 +144,14 @@ class LocalNetworks:
             subnet = self._subnets.get(destination)
             return (subnet is not None and peer in subnet
                     or peer in self._tailnet_peers.get(destination, ()))
+
+    def is_local_name(self, host, destination):
+        """Match a hostname announced for the socket's local address."""
+        host = host.rstrip(".")
+        if destination in TAILSCALE_RANGE:
+            with self._lock:
+                if monotonic() >= self._refresh_at:
+                    self._refresh()
+                return host in self._tailnet_names.get(destination, ())
+        return (any(destination in network for network in LAN_RANGES)
+                and host == _lan_name(destination, monotonic() // NAME_REFRESH_SECONDS))

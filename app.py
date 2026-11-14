@@ -20,8 +20,9 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import IPv4Address, IPv4Network, IPv6Address
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from access_network import LocalNetworks
+from access_network import LAN_RANGES, TAILSCALE_RANGE, LocalNetworks
 from access_pin import ACCESS_SECONDS, PIN_PATTERN, REMOTE_AUTHORITY, AccessConflict, AccessPin
 from bandplan import BANK_KEYS
 from dab import BAND_III, SERVICE_ID, DabError, DabReceiver
@@ -76,9 +77,7 @@ def target(state):
     return (hz, state["modulation"]) if hz is not None else None
 
 
-PRIVATE_NETWORKS = tuple(IPv4Network(value) for value in (
-    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
-))
+PRIVATE_NETWORKS = (*LAN_RANGES, TAILSCALE_RANGE)
 REMOTE_CONFIG_LIMIT = 16_384
 
 
@@ -1850,33 +1849,37 @@ class PanelHandler(BaseHTTPRequestHandler):
         forwarded = any(header in self.headers for header in PROXY_HEADERS)
         http_origin = request_origin_for(host, host_port, "http")
         https_origin = request_origin_for(host, host_port, "https")
-        numeric_destination = (int(host_port or "80") == port
-                               and (host == str(destination) or loopback and host == "localhost"))
         origins = self.headers.get_all("Origin", ())
         origin = origins[0] if len(origins) == 1 else None
-        direct = numeric_destination and not forwarded and origin != https_origin
         if len(origins) > 1 or origins and origin not in (http_origin, https_origin):
             self.send_error(HTTPStatus.FORBIDDEN)
             return False
+        pin = getattr(self.server, "access_pin", None)
+        snapshot = pin.snapshot() if pin is not None else None
+        remote_url = snapshot["remote_url"] if snapshot is not None else None
+        remote_host = urlsplit(remote_url).hostname if remote_url else None
+        native = int(host_port or "80") == port and not forwarded and origin != https_origin
+        numeric = native and (host == str(destination) or loopback and host == "localhost")
         networks = getattr(self.server, "local_networks", None)
-        local = direct and (loopback or peer == destination
-                            or networks is not None and networks.is_local(peer, destination))
+        local_peer = native and (loopback or peer == destination
+                                 or networks is not None and networks.is_local(peer, destination))
+        named_local = (local_peer and not numeric and not loopback and networks is not None
+                       and host.rstrip(".") != (remote_host or "").rstrip(".")
+                       and networks.is_local_name(host, destination))
         allowlist_match = private_access is None or private_access.allows(peer, destination)
         self.origin_checked = origin is not None
         self.secure_request = origin == https_origin
-        self.direct_request = direct and (local or allowlist_match)
-        self.trusted_local = local
+        self.direct_request = (numeric and (local_peer or allowlist_match)) or named_local
+        self.trusted_local = (numeric and local_peer) or named_local
         self.request_peer = peer
         self.request_destination = destination
-        self.pin_admin = self.direct_request and (loopback or peer == destination)
+        self.pin_admin = numeric and (loopback or peer == destination)
         protocols = self.headers.get_all("X-Forwarded-Proto", [])
         self.remote_origin = (https_origin if protocols == ["https"] else
                               http_origin if protocols in ([], ["http"]) else None)
         self.request_origin = origin
-        pin = getattr(self.server, "access_pin", None)
-        snapshot = pin.snapshot() if pin is not None else None
         self.access_revision = snapshot["revision"] if snapshot is not None else None
-        if snapshot is not None and not self.remote_allowed(snapshot["remote_url"]):
+        if not self.remote_allowed(remote_url):
             self.send_error(HTTPStatus.FORBIDDEN)
             return False
         return True

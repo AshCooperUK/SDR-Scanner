@@ -70,7 +70,7 @@ You can choose explicitly with `bash install.sh --headless` or `bash install.sh 
 
 ### Open the scanner
 
-On the scanner host, open [the local panel](http://127.0.0.1:8766/) or choose **SDR Scanner** from the applications menu. On another device on your LAN, open the scanner host’s numeric IPv4 address on port **8766**, for example `http://192.168.1.20:8766/`. Run `hostname -I` on the host if you need its address. Direct LAN access needs no PIN. [Private network and remote access](#access-from-another-computer)
+On the scanner host, open [the local panel](http://127.0.0.1:8766/) or choose **SDR Scanner** from the applications menu. On another device on your LAN, open the scanner host’s local name or IPv4 address on port **8766**, for example `http://192.168.1.20:8766/`. Run `hostname -I` on the host if you need its address. Direct LAN access needs no PIN. [Private network and remote access](#access-from-another-computer)
 
 If prompted to refresh the USB permissions, reconnect the receiver and follow the installer's sign-in or reboot instructions. Then click **VOLUME** on the panel to start listening.
 
@@ -416,7 +416,7 @@ The default state file is `.scanner-state.json` in the checkout. It saves memori
 
 ### Use a private LAN or Tailscale address
 
-The full installer enables direct IPv4 access on port **8766**. Connect your client to the same LAN or Tailscale network, then open the scanner host's numeric IPv4 address and port, for example `http://192.168.1.20:8766/`. Direct connections from the scanner's LAN subnet and known Tailscale peers reaching its Tailscale IP can use the scanner without a PIN. If the host uses a firewall, permit TCP **8766** from the intended clients.
+The full installer enables direct IPv4 access on port **8766**. Connections from the scanner's LAN subnet use its IPv4 address or the local DNS name that the host's resolver reports for that address. Known Tailscale peers can use the scanner's Tailscale IP or MagicDNS name. The scanner reads peer status from the host's Tailscale CLI or from a host-network Docker container named `tailscale` when its service account already has Docker access. Both connections work without a PIN. Use the numeric IP if your network does not publish a local DNS name. If the host uses a firewall, permit TCP **8766** from the intended clients.
 
 Running `app.py` directly in a terminal uses loopback by default. Add `--listen` for LAN access when starting it that way.
 
