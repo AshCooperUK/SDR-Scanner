@@ -104,7 +104,7 @@ def install(desktop=None):
         "\n"
         "[Service]\n"
         "Type=exec\n"
-        f"ExecStart={PYTHON} {systemd_arg(str(ROOT / 'app.py'))}\n"
+        f"ExecStart={PYTHON} {systemd_arg(str(ROOT / 'app.py'))} --listen\n"
         "Restart=on-failure\n"
         "RestartSec=2s\n"
         "\n"

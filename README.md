@@ -2,14 +2,14 @@
 
 SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can use in a web browser. Install it on an Ubuntu or Debian desktop or headless Linux server, plug in a receiver such as the **Nooelec NESDR SMArt v5**, and listen from a computer, phone or tablet. The browser panel is modelled on the Uniden UBC-355CLT and includes DAB and DAB+ digital radio, broadcast FM with RDS, AM airband, marine VHF, PMR446 and CB radio.
 
-[Download stable v5.0.1](https://github.com/AshCooperUK/SDR-Scanner/releases/tag/v5.0.1) · [Install on Ubuntu or Debian](#install-on-ubuntu-or-debian) · [Upgrade](#upgrade-an-existing-installation) · [Quick start](#open-the-panel-and-tune-your-first-station) · [Operating manual](#front-panel-controls) · [DAB setup](#install-the-optional-dab-decoder)
+[Install on Ubuntu or Debian](#install-on-ubuntu-or-debian) · [Upgrade](#upgrade-an-existing-installation) · [Quick start](#open-the-panel-and-tune-your-first-station) · [Operating manual](#front-panel-controls) · [Stable v5.0.1 release](https://github.com/AshCooperUK/SDR-Scanner/releases/tag/v5.0.1)
 
 ![SDr Scanner web radio showing a DAB station, favourite channel buttons and recording controls](docs/screenshots/scanner-dab.png)
 
 ## Features
 
-- **Receive DAB and DAB+ digital radio.** Hold **DAB** to scan Band III, then browse the discovered station list with **UP** and **DOWN**. See station names and scrolling text, save exact stations, and resume the last station after switching modes or restarting. DAB uses the [optional headless decoder](#install-the-optional-dab-decoder).
-- **Receive conventional DMR voice and text.** Use the colour display for call metadata and incoming SMS. Save filtered DMR channels, log calls and replay clear audio. DMR uses the [optional DSD-neo decoder](#install-the-optional-dmr-decoder).
+- **Receive DAB and DAB+ digital radio.** Hold **DAB** to scan Band III, then browse the discovered station list with **UP** and **DOWN**. See station names and scrolling text, save exact stations, and resume the last station after switching modes or restarting.
+- **Receive conventional DMR voice and text.** Use the colour display for call metadata and incoming SMS. Save filtered DMR channels, log calls and replay clear audio.
 - **Listen to broadcast FM with RDS.** Tune wide FM and display the station name and RadioText when the broadcaster transmits them. Use the LCD digits for fine tuning and copy frequencies in MHz.
 - **Scan AM airband, marine VHF, PMR446 and CB radio.** Scan presets or search **100 kHz to 1.75 GHz** with compatible hardware. Use adjustable squelch, a signal meter, temporary and permanent lockouts, and Close Call for strong nearby signals.
 - **Save and watch favourites.** Store 124 analogue channels or DAB stations with 24 front-panel shortcuts. Use **WATCH** to check analogue favourites for activity, using a spare SDR when available.
@@ -29,9 +29,7 @@ SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can
 - [Program with CHIRP](#program-with-chirp)
 - [RDS and Watch](#rds-and-watch)
 - [DAB and DAB+](#dab-and-dab)
-- [Install the optional DAB decoder](#install-the-optional-dab-decoder)
 - [Conventional DMR](#conventional-dmr)
-- [Install the optional DMR decoder](#install-the-optional-dmr-decoder)
 - [Recording and playback](#recording-and-playback)
 - [Discovery Log and instant replay](#discovery-log-and-instant-replay)
 - [Close Call](#close-call)
@@ -45,72 +43,53 @@ SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can
 
 ## Install on Ubuntu or Debian
 
-Use Ubuntu 22.04 or newer, or Debian 12 or newer, with Python 3.10 or newer and systemd. The dongle plugs into this Linux machine. You can use the panel in a browser on Windows, macOS or Linux.
+Use Ubuntu 22.04 or newer, or Debian 12 or newer, on a 64-bit Intel, AMD or ARM system with systemd. Plug the antenna and USB SDR into the Linux machine that will run the scanner. You can open the panel from a computer, phone or tablet.
 
 **Recommended receiver** is the **Nooelec NESDR SMArt v5 SDR** for **100 kHz–1.75 GHz** coverage. Below 25 MHz the app uses direct sampling, which requires a receiver that supports it and an antenna suited to the frequency. [Nooelec receiver specifications](https://www.nooelec.com/store/nesdr-smart-sdr.html)
 
-### 1. Install the packages and clone v5.0.1
+### Run the full installer
 
-Run these commands on the Linux machine that will host the scanner.
+Run these commands on the scanner host as your normal user. The installer uses `sudo` for system packages and permissions. If `curl` is missing, run `sudo apt update && sudo apt install curl` first.
 
 ```bash
-sudo apt update
-sudo apt install --no-install-recommends git ca-certificates python3 python3-numpy \
-  python3-scipy rtl-sdr libmp3lame0 libpam-systemd dbus-user-session iproute2
-git clone --branch v5.0.1 --depth 1 https://github.com/AshCooperUK/SDR-Scanner.git
+curl -fsSLo install-sdr-scanner.sh https://raw.githubusercontent.com/AshCooperUK/SDR-Scanner/main/install.sh
+bash install-sdr-scanner.sh
+```
+
+The downloaded installer uses `~/SDR-Scanner` for the checkout. If you prefer to clone the repository yourself, use the commands below.
+
+```bash
+git clone --branch main https://github.com/AshCooperUK/SDR-Scanner.git
 cd SDR-Scanner
+bash install.sh
 ```
 
-The commands above install the stable release. For DMR, clone `main` using `git clone --branch main --depth 1 https://github.com/AshCooperUK/SDR-Scanner.git`, then follow the same installation steps and [install the DMR decoder](#install-the-optional-dmr-decoder).
+The installer sets up the RTL-SDR drivers, MP3 recording, the headless DAB/DAB+ decoder, the pinned DMR voice and SMS decoder, and the scanner service. Building the DAB decoder can take a few minutes. The service starts now and at boot, before you sign in. Desktop sessions get an **SDR Scanner** applications-menu entry. SSH and console sessions use headless mode, which requires only the background service and its dependencies.
 
-The `rtl-sdr` package supplies the receiver tools, library and USB device rules. If APT cannot find it on Ubuntu, run `sudo apt install --no-install-recommends software-properties-common`, then `sudo add-apt-repository universe` and retry the installation. [Ubuntu package](https://packages.ubuntu.com/jammy/rtl-sdr) · [Debian package](https://packages.debian.org/bookworm/rtl-sdr)
+You can choose explicitly with `bash install.sh --headless` or `bash install.sh --desktop`. Use `install-sdr-scanner.sh` in place of `install.sh` if you downloaded the standalone script.
 
-On hosts where the `rtl-sdr` rule assigns the dongle to `plugdev`, add the service user with `sudo usermod -aG plugdev "$USER"`. Sign out and back in after changing groups or installing the systemd user-session packages. On an SSH-only host, reconnect the SSH session. Reconnect the USB dongle after the package install so the rule applies. [Debian RTL-SDR USB rules](https://sources.debian.org/src/rtl-sdr/0.6.0-4/rtl-sdr.rules) · [Debian systemd PAM package](https://packages.debian.org/bookworm/libpam-systemd)
+### Open the scanner
 
-### 2. Choose headless server or desktop
+On the scanner host, open [the local panel](http://127.0.0.1:8766/) or choose **SDR Scanner** from the applications menu. On another device on your LAN, open the scanner host’s numeric IPv4 address on port **8766**, for example `http://192.168.1.20:8766/`. Run `hostname -I` on the host if you need its address. Direct LAN access needs no PIN. [Private network and remote access](#access-from-another-computer)
 
-Return to the `SDR-Scanner` checkout if you signed out or reconnected over SSH. Run the installer as your normal user.
-
-**Headless server**
-
-```bash
-/usr/bin/python3 launcher.py install --headless
-```
-
-The server installation runs the background service without a desktop environment, a browser or an applications-menu entry. Open the panel from another computer using the [SSH tunnel instructions](#access-from-another-computer).
-
-**Ubuntu or Debian desktop**
-
-```bash
-sudo apt install --no-install-recommends xdg-utils
-/usr/bin/python3 launcher.py install --desktop
-```
-
-Open **SDR Scanner** from your applications menu or visit [the local panel](http://127.0.0.1:8766/). The menu icon and browser tab use the maintainer's GitHub avatar. On desktops that show application actions, right-click the menu entry and choose **Stop SDR Scanner** to stop the service for the current boot.
-
-With no flag, `launcher.py install` adds the icon if it detects a local X11 or Wayland session. It skips the icon over SSH or in a text console. Both modes start and enable the same systemd user service. The installer enables user lingering so the service can start at boot before login. If your system requires administrator permission for this step, run `sudo loginctl enable-linger "$USER"` and check `loginctl show-user "$USER" -p Linger` for `Linger=yes`.
-
-### 3. Enable DAB and DAB+ if you want digital radio
-
-Follow the [optional DAB decoder setup](#install-the-optional-dab-decoder) on the Linux machine with the receiver. The decoder runs without a desktop and uses the same scanner panel. For your first digital station, turn on **VOLUME**, hold **DAB** for about a second, and wait for the sweep to finish.
+If prompted to refresh the USB permissions, reconnect the receiver and follow the installer's sign-in or reboot instructions. Then click **VOLUME** on the panel to start listening.
 
 ## Upgrade an existing installation
 
-Open a terminal in your existing `SDR-Scanner` checkout. Run `git status --short` and save any local source edits before switching releases. Stop the service, then back up `.scanner-state.json`, `.scanner-radios/` if present, and your recording folders.
+Open a terminal in your existing `SDR-Scanner` checkout. Run `git status --short` and save any local source edits before upgrading. Stop the service and back up your [scanner settings and recordings](#service-commands-and-backups).
 
 ```bash
 systemctl --user stop local-sdr-scanner.service
 ```
 
-After backing up your data, fetch the release and start the scanner again.
+For an existing checkout on `main`, update it and rerun the installer.
 
 ```bash
-git fetch origin tag v5.0.1
-git switch --detach v5.0.1
-systemctl --user start local-sdr-scanner.service
+git pull --ff-only origin main
+bash install.sh
 ```
 
-Refresh your browser after the restart. The panel opens in clock standby. The app keeps your favourites, recording location and other saved settings in the existing checkout. An in-place upgrade also keeps the paths in any private-network systemd drop-in valid. After upgrading from v5.0, hold **DAB** once to populate the full station list for the arrows. If this is your first DAB setup, [install the decoder](#install-the-optional-dab-decoder) first.
+If your checkout is on an older release tag, run `git fetch origin main`, then `git switch --detach FETCH_HEAD` before running `bash install.sh`. Refresh your browser once the service starts. After upgrading from v5.0, hold **DAB** once to refresh the discovered station list. For the earlier release, see the [v5.0.1 install instructions](https://github.com/AshCooperUK/SDR-Scanner/blob/v5.0.1/README.md#install-on-ubuntu-or-debian).
 
 ## Open the panel and tune your first station
 
@@ -122,7 +101,7 @@ Refresh your browser after the restart. The panel opens in clock standby. The ap
 
 | To do this | Start here |
 | --- | --- |
-| Listen to local digital radio | Install the [DAB decoder](#install-the-optional-dab-decoder), power on, and hold **DAB** once. When the sweep finishes, browse stations with **UP** and **DOWN**. |
+| Listen to local digital radio | Power on and hold **DAB** once. When the sweep finishes, browse stations with **UP** and **DOWN**. |
 | Listen to aircraft or PMR446 | Press **AIR/MARINE** or **PMR 446** to [scan a zone](#scan-zones-or-favourites). Press **HOLD** to stay on a channel. |
 | Save a station for later | Hold one of **F01–F24**, or use **PROG → FAV** to [choose any memory slot](#save-or-erase-a-numbered-slot). |
 | Record and listen back | Choose a destination with a right-click on **RECORD**, tap it to arm, then use **PLAY LAST** after the clip has finished. See [Recording and playback](#recording-and-playback). |
@@ -273,10 +252,10 @@ To save a DAB station in any slot, listen to it and use **PROG → FAV → UP/DO
 
 ## Program with CHIRP
 
-Run CHIRP on the computer hosting SDr Scanner. The scanner service needs to be running. These steps use the supplied [SDr Scanner CHIRP driver](chirp_sdr_scanner.py).
+Run CHIRP on the computer hosting SDr Scanner or on a desktop client with an [SSH tunnel](#use-an-ssh-tunnel) to the host. Copy or download the supplied [SDr Scanner CHIRP driver](chirp_sdr_scanner.py) to the computer running CHIRP. The scanner service needs to be running.
 
 1. In CHIRP, enable **Help → Developer Mode**, then choose **File → Load Module** and open `chirp_sdr_scanner.py` from the scanner checkout. If the menu is missing, restart CHIRP after enabling Developer Mode.
-2. Choose **Radio → Download From Radio**. Under **Port**, select **Custom…** and enter `socket://127.0.0.1:8766`. Use your configured port if it differs. Select **SDr Scanner** as vendor and **Web Scanner** as model, then download.
+2. Choose **Radio → Download From Radio**. Under **Port**, select **Custom…** and enter `socket://127.0.0.1:8766`. If you changed the scanner server's listening port, use that same port in CHIRP and in the SSH tunnel. Select **SDr Scanner** as vendor and **Web Scanner** as model, then download.
 3. Edit analogue favourites in **Favourites**, scan channels in the named zone editors, and radio configuration in **Settings**. Save a copy of the downloaded CHIRP image if you want to keep the original entries for reference.
 4. Choose **Radio → Upload To Radio** and use the same port. If the scanner reports that its programming has changed since the download, download a fresh image and reapply the desired edits.
 
@@ -322,36 +301,11 @@ Hold **L/O** during silent Watch mode to clear temporary lockouts.
 
 DAB playback and recordings are mono. Audio opens when the decoder receives valid audio from the selected service.
 
-### Install the optional DAB decoder
-
-Run these commands on the Linux host, as the same user who runs the scanner service. The build produces the headless `welle-cli` decoder and binds its internal HTTP listener to loopback. [welle-cli v2.7 source](https://github.com/AlbrechtL/welle.io/tree/v2.7)
-
-```bash
-sudo apt install --no-install-recommends build-essential cmake xxd \
-  libfaad-dev libmpg123-dev libmp3lame-dev gstreamer1.0-tools \
-  gstreamer1.0-plugins-base gstreamer1.0-plugins-good
-
-(
-  set -eu
-  dab_build_dir=$(mktemp -d)
-  trap 'rm -rf -- "$dab_build_dir"' EXIT
-  git clone --depth 1 --branch v2.7 https://github.com/AlbrechtL/welle.io.git "$dab_build_dir/source"
-  dab_socket="$dab_build_dir/source/src/various/Socket.cpp"
-  sed -i 's/htons(INADDR_ANY)/htonl(INADDR_LOOPBACK)/' "$dab_socket"
-  grep -q 'htonl(INADDR_LOOPBACK)' "$dab_socket"
-  cmake -S "$dab_build_dir/source" -B "$dab_build_dir/build" \
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DBUILD_WELLE_IO=OFF -DBUILD_WELLE_CLI=ON \
-    -DKISS_FFT=ON -DRTLSDR=OFF -DSOAPYSDR=OFF
-  cmake --build "$dab_build_dir/build" --parallel 2
-  install -D -m 0755 "$dab_build_dir/build/welle-cli" "$HOME/.local/share/sdr-scanner/bin/welle-cli"
-)
-```
-
-The build installs the decoder to `~/.local/share/sdr-scanner/bin/welle-cli`. Power on the panel and hold **DAB** to discover your first stations. If the LCD shows `Err`, hover over **DAB** for the decoder message.
+The full installer builds the headless `welle-cli` decoder and binds its internal HTTP listener to loopback. If the LCD shows `Err`, hover over **DAB** for the decoder message. [welle-cli v2.7 source](https://github.com/AlbrechtL/welle.io/tree/v2.7)
 
 ## Conventional DMR
 
-1. Use the `main` branch and install the DMR decoder on the computer with the RTL-SDR attached. Open **DMR** beside **PROG**, then turn up **VOLUME** if the radio is in standby.
+1. Open **DMR** beside **PROG**, then turn up **VOLUME** if the radio is in standby. The full installer sets up DSD-neo on the scanner host. [DSD-neo v2.12.1 release](https://github.com/arancormonk/dsd-neo/releases/tag/v2.12.1)
 2. Enter the receive frequency in MHz and press **E / YES**. On a keyboard, type the frequency and press **Enter**. The display shows **CC** (colour code), **TS** (time slot), **TGID** (talkgroup) and **UNIT ID** once a call provides those fields. Squelch and the selected filters determine when clear voice plays.
 3. Press the **SQUELCH** dial to open the menu on the radio's LCD, then select **Program a channel** to save the frequency and name. Set a colour code, slot or talkgroup to restrict reception. Leave a filter blank to accept any value. **FAV** lists the saved DMR channels. Use **SYSTEM** or **DEPT** to limit a scan to the selected favourite's group, and press the same key again to release that limit. **SCAN** checks the saved channels.
 4. Press **FUNC → SEARCH** to set a frequency range and step. **SEARCH** starts the sweep. Press it again to hold the current frequency.
@@ -372,32 +326,6 @@ For handheld-to-scanner simplex testing, tune to the handheld's TX frequency and
 The scanner keeps the latest 24 decoded messages for each receiver in memory until the service restarts. The RTL-SDR receives compatible, unencrypted messages and has no transmit capability. The scanner must hear the full radio packet. [FreeDMR SMS format guide](https://www.freedmr.uk/index.php/sms-messages/)
 
 While Discovery logging is enabled, it also records the time, frequency, sender and recipient IDs, and any known colour code or slot for each received SMS. Message text stays in the inbox.
-
-### Install the optional DMR decoder
-
-On 64-bit Intel or AMD Ubuntu or Debian, install `curl` with `sudo apt install --no-install-recommends curl`. Run the following as the user who runs the scanner service. The release bundle is extracted so the decoder can run without a GUI or a FUSE mount. [DSD-neo v2.12.1 release](https://github.com/arancormonk/dsd-neo/releases/tag/v2.12.1)
-
-```bash
-(
-  set -eu
-  dmr_work_dir=$(mktemp -d)
-  trap 'rm -rf -- "$dmr_work_dir"' EXIT
-  dmr_data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/sdr-scanner"
-  cd "$dmr_work_dir"
-  curl -fL -o dsd-neo.AppImage \
-    https://github.com/arancormonk/dsd-neo/releases/download/v2.12.1/dsd-neo-linux-x86_64-portable-v2.12.1.AppImage
-  printf '%s  %s\n' 3110c5bcf8572789d57dd96ef09c351a61e2d1b1a4cf156ac542b0b3e73053a6 dsd-neo.AppImage | sha256sum -c -
-  chmod +x dsd-neo.AppImage
-  ./dsd-neo.AppImage --appimage-extract > /dev/null
-  mkdir -p "$dmr_data_dir/bin"
-  if [ ! -e "$dmr_data_dir/dsd-neo-2.12.1" ]; then
-    mv squashfs-root "$dmr_data_dir/dsd-neo-2.12.1"
-  fi
-  ln -sfn "$dmr_data_dir/dsd-neo-2.12.1/AppRun" "$dmr_data_dir/bin/dsd-neo"
-)
-```
-
-For other architectures, install a suitable DSD-neo 2.12.1 build and put `dsd-neo` on the scanner service's `PATH`, or set `SDR_SCANNER_DMR_DECODER` in its environment to the executable's full path. [DSD-neo source and build instructions](https://github.com/arancormonk/dsd-neo/tree/v2.12.1)
 
 ## Recording and playback
 
@@ -482,9 +410,15 @@ From the repo, `/usr/bin/python3 launcher.py open` starts the service if needed 
 
 For a foreground session, stop the service, run `/usr/bin/python3 app.py` from the checkout, and open [the local panel](http://127.0.0.1:8766/). **Ctrl+C** ends the foreground session.
 
-The default state file is `.scanner-state.json` in the checkout. It saves memories, names, permanent lockouts, clock and band settings, RDS, DAB discovery and the recording destination. Additional independent receivers save their settings under `.scanner-radios/`. Back up both paths and any recording folders you selected, including folders outside the checkout. Stop the service before restoring state files. If you move to a new checkout, run the installer there and update any private-network drop-in paths before restarting. Each new browser session starts in clock standby.
+The default state file is `.scanner-state.json` in the checkout. It saves memories, names, permanent lockouts, clock and band settings, RDS, DAB discovery and the recording destination. Additional independent receivers save their settings under `.scanner-radios/`. Back up those paths, `.scanner-state.dmr.json` for DMR favourites, `.scanner-state.access.json` for remote access settings, and any recording folders you selected. Keep the access backup private. Stop the service before restoring state files. If you move to a new checkout, run the installer there and update any private-network drop-in paths before restarting. Each new browser session starts in clock standby.
 
 ## Access from another computer
+
+### Use a private LAN or Tailscale address
+
+The full installer enables direct IPv4 access on port **8766**. Connect your client to the same LAN or Tailscale network, then open the scanner host's numeric IPv4 address and port, for example `http://192.168.1.20:8766/`. Direct connections from the scanner's LAN subnet and known Tailscale peers reaching its Tailscale IP can use the scanner without a PIN. If the host uses a firewall, permit TCP **8766** from the intended clients.
+
+Running `app.py` directly in a terminal uses loopback by default. Add `--listen` for LAN access when starting it that way.
 
 ### Use an SSH tunnel
 
@@ -494,15 +428,15 @@ The Linux host needs a running SSH server. On Ubuntu or Debian, install `openssh
 ssh -N -L 8766:127.0.0.1:8766 your-user@your-server
 ```
 
-Open [the local panel](http://127.0.0.1:8766/) on that computer. Port **8766** on the client must be free. The receiver, scanner settings and recordings stay on the server.
+Open [the local panel](http://127.0.0.1:8766/) on that computer. Keep the tunnel open and use the same port on both ends. If **8766** is in use on the client by another scanner, stop that local service before opening the tunnel. The receiver, scanner settings and recordings stay on the server.
 
-### Use a private LAN or Tailscale address
+### Configure an allowlist for routed private networks
 
-The service listens on loopback by default. To use direct private-network HTTP, create a JSON file on the scanner host. Set `allowed_cidrs` to the permitted client addresses or ranges and `allowed_addresses` to the scanner's private IPv4 address or range. For example, if the host address is `192.168.1.20` and the client is on that LAN:
+For an explicit allowlist of addresses outside the scanner's own subnet, create a JSON file on the scanner host. Set `allowed_cidrs` to the permitted private client addresses or ranges and `allowed_addresses` to the scanner's private IPv4 address or range. This controls which routed connections qualify as direct. To restrict access from the scanner's own LAN subnet, use the host firewall.
 
 ```json
 {
-  "allowed_cidrs": ["192.168.1.0/24"],
+  "allowed_cidrs": ["192.168.2.0/24"],
   "allowed_addresses": ["192.168.1.20/32"]
 }
 ```
@@ -515,11 +449,11 @@ ExecStart=
 ExecStart=/usr/bin/python3 /absolute/path/to/SDR-Scanner/app.py --remote-config /absolute/path/to/remote.json
 ```
 
-Restart the service, then open the numeric address and port in the browser. The example address is `http://192.168.1.20:8766/`. If the host uses a firewall, permit TCP **8766** from the intended client addresses. Direct connections from the scanner's LAN subnet and known Tailscale peers connecting to its Tailscale IP can use the scanner without a PIN. On plain HTTP the app falls back to a browser audio processor when AudioWorklet is unavailable.
+Restart the service, then open the numeric address and port in the browser. Clients outside the trusted LAN or Tailscale networks still need the remote PIN. On plain HTTP the app falls back to a browser audio processor when AudioWorklet is unavailable.
 
 ### Set the remote PIN
 
-On the scanner host, open [the local panel](http://127.0.0.1:8766/) and turn **VOLUME** off to show the standby clock. Double-tap **PROG**, enter six digits and press **PROG**. Enter the same digits again and press **PROG** to save. Use **F01–F09** for 1–9 and **F10** for 0, or use the mobile keypad. **L/O** deletes a digit and **HOLD** cancels setup.
+On the scanner host or through an [SSH tunnel](#use-an-ssh-tunnel), open [the local panel](http://127.0.0.1:8766/) and turn **VOLUME** off to show the standby clock. Double-tap **PROG**, enter six digits and press **PROG**. Enter the same digits again and press **PROG** to save. Use **F01–F09** for 1–9 and **F10** for 0, or use the mobile keypad. **L/O** deletes a digit and **HOLD** cancels setup.
 
 You can also set the PIN in CHIRP under [Remote Access](#program-with-chirp). When a remote connection shows `PIN`, enter the digits and press **PROG** or **Return**, then turn on **VOLUME**. Until the PIN is set on the scanner host, remote clients that need it stay locked. Unlocking is per tab and survives a refresh. Changing the PIN or remote URL, or restarting the service, clears remote unlocks.
 
@@ -527,7 +461,7 @@ You can also set the PIN in CHIRP under [Remote Access](#program-with-chirp). Wh
 
 Point your reverse proxy or tunnel at the scanner's HTTP port, **8766** by default. Preserve the browser's `Host` header and forward the public scheme in `X-Forwarded-Proto`. Set the exact public URL in [CHIRP Remote Access](#program-with-chirp) to block other remote addresses. Use HTTPS on the public side so the PIN and audio are encrypted between the browser and proxy.
 
-A proxy running on the scanner host can reach the default listener at `http://127.0.0.1:8766`. For a proxy on another machine or direct IP forwarding, use `--listen` on the scanner's `ExecStart` line in a systemd drop-in, or use the private-network setup above. `--listen` enables IPv4 listening on all interfaces and lets the scanner identify local connections from its interface subnets and Tailscale routes. The default listener is loopback-only.
+A proxy running on the scanner host can reach `http://127.0.0.1:8766`. For a proxy on another machine or direct IP forwarding, use the scanner host's accessible IPv4 address.
 
 ## Share the scanner with multiple listeners
 
@@ -547,9 +481,10 @@ On a shared receiver, changing station, band, squelch or scan mode affects the o
 | `Err` when tuning | Confirm the SDR is plugged into the Linux host. Put the panel in standby before running the USB test below. Close other apps using the same dongle. |
 | Silent or noisy reception | Interact with the panel to enable browser audio. Check **MUTE**, **VOLUME**, squelch, the antenna and the tuned frequency. Use the meter tooltip to check carrier offset, then tune the exact frequency or make a small wheel adjustment. |
 | FM audio without RDS | Check for **WFM**, turn **RDS** on, hold the station for several seconds and check reception. A station needs to transmit RDS for the receiver to decode it. |
-| `Err` in DAB mode | Hover over **DAB** for the decoder message. Follow the [decoder setup](#install-the-optional-dab-decoder) if the helper is missing. |
+| `Err` in DAB mode | Hover over **DAB** for the decoder message. Rerun the [full installer](#run-the-full-installer) if the helper is missing. |
 | `no Ch` after tapping DAB | Hold **DAB** until the sweep starts, then wait for it to finish. |
 | Too few DAB stations | Hold **DAB** to sweep Band III once, then hover over it for the discovered total. Check that the antenna receives VHF Band III and give the sweep time to finish. |
+| DMR decoder is unavailable | Rerun the [full installer](#run-the-full-installer) as the user who runs the scanner service. |
 | Search stops on noise | Raise **SQUELCH** slightly. Try a narrower **BAND/STEP** range or change the spacing if you are looking for a specific channel grid. |
 | No recording to play | Arm **RECORD**, wait for a signal to pass squelch and then end, and check that the chosen server folder is writable. The **PLAY LAST** tooltip reports when no finished recording is available. |
 
@@ -557,9 +492,9 @@ To check USB access, put the panel in clock standby and run `rtl_test -s 2400000
 
 ## Frequently asked questions
 
-**Can I use this as a headless RTL-SDR server?** Yes. Install with `--headless`, leave the dongle on the Ubuntu or Debian host, and open the browser panel over an SSH tunnel or a configured private LAN. You can listen from a Windows, macOS, Linux, Android or iOS browser.
+**Can I use this as a headless RTL-SDR server?** Yes. Install with `--headless`, leave the dongle on the Ubuntu or Debian host, and open the browser panel on your private LAN or through an SSH tunnel. You can listen from a Windows, macOS, Linux, Android or iOS browser.
 
-**What frequencies and modes does it receive?** The panel accepts **100 kHz–1.75 GHz** with compatible hardware. It supports AM, narrow FM, wide FM broadcast radio and optional Band III DAB/DAB+. Reception depends on the dongle, antenna and signal conditions. Low-frequency coverage below 25 MHz uses direct sampling on supported receivers.
+**What frequencies and modes does it receive?** The panel accepts **100 kHz–1.75 GHz** with compatible hardware. It supports AM, narrow FM, wide FM broadcast radio, USB, LSB, Band III DAB/DAB+, and conventional DMR. Reception depends on the dongle, antenna and signal conditions. Low-frequency coverage below 25 MHz uses direct sampling on supported receivers.
 
 **Can two people listen to different stations?** Each independent station or frequency needs its own assigned dongle. With one dongle, active tabs listen to the shared tuner. If a second dongle becomes available, the server can assign it to a waiting listener.
 

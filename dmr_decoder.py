@@ -41,9 +41,12 @@ def decoder_path():
     if override:
         executable = shutil.which(os.path.expanduser(override))
     else:
-        data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
-        candidate = data_home / "sdr-scanner/bin/dsd-neo"
-        executable = shutil.which(str(candidate)) or shutil.which("dsd-neo")
+        default_data_home = Path.home() / ".local/share"
+        data_home = Path(os.environ.get("XDG_DATA_HOME") or default_data_home)
+        helper = "sdr-scanner/bin/dsd-neo"
+        executable = (shutil.which(str(data_home / helper))
+                      or shutil.which(str(default_data_home / helper))
+                      or shutil.which("dsd-neo"))
     return str(Path(executable).resolve()) if executable else None
 
 
