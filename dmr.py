@@ -193,6 +193,11 @@ class DmrState:
         self.stop_signal()
         self.begin_dwell()
 
+    def select_frequency(self, hz):
+        """Set a conventional hold frequency from the integrated receiver panel."""
+        self._set_mode("hold", "channel")
+        self._set_target(hz, force=True)
+
     def _set_target(self, hz, number=None, *, force=False, now=None):
         if now is None:
             now = monotonic()

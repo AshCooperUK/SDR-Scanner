@@ -1,0 +1,439 @@
+#sdr-v10-panel{container-type:inline-size;color-scheme:dark;--left-key-height:clamp(26px,3.8cqw,36px);--dial-bank-gap:clamp(7px,1cqw,14px);--dial-diameter:clamp(44px,8.5cqw,104px);color:#c8d0d5;font:500 13px/1.2 "Instrument Sans",Arial,sans-serif}
+    #sdr-v10-panel *{box-sizing:border-box}
+    #sdr-v10-panel [hidden]{display:none!important}
+    #sdr-v10-panel .radio{position:relative;display:grid;grid-template-columns:minmax(94px,22fr) minmax(0,55fr) minmax(88px,23fr);grid-template-areas:"left lcd right" ". keys right";gap:10px 11px;align-items:stretch;padding:14px 13px 12px;border:1px solid #51565b;border-top-color:#767d82;border-bottom-color:#111517;background:linear-gradient(161deg,#343a3f,#22272b 48%,#24292d);border-radius:8px;box-shadow:inset 0 0 0 3px #191d21}
+    #sdr-v10-panel .controls-left{grid-area:left;display:grid;grid-template-columns:minmax(0,5fr) minmax(0,6fr);grid-template-rows:auto auto minmax(12px,1fr) auto;gap:var(--dial-bank-gap) 7px;padding-top:7px;min-width:0}
+    #sdr-v10-panel .left-stack{grid-column:1;grid-row:1;align-self:start;display:grid;gap:7px;min-width:0}
+    #sdr-v10-panel :is(.preset-bank,.favorite-bank){display:grid;gap:4px;min-width:0;padding:5px 3px 3px}
+    #sdr-v10-panel .bank-label{grid-column:1 / -1;text-align:center;font-size:clamp(7px,1.06cqw,10px);letter-spacing:.06em;color:#d2d9dd}
+    #sdr-v10-panel .preset-bank{grid-column:1 / -1;grid-row:2;grid-template-columns:repeat(3,minmax(0,1fr))}
+    #sdr-v10-panel .favorite-bank{grid-template-columns:repeat(2,minmax(0,1fr))}
+    #sdr-v10-panel .controls-left .mode-key{color:#fff;font-weight:700;letter-spacing:.09em}
+    #sdr-v10-panel .controls-left .mode-key[aria-expanded="true"]{border-color:#51889d}
+    #sdr-v10-panel .controls-left .dial-a{grid-column:2;grid-row:1;align-self:start}
+    #sdr-v10-panel .dial-b-bank{grid-column:1 / -1;grid-row:4;align-self:end;display:grid;gap:var(--dial-bank-gap);min-width:0}
+    #sdr-v10-panel .aux-dials{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
+    #sdr-v10-panel .recess{border:1px solid #14191d;border-top-color:#0e1317;border-bottom-color:#596167;border-radius:4px;background:#1a2024;box-shadow:inset 0 1px 3px #111518}
+    #sdr-v10-panel .controls-left .switch,#sdr-v10-panel .scan-bank .hardware{height:var(--left-key-height);font-size:clamp(8px,1.17cqw,11px)}
+    #sdr-v10-panel .hardware,#sdr-v10-panel .key{color:inherit;cursor:pointer;font:inherit}
+    #sdr-v10-panel .hardware{padding:5px 3px;border:1px solid #111518;border-top-color:#555c62;border-left-color:#383f44;border-radius:4px;background:linear-gradient(#363e43,#252b2f 55%,#1e2428);box-shadow:0 2px 1px #16191c,inset 0 -1px #4d5255;min-height:26px;font-size:10px;letter-spacing:.03em;white-space:nowrap}
+    #sdr-v10-panel .hardware:hover,#sdr-v10-panel .hardware[aria-pressed=true]{color:#e7f7ff;border-color:#51889d}
+    #sdr-v10-panel .preset-bank .hardware{min-width:0;padding:4px 1px;font-size:clamp(7px,1.06cqw,10px);white-space:normal}
+    #sdr-v10-panel .preset-bank [data-zone^="CUSTOM"]{overflow-wrap:anywhere}
+    #sdr-v10-panel .favorite-bank .hardware{display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;padding:4px 1px;font-size:clamp(7px,1.17cqw,11px)}
+    #sdr-v10-panel button:focus-visible,#sdr-v10-panel input:focus-visible{outline:2px solid #75cee9;outline-offset:2px}
+    #sdr-v10-panel .switch{width:100%;display:flex;align-items:center;gap:4px;justify-content:center}
+    #sdr-v10-panel .lamp{flex:none;display:inline-block;width:5px;height:5px;border-radius:50%;background:#5a5f63}
+    #sdr-v10-panel .lamp.blue{background:#6fc8ff;box-shadow:0 0 4px #6fc8ff}
+    #sdr-v10-panel .lamp.green{background:#8bd07d;box-shadow:0 0 4px #8bd07d}
+    #sdr-v10-panel .lamp.amber{background:#ffbf70;box-shadow:0 0 4px #ffbf70}
+    #sdr-v10-panel .lamp.red{background:#ff6b58;box-shadow:0 0 4px #ff543d}
+    #sdr-v10-panel .dial-unit{display:grid;justify-items:center;min-width:0;gap:4px}
+    #sdr-v10-panel .dial-label,#sdr-v10-panel .engrave{white-space:nowrap;font-size:9px;letter-spacing:.08em;color:#c3cbd1;text-align:center}
+    #sdr-v10-panel .dial-label{max-width:100%;white-space:normal;overflow-wrap:anywhere;letter-spacing:.035em;font-size:clamp(8px,1.05cqw,11px)}
+    #sdr-v10-panel .knob{width:min(100%,var(--dial-diameter));aspect-ratio:1;align-self:center;position:relative;display:block;padding:0;border-radius:50%;border:2px solid #111719;background:conic-gradient(from -17deg,#414c53,#23292d 48deg,#4c565c 113deg,#252c31 152deg,#11171c 220deg,#4b5359 325deg,#414c53);box-shadow:0 2px 3px #0d1114,inset 0 0 0 3px #3c464b,inset 0 0 0 5px #20282c;cursor:pointer}
+    #sdr-v10-panel .knob::after{content:"";position:absolute;inset:18%;border-radius:50%;border:1px solid #56646c;background:repeating-radial-gradient(circle at 52% 46%,#30393f 0 3px,#2b3439 4px 5px)}
+    #sdr-v10-panel .knob::before{content:"";z-index:1;position:absolute;left:calc(50% - 1px);top:10%;width:3px;height:14%;background:#d4dde2;border-radius:1px;transform-origin:50% 287%;transform:rotate(var(--angle,-28deg))}
+    #sdr-v10-panel .scan-bank{display:grid;grid-template-columns:minmax(0,1.24fr) repeat(3,minmax(0,1fr));gap:4px;padding:3px;width:min(100%,292px);justify-self:center}
+    #sdr-v10-panel .scan-bank .hardware{min-width:0;padding-inline:1px;white-space:normal}
+    #sdr-v10-panel .scan-bank [data-action="lockout"]{padding-inline:clamp(2px,.45cqw,7px)}
+    #sdr-v10-panel .function-keys{grid-area:keys;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:4px}
+    #sdr-v10-panel .function-keys .hardware{font-size:clamp(8px,1.34cqw,12px)}
+    #sdr-v10-panel .secondary-label{display:table;margin:1px auto 0;padding:0 3px;border-radius:1px;background:#eef1f3;color:#161c21;font-size:.75em;font-weight:700;letter-spacing:.05em}
+    #sdr-v10-panel .right{grid-area:right;display:flex;flex-direction:column;align-items:center;justify-content:space-between;gap:9px;min-width:0;padding:6px 0 0}
+    #sdr-v10-panel .right-top{display:grid;gap:var(--dial-bank-gap);width:100%;min-width:0}
+    #sdr-v10-panel :is(.memory-keys,.favorite-banks){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px}
+    #sdr-v10-panel .memory-keys{align-items:center}
+    #sdr-v10-panel .memory-keys .pairs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(4px,.5cqw,8px)}
+    #sdr-v10-panel .memory-keys .pairs .hardware{min-width:0;min-height:clamp(26px,2.6cqw,36px);padding-inline:1px;font-size:clamp(8px,1.1cqw,11px)}
+    #sdr-v10-panel .right .readouts{width:100%;display:grid;grid-template-columns:1.12fr .76fr 1.4fr;align-items:stretch;padding:2px}
+    #sdr-v10-panel .right .readouts .engrave{display:flex;justify-content:center;align-items:center;gap:3px;padding-inline:2px;border-right:1px solid #424b51;font-size:clamp(6px,1.06cqw,10px);letter-spacing:0}
+    #sdr-v10-panel .right .readouts .hardware{min-width:0;min-height:22px;padding:4px 1px;font-size:clamp(6px,1.06cqw,10px);letter-spacing:0}
+    #sdr-v10-panel .right .readouts .lamp{width:4px;height:4px}
+    #sdr-v10-panel .right-bottom{display:grid;gap:var(--dial-bank-gap);width:100%;min-width:0}
+    #sdr-v10-panel .main-tune{display:grid;justify-items:center;gap:var(--dial-bank-gap);width:100%}
+    #sdr-v10-panel .main-tune .knob{width:96%;max-width:260px;min-width:53px;border-width:3px;box-shadow:0 3px 7px #0d1114,inset 0 0 0 4px #414b50,inset 0 0 0 8px #232c30}
+    #sdr-v10-panel .main-tune .knob::before{display:none}
+    #sdr-v10-panel .main-tune .knob::after{inset:15%;background:radial-gradient(circle at 49% 23%,#10171c 0 15%,#4f5b62 17% 18%,transparent 19%),repeating-radial-gradient(circle at 54% 42%,#3c464c 0 3px,#333d43 4px 5px);transform:rotate(var(--angle,0deg))}
+    #sdr-v10-panel .volume-unit{
+      --volume-diameter:clamp(52px,5.6cqw,80px);
+      --volume-inset:clamp(4px,.65cqw,12px);
+      justify-self:end;
+      width:min(calc(100% - var(--volume-inset)),var(--volume-diameter));
+      margin-inline-end:var(--volume-inset);
+    }
+    #sdr-v10-panel .volume-knob{width:100%}
+    #sdr-v10-panel .volume-knob[aria-pressed=true]::before{background:#ffbf70;box-shadow:0 0 4px #ffbf70}
+    #sdr-v10-panel .lcd{grid-area:lcd;min-width:0;position:relative;min-height:294px;display:flex;flex-direction:column;padding:9px 8px 7px;border:1px solid #06090b;border-top-color:#080d10;border-bottom-color:#62686c;border-radius:5px;background:#071017;color:#e3eced;box-shadow:inset 0 0 0 3px #0e181e;font-variant-numeric:tabular-nums}
+    #sdr-v10-panel.volume-muted:not(.thin) .lcd{filter:brightness(.1)}
+    #sdr-v10-panel .screen-top{display:flex;justify-content:space-between;align-items:center;gap:4px;font:600 10px/1.1 ui-monospace,monospace;color:#aec7d4}
+    #sdr-v10-panel .mode-indicator{display:inline-flex;align-items:center;min-height:24px;color:#bcecf8;border:1px solid #386875;border-radius:2px;padding:3px 7px;background:#152b35}
+    #sdr-v10-panel .frequency-button{display:block;width:100%;border:0;text-align:left;background:transparent;padding:6px 4px 1px;color:#f2f7fa;font:600 clamp(22px,5.25cqw,55px)/1.05 ui-monospace,monospace;letter-spacing:-.055em;white-space:nowrap;cursor:pointer}
+    #sdr-v10-panel .meter{display:grid;grid-template-columns:15px 1fr auto;gap:4px;align-items:center;margin:4px 4px 6px;color:#a7bcc6;font:500 9px ui-monospace,monospace}
+    #sdr-v10-panel .meter-body{height:7px;border:1px solid #3a505a;background:#15232c}
+    #sdr-v10-panel .meter-body i{display:block;width:67%;height:100%;background:linear-gradient(90deg,#6cb682 0 75%,#deb168 75%)}
+    #sdr-v10-panel .status-line{display:flex;justify-content:space-between;align-items:center;gap:6px;padding:5px 4px 4px;border-top:1px solid #25353e;color:#c4e6ee;font:500 10px/1.25 ui-monospace,monospace;white-space:nowrap}
+    #sdr-v10-panel .status-line strong{color:#9cdeef;font-weight:600}
+    #sdr-v10-panel .scope-plot{position:relative;flex:1 1 auto;min-height:0;height:106px;border:1px solid #3a4b54;background:#080f19}
+    #sdr-v10-panel .scope{display:block;width:100%;height:100%;object-fit:fill}
+    #sdr-v10-panel .axes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px;color:#9eb4bf;font:500 9px/1.2 ui-monospace,monospace;padding:4px 1px 1px}
+    #sdr-v10-panel .axes > :nth-child(2){text-align:center}
+    #sdr-v10-panel .axes > :last-child{text-align:right}
+    #sdr-v10-panel .softkeys{display:flex;gap:4px;margin-top:auto;padding-top:6px}
+    #sdr-v10-panel .key{min-width:0;min-height:24px;border-radius:2px;border:1px solid #3c5361;background:linear-gradient(#253943,#14232c);font-size:clamp(8px,1.35cqw,11px)}
+    #sdr-v10-panel button.key:not(:disabled):hover,#sdr-v10-panel button.key[aria-pressed=true]{background:#254552;border-color:#6bbdd2;color:white}
+    #sdr-v10-panel .softkeys .key{flex:1 1 0;padding-inline:2px;white-space:nowrap}
+    #sdr-v10-panel .softkeys .scope-page{flex:.55;min-width:25px}
+    #sdr-v10-panel .softkeys .expand-key{flex:1.3;touch-action:manipulation;user-select:none;-webkit-touch-callout:none}
+    #sdr-v10-panel .overlay label.inline-setting{display:flex;justify-content:space-between;align-items:center;gap:5px}
+    #sdr-v10-panel .overlay{position:absolute;z-index:3;inset:4px;overflow:auto;background:#0c1922;color:#e0eaf0;padding:9px 9px 7px;display:flex;flex-direction:column;gap:7px}
+    #sdr-v10-panel .overlay-title{color:#d9f4fc;font-size:11px;font-weight:700;letter-spacing:.06em;margin:0;padding-bottom:5px;border-bottom:1px solid #416171}
+    #sdr-v10-panel .overlay-actions{display:flex;flex:0 0 auto;justify-content:flex-end;margin-top:auto;gap:4px}
+    #sdr-v10-panel .overlay-actions .key{min-width:32px;padding:0 9px;white-space:nowrap}
+    #sdr-v10-panel .tile-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
+    #sdr-v10-panel .tile-grid .key{height:38px;white-space:normal}
+    #sdr-v10-panel .list{margin:0;display:grid;gap:0;font-size:11px}
+    #sdr-v10-panel .list p{margin:0;padding:6px 3px;border-bottom:1px solid #273c48;display:flex;gap:6px;justify-content:space-between}
+    #sdr-v10-panel .list span{color:#a8c3d0}
+    #sdr-v10-panel .field{display:grid;gap:4px;font-size:11px}
+    #sdr-v10-panel .field input{width:100%;min-height:23px;border:1px solid #497587;background:#0d252f;color:white;padding:3px 5px;font:500 11px ui-monospace,monospace}
+    #sdr-v10-panel .error{margin:0;color:#ffc281;font-size:10px}
+    #sdr-v10-panel.thin .radio{display:block;max-width:720px;margin-inline:auto;padding:0;border:0;background:transparent;box-shadow:none}
+    #sdr-v10-panel.thin .controls-left,#sdr-v10-panel.thin .right,#sdr-v10-panel.thin .function-keys{display:none}
+    #sdr-v10-panel.thin .lcd{min-height:320px}
+    #sdr-v10-panel.thin .scope-plot{height:140px}
+    #sdr-v10-panel .radio:has(.lcd[data-off=true]) .lcd-content{visibility:hidden}
+    #sdr-v10-panel .lcd-content{display:flex;flex-direction:column;flex:1}
+    @container (max-width:600px){
+      #sdr-v10-panel .radio{gap:8px 8px;padding:11px 9px 9px;grid-template-columns:minmax(86px,21fr) minmax(0,59fr) minmax(71px,20fr)}
+      #sdr-v10-panel .lcd{min-height:266px}
+      #sdr-v10-panel .scope-plot{height:96px}
+      #sdr-v10-panel .status-line{font-size:9px}
+      #sdr-v10-panel .screen-top{font-size:8px}
+      #sdr-v10-panel .function-keys .hardware{font-size:8px}
+    }
+    @container (max-width:660px){
+      #sdr-v10-panel .radio{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-areas:"lcd lcd" "keys keys" "left right";gap:8px 8px}
+      #sdr-v10-panel .lcd{min-height:260px}
+      #sdr-v10-panel .frequency-button{font-size:34px}
+      #sdr-v10-panel .controls-left{padding:4px 1px 0;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:5px}
+      #sdr-v10-panel .right{gap:7px;padding-top:4px}
+      #sdr-v10-panel .right-bottom{grid-template-columns:minmax(0,1.65fr) minmax(0,1fr);column-gap:4px}
+      #sdr-v10-panel .main-tune{display:contents}
+      #sdr-v10-panel .main-tune .readouts{grid-column:1 / -1}
+      #sdr-v10-panel .main-tune > .dial-label{grid-area:2 / 1;justify-self:center;align-self:end}
+      #sdr-v10-panel .right .main-knob{grid-area:3 / 1;width:min(100%,120px);justify-self:center}
+      #sdr-v10-panel .volume-unit{grid-area:2 / 2 / 4;align-self:center}
+      #sdr-v10-panel .right .readouts .engrave{gap:1px}
+      #sdr-v10-panel .right .readouts .hardware{min-height:25px}
+      #sdr-v10-panel .status-line{font-size:10px}
+      #sdr-v10-panel .screen-top{font-size:10px}
+    }
+
+html, body { margin: 0; min-height: 100%; }
+html, #sdr-v10-panel * { scrollbar-width: none; }
+html::-webkit-scrollbar, #sdr-v10-panel ::-webkit-scrollbar { display: none; }
+#sdr-v10-panel { width: 100%; }
+#sdr-v10-panel:not(.thin) .radio {
+  min-height: 100vh;
+  min-height: 100dvh;
+  grid-template-rows: minmax(auto, 1fr) auto;
+}
+@container (max-width: 660px) {
+  #sdr-v10-panel:not(.thin) .radio { grid-template-rows: minmax(auto, 1fr) auto auto; }
+}
+#sdr-v10-panel .knob { touch-action: none; }
+#sdr-v10-panel .meter-body i { width: 0; }
+#sdr-v10-panel .lcd-content { min-height: 0; }
+#sdr-v10-panel .status-line > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#sdr-v10-panel .status-line > :last-child { text-align: right; }
+#sdr-v10-panel .scope-values { display: grid; gap: 8px; }
+#sdr-v10-panel .overlay textarea {
+  min-width: 0;
+  border: 1px solid #497587;
+  background: #0d252f;
+  color: #fff;
+  font: inherit;
+}
+#sdr-v10-panel .key:disabled { opacity: .55; cursor: default; }
+#sdr-v10-panel #v10-menus { overflow: hidden; }
+#sdr-v10-panel #v10-menus .menu-scroll {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 7px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+#sdr-v10-panel #v10-menus .menu-scroll > * { flex: 0 0 auto; }
+#sdr-v10-panel .menu-project {
+  display: grid;
+  gap: 7px;
+  margin-top: 7px;
+  padding-top: 10px;
+  border-top: 1px solid #416171;
+}
+#sdr-v10-panel .menu-project-title { margin: 0; color: #d9f4fc; font-size: 13px; }
+#sdr-v10-panel .menu-project-description { margin: 0; color: #aec7d4; }
+#sdr-v10-panel .menu-project-links { display: flex; flex-wrap: wrap; gap: 7px; }
+#sdr-v10-panel .menu-project-links .key {
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 10px;
+  text-decoration: none;
+}
+#sdr-v10-panel .menu-project-links .key:hover,
+#sdr-v10-panel .menu-project-links .key:focus-visible {
+  border-color: #6bbdd2;
+  background: #254552;
+  color: #fff;
+}
+@container (max-width: 660px) {
+  #sdr-v10-panel #v10-menus[data-route="menu"] .tile-grid .key { height: 30px; }
+  #sdr-v10-panel .menu-project { gap: 4px; margin-top: 4px; padding-top: 6px; }
+  #sdr-v10-panel .menu-project-description { font-size: 11px; }
+}
+#sdr-v10-panel #v10-menus[data-route="tune-step"] .overlay-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #0c1922;
+}
+#sdr-v10-panel #v10-menus > .overlay-actions { margin-top: 0; }
+#sdr-v10-panel .menu-entry {
+  margin: 0;
+  padding: 4px 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, monospace;
+}
+#sdr-v10-panel .menu-entry-caret { border-left: 1px solid #75cee9; }
+#sdr-v10-panel #v10-menus .menu-status {
+  padding: 4px 6px;
+  cursor: default;
+  overflow-wrap: anywhere;
+}
+#sdr-v10-panel #v10-menus .menu-choice-field {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px;
+  text-align: left;
+}
+#sdr-v10-panel #v10-menus .menu-cursor {
+  border-color: #6bbdd2;
+  background-color: #254552;
+}
+#sdr-v10-panel #v10-menus[data-route="lcd-keyboard"] .tile-grid .key {
+  padding-inline: 2px;
+  overflow-wrap: anywhere;
+}
+#sdr-v10-panel #v10-menus .tile-grid .menu-status {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  overflow: hidden;
+}
+#sdr-v10-panel #v10-menus .tile-grid .menu-status .menu-value { font-size: .9em; }
+#sdr-v10-panel .scope { cursor: crosshair; }
+#sdr-v10-panel .scope-nearby-sweep {
+  position: absolute;
+  inset-block: 0;
+  width: 1px;
+  background: #b5f0ff;
+  box-shadow: 0 0 5px #6dcdfc;
+  pointer-events: none;
+  animation: nearby-sweep 1.8s linear infinite alternate;
+}
+@keyframes nearby-sweep {
+  from { left: 0; }
+  to { left: calc(100% - 1px); }
+}
+#sdr-v10-panel .nearby-marquee {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-items: center;
+  overflow: hidden;
+  pointer-events: none;
+  color: #ffdc42;
+  font: 700 clamp(24px, 4.8cqw, 56px)/1 ui-monospace, monospace;
+  letter-spacing: .04em;
+  text-shadow: 0 2px 5px #000;
+}
+#sdr-v10-panel .scope-nearby-marquee { inset-block-start: var(--scope-spectrum-height); }
+#sdr-v10-panel .nearby-marquee > span {
+  position: relative;
+  width: max-content;
+  animation: nearby-listening 5s linear -.8s infinite;
+}
+@keyframes nearby-listening {
+  from { left: 100%; transform: translateX(0); }
+  to { left: 0; transform: translateX(-100%); }
+}
+#sdr-v10-panel .scope-squelch {
+  position: absolute;
+  top: max(2px, calc(var(--scope-squelch-y) - 1.2em - 7px));
+  right: 5px;
+  padding: 2px 5px;
+  pointer-events: none;
+  white-space: nowrap;
+  background: #08131c;
+  color: #ffc985;
+  font: 600 clamp(12px, 1cqw, 14px) / 1.2 ui-monospace, monospace;
+}
+#sdr-v10-panel .scope-tip {
+  position: absolute;
+  z-index: 1;
+  margin: 0;
+  padding: 3px 6px;
+  pointer-events: none;
+  background: #102330;
+  color: #eefaff;
+  border: 1px solid #426678;
+  font: 10px ui-monospace, monospace;
+}
+#sdr-v10-panel.thin .radio { max-width: none; margin: 0; }
+#sdr-v10-panel.thin .lcd { min-height: 100dvh; border-radius: 0; }
+#sdr-v10-panel.thin .scope { cursor: default; }
+#sdr-v10-panel.thin .lcd-content { pointer-events: none; }
+#sdr-v10-panel.thin .softkeys { visibility: hidden; }
+#sdr-v10-panel.thin .frequency-button { font-size: clamp(34px,10vw,110px); }
+#sdr-v10-panel .lcd-content { gap: 0; }
+#sdr-v10-panel .lcd[data-expansion="true"] { height: var(--normal-lcd-height); }
+#sdr-v10-panel .lcd[data-expansion="true"] .lcd-content { position: absolute; inset: 9px 8px 7px; }
+#sdr-v10-panel .lcd[data-expansion="true"] .lcd-content > :not(.scope-plot) { flex-shrink: 0; }
+#sdr-v10-panel .lcd[data-expansion="true"] .tune-readout .frequency-button { font-size: clamp(18px, 3cqw, 28px); }
+#sdr-v10-panel .lcd[data-expansion="true"] .memory-indicator strong { font-size: 12px; }
+#sdr-v10-panel .lcd[data-expansion="true"] .lcd-name-line { display: none; }
+#sdr-v10-panel .screen-top { justify-content: flex-start; flex: 0 0 auto; gap: clamp(2px,.45cqw,5px); }
+#sdr-v10-panel .mode-indicator { background: linear-gradient(#477ca2,#19436a); border-color: #64839e; min-width: 42px; justify-content: center; }
+#sdr-v10-panel .lcd-indicator, #sdr-v10-panel .memory-indicator {
+  color: #e7f0f3; background: none; border: 0; padding: 0 2px; line-height: 1.1; font: inherit; cursor: pointer;
+}
+#sdr-v10-panel .lcd-indicator:hover, #sdr-v10-panel .memory-indicator:hover { color: #92e3fb; }
+#sdr-v10-panel .passband {
+  width: clamp(17px,3.3cqw,31px); height: 9px; align-self: center; border: 1px solid #435360;
+  background: linear-gradient(100deg,transparent 33%,#bad6e3 34%,#bad6e3 37%,transparent 38%),
+    linear-gradient(80deg,transparent 62%,#bad6e3 63%,#bad6e3 66%,transparent 67%);
+}
+#sdr-v10-panel .rx-options { flex: 1; text-align: right; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#sdr-v10-panel .record-indicator { color: #f75d64; }
+#sdr-v10-panel .lcd-name-line { display: flex; justify-content: space-between; align-items: center; gap: 3px; min-height: 13px; font: 600 10px/1.1 ui-monospace,monospace; }
+#sdr-v10-panel .lcd-name-line > * { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#sdr-v10-panel .tune-readout { display: flex; justify-content: space-between; gap: 2px; }
+#sdr-v10-panel .frequency-readout { position: relative; flex: 1; min-width: 0; }
+#sdr-v10-panel .tune-readout .frequency-button { width: auto; min-width: 0; padding-top: 1px; }
+#sdr-v10-panel [data-nearby-listening="true"] .frequency-button { width: 100%; opacity: 0; }
+#sdr-v10-panel [data-nearby-listening="true"] .frequency-readout:has(.frequency-button:focus-visible) {
+  outline: 2px solid #7ed8f0;
+  outline-offset: 1px;
+}
+#sdr-v10-panel .lcd[data-expansion="true"] .frequency-readout .nearby-marquee { font-size: clamp(18px, 3cqw, 28px); }
+#sdr-v10-panel .frequency-button [data-step-hz] { cursor: ns-resize; }
+#sdr-v10-panel .frequency-button [data-step-hz]:hover { color: #bcecf8; }
+#sdr-v10-panel .memory-indicator { display: flex; flex-direction: column; justify-content: end; text-align: right; white-space: nowrap; }
+#sdr-v10-panel .memory-indicator span, #sdr-v10-panel .memory-indicator small { font-size: 9px; }
+#sdr-v10-panel .memory-indicator strong { font: 700 clamp(10px,2cqw,19px)/1 ui-monospace,monospace; }
+#sdr-v10-panel .rx-status { padding: 3px 3px 1px; border: 0; min-height: 15px; }
+#sdr-v10-panel .lcd-presets { display: flex; align-items: baseline; gap: 6px; padding: 2px 3px; color: #c4e6ee; font: 500 clamp(9px,1.05cqw,11px)/1.35 ui-monospace,monospace; }
+#sdr-v10-panel .lcd-presets:has([data-el="scan-presets"]:empty):has([data-el="nearby-watch"]:empty),
+#sdr-v10-panel .lcd-presets:has([data-el="scan-presets"]:empty) > strong,
+#sdr-v10-panel [data-el="nearby-watch"]:empty { display: none; }
+#sdr-v10-panel .lcd-presets span { min-width: 0; overflow-wrap: anywhere; }
+#sdr-v10-panel [data-el="nearby-watch"] { margin-inline-start: auto; white-space: nowrap; color: #b5f0ff; }
+#sdr-v10-panel .rds-text { flex: 0 0 2.4em; min-width: 0; overflow: hidden; overflow-wrap: anywhere; padding-inline: 3px; color: #b2d3e0; font: 500 clamp(8px,1.05cqw,11px)/1.2 ui-monospace,monospace; }
+#sdr-v10-panel .meter { grid-template-columns: minmax(16px,auto) minmax(0,1fr) auto auto; margin: 1px 3px 4px; }
+#sdr-v10-panel .meter-tick { white-space: nowrap; font-size: 8px; }
+#sdr-v10-panel .meter-scale { white-space: nowrap; overflow: hidden; color: #dce9f0; font: 7px/1 ui-monospace,monospace; }
+#sdr-v10-panel .meter-scale span { color: #f37975; }
+#sdr-v10-panel .meter-body { height: 6px; }
+#sdr-v10-panel .meter-body i { background: repeating-linear-gradient(to right,#55a7e3 0 2px,transparent 2px 3px); }
+#sdr-v10-panel .step-indicator { border: 1px solid #55616a; background: linear-gradient(#394854,#202b33); white-space: nowrap; }
+#sdr-v10-panel .scope-title {
+  display: grid; grid-template-columns: 1fr auto minmax(0,.75fr) 1fr; align-items: center;
+  padding: 1px 2px; gap: 3px; font: 8px/1.1 ui-monospace,monospace; color: #d5e3e9;
+  background: linear-gradient(90deg,#2b3e49,#54616b 59%,#1b2933);
+}
+#sdr-v10-panel .scope-title > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sdr-v10-panel .scope-title > :last-child { text-align: right; }
+#sdr-v10-panel .scope-title [data-el="scope-reference-mode"] { color: #b6ddfd; }
+#sdr-v10-panel .frequency-keys { grid-template-columns: repeat(4,minmax(0,1fr)); }
+#sdr-v10-panel .frequency-keys .key { height: 25px; }
+#sdr-v10-panel.thin .lcd { border: 0; }
+#sdr-v10-panel.thin .tune-readout { justify-content: start; }
+#sdr-v10-panel .lcd[data-scope="hidden"] :is(.scope-plot,.scope-title,.softkeys,.axes) { display: none; }
+#sdr-v10-panel .lcd[data-display-type="b"] { background: #102639; }
+@container (max-width: 800px) {
+  #sdr-v10-panel .favorite-bank .hardware { flex-direction: column; gap: 1px; padding: 2px 0; letter-spacing: 0; }
+  #sdr-v10-panel .favorite-bank .lamp { width: 3px; height: 3px; }
+}
+#sdr-v10-panel .lamp { opacity: var(--led-opacity,1); }
+#sdr-v10-panel .lamp.white { background: #f1f5f8; box-shadow: 0 0 4px #e5f2f8; }
+
+@container (min-width: 601px) {
+  #sdr-v10-panel:not(.thin) .lcd { min-height: 318px; }
+}
+
+@container (min-width: 1280px) {
+  #sdr-v10-panel .aux-dials .dial-unit { align-self: end; grid-template-columns: minmax(0,1fr); }
+}
+@container (min-width: 1280px) and (max-width: 1550px) {
+  #sdr-v10-panel .aux-dials .dial-unit:first-child .dial-label {
+    width: max-content;
+    max-width: calc(100% + 22px);
+  }
+  #sdr-v10-panel .aux-dials .dial-unit:nth-child(2) .dial-label {
+    margin-inline-start: 9px;
+    max-width: calc(100% - 9px);
+  }
+}
+
+@container (max-width: 360px) {
+  #sdr-v10-panel .scan-bank {
+    grid-template-columns: minmax(0,1.24fr) minmax(0,1fr) minmax(36px,1fr) minmax(0,1fr);
+    column-gap: 3px;
+  }
+}
+
+@media (max-height: 720px) {
+  @container (min-width: 661px) {
+    #sdr-v10-panel:not(.thin) .radio {
+      --left-key-height: clamp(24px, 4.6dvh, 34px);
+      --dial-bank-gap: clamp(5px, 1.4dvh, 12px);
+      --dial-diameter: clamp(44px, min(8.5cqw, 13.8dvh), 104px);
+      row-gap: 7px;
+      padding-block: 9px;
+    }
+    #sdr-v10-panel .controls-left { grid-template-rows: auto auto minmax(4px, 1fr) auto; }
+    #sdr-v10-panel .preset-bank { row-gap: 3px; }
+    #sdr-v10-panel .preset-bank .hardware {
+      min-height: clamp(20px, 3.8dvh, 26px);
+      padding-block: min(4px, .45dvh);
+    }
+    #sdr-v10-panel .main-tune .knob { max-width: min(260px, 27dvh); }
+    #sdr-v10-panel .right-bottom { row-gap: calc(var(--dial-bank-gap) - 3px); }
+    #sdr-v10-panel .volume-unit { --volume-diameter: clamp(43px, 8.5dvh, 64px); }
+  }
+}
+
+@media (max-height: 900px) {
+  @container (max-width: 660px) {
+    #sdr-v10-panel:not(.thin) .radio { --dial-bank-gap: 7px; }
+    #sdr-v10-panel .controls-left { grid-template-rows: auto auto minmax(4px, 1fr) auto; }
+    #sdr-v10-panel .preset-bank { row-gap: 3px; }
+    #sdr-v10-panel:not(.thin) .scope-plot { height: clamp(54px, 9dvh, 88px); }
+    #sdr-v10-panel .main-tune .knob { max-width: 20dvh; }
+  }
+}
+
+@media (max-height: 580px) {
+  @container (min-width: 661px) {
+    #sdr-v10-panel .main-tune .knob { max-width: 21dvh; }
+  }
+}

@@ -3,7 +3,7 @@ import { PcmBuffer } from "./pcm-buffer.js";
 class ScannerPcm extends AudioWorkletProcessor {
   constructor({ processorOptions }) {
     super();
-    this.pcm = new PcmBuffer(processorOptions.inputRate, sampleRate);
+    this.pcm = new PcmBuffer(processorOptions.inputRate, sampleRate, processorOptions.fadeSeconds);
     this.port.onmessage = ({ data }) => {
       if (data === "clear") this.pcm.reset();
       else this.pcm.enqueue(data);

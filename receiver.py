@@ -15,6 +15,7 @@ from time import monotonic
 import numpy as np
 from scipy import signal
 
+from fsk import RttyDecoder
 from rds import RdsDecoder
 from tone_search import ToneSearch
 
@@ -31,18 +32,30 @@ TUNER_LIMIT = 1_750_000_000
 PROBE_FFT = 8192
 PROBE_HALF_WIDTH = 900_000
 PROBE_STRIDE = 1_600_000
+NEARBY_MIN_EXCESS_DB = 10
 WATERFALL_BINS = 172
 WATERFALL_SPAN_HZ = 1_000_000
 WATERFALL_INTERVAL = 1 / 7
 SSB_MODES = frozenset(("USB", "LSB"))
+CW_MODES = frozenset(("CW", "CW-R"))
+FSK_MODES = frozenset(("FSK", "FSK-R"))
+SAM_MODES = frozenset(("S-AM(D)", "S-AM(U)", "S-AM(L)"))
 SSB_LOW_HZ = 300
 SSB_HIGH_HZ = 3_000
 SSB_GAIN_DECAY = np.exp(-IQ_SAMPLES / (IQ_RATE * .5))
 WATCH_HALF_WIDTH = {"AM": 7_000, "FM": 9_000, "WFM": 120_000, "USB": 3_600, "LSB": 3_600, "DMR": 8_000}
 METER_NOISE_BANDWIDTH = {"AM": 7_400, "FM": 10_600, "WFM": 200_000,
                          "USB": SSB_HIGH_HZ - SSB_LOW_HZ, "LSB": SSB_HIGH_HZ - SSB_LOW_HZ, "DMR": 15_000}
+WATCH_HALF_WIDTH.update(dict.fromkeys(CW_MODES, 900))
+WATCH_HALF_WIDTH.update(dict.fromkeys(FSK_MODES, 2_400))
+WATCH_HALF_WIDTH.update(dict.fromkeys(SAM_MODES, 7_000))
+METER_NOISE_BANDWIDTH.update(dict.fromkeys(CW_MODES, 500))
+METER_NOISE_BANDWIDTH.update(dict.fromkeys(FSK_MODES, 1_000))
+METER_NOISE_BANDWIDTH.update(dict.fromkeys(SAM_MODES, 7_400))
 METER_SPECTRUM_INTERVAL = 4
 METER_MIN_EXCESS_DB = 5
+AUTO_MIN_SNR_DB = 20
+AUTO_VOTES = 8
 NFM_DEEMPHASIS_SECONDS = 200e-6
 WFM_DEEMPHASIS_SECONDS = 50e-6
 NFM_AUDIO_MIN_SNR_DB = 16
@@ -201,6 +214,77 @@ class _IqStream:
         self._library.rtlsdr_close(self._device)
 
 
+class _NoiseReduction:
+    def __init__(self, size, depth):
+        self.previous = self.tail = np.zeros(size)
+        self.window = np.sin((np.arange(size * 2) + .5) * np.pi / (size * 2))
+        self.floor = None
+        self.depth = depth / 15
+
+    def process(self, block):
+        spectrum = np.fft.rfft(np.concatenate((self.previous, block)) * self.window)
+        power = np.abs(spectrum) ** 2
+        if self.floor is None:
+            self.floor = np.full_like(power, np.median(power))
+        else:
+            # Let quieter bins update quickly and louder bins slowly so
+            # bursts of speech don't train the noise estimate.
+            self.floor += np.where(power < self.floor, .22, .003) * (power - self.floor)
+        gain = np.clip(1 - 1.5 * self.depth * self.floor / np.maximum(power, 1e-12), .16, 1.)
+        filtered = np.fft.irfft(spectrum * gain, n=len(self.window)) * self.window
+        size = len(block)
+        output = self.tail + filtered[:size]
+        self.previous, self.tail = block, filtered[size:]
+        return output
+
+
+def _analog_mode_evidence(channel):
+    """Classify a strong narrowband channel when its IQ is conclusive."""
+    envelope = np.abs(channel)
+    amplitude = float(np.mean(envelope))
+    if amplitude < 1e-5:
+        return None
+    products = channel[1:] * np.conjugate(channel[:-1])
+    scale = CHANNEL_RATE / (2 * np.pi)
+    carrier = float(np.angle(np.sum(products)) * scale)
+    if abs(carrier) > 1200:
+        return None
+    phase_spread = float(np.std(np.angle(products) * scale))
+    depth = float(np.std(envelope)) / amplitude
+    if phase_spread >= 500 and depth < .10:
+        return "FM"
+    if phase_spread > 350 or depth < .10 or np.std(np.diff(envelope)) < .006 * amplitude:
+        return None
+    # AM retains a coherent carrier. Reject energy from fading or sideband
+    # modulation when it does not have a dominant carrier near the centre.
+    points = np.arange(channel.size)
+    coherent = channel * np.exp((-2j * np.pi * carrier / CHANNEL_RATE) * points)
+    fraction = abs(np.mean(coherent)) ** 2 / np.mean(envelope ** 2)
+    return "AM" if fraction >= .55 else None
+
+
+def _shelf(frequency, gain_db, high):
+    gain = 10 ** (gain_db / 40)
+    omega = 2 * np.pi * frequency / SAMPLE_RATE
+    cosine = np.cos(omega)
+    slope = np.sqrt(2 * gain) * np.sin(omega)
+    if high:
+        numer = [gain * ((gain + 1) + (gain - 1) * cosine + slope),
+                 -2 * gain * ((gain - 1) + (gain + 1) * cosine),
+                 gain * ((gain + 1) + (gain - 1) * cosine - slope)]
+        denom = [(gain + 1) - (gain - 1) * cosine + slope,
+                 2 * ((gain - 1) - (gain + 1) * cosine),
+                 (gain + 1) - (gain - 1) * cosine - slope]
+    else:
+        numer = [gain * ((gain + 1) - (gain - 1) * cosine + slope),
+                 2 * gain * ((gain - 1) - (gain + 1) * cosine),
+                 gain * ((gain + 1) - (gain - 1) * cosine - slope)]
+        denom = [(gain + 1) + (gain - 1) * cosine + slope,
+                 -2 * ((gain - 1) + (gain + 1) * cosine),
+                 (gain + 1) + (gain - 1) * cosine - slope]
+    return signal.tf2sos(numer, denom)
+
+
 class _ChannelDecoder:
     def __init__(self):
         self.rds = None
@@ -216,6 +300,7 @@ class _ChannelDecoder:
             "DMR": narrow_decimation,
             "WFM": signal.firwin(641, 104_000, fs=IQ_RATE, window=("kaiser", 8.0)).astype(np.float32),
         }
+        self.decimation_filters.update(dict.fromkeys(CW_MODES | FSK_MODES | SAM_MODES, narrow_decimation))
         # Move a low-pass FIR away from zero to isolate one sideband in
         # complex baseband, before taking the real component for audio.
         ssb_taps = 641
@@ -232,6 +317,16 @@ class _ChannelDecoder:
             "LSB": np.conjugate(usb),
             "WFM": np.ones(1, dtype=np.float32),  # The wide decimator already selects the station.
         }
+        self.filters.update(dict.fromkeys(SAM_MODES, self.filters["AM"]))
+        self.filters.update(dict.fromkeys(CW_MODES, self._lowpass(769, 250)))
+        self.filters.update(dict.fromkeys(FSK_MODES, self._lowpass(513, 550)))
+        self.sam_sidebands = {"S-AM(U)": self._sideband(0, 3500, 1),
+                              "S-AM(L)": self._sideband(0, 3500, -1)}
+        self.carrier_filter = signal.butter(2, 180, fs=CHANNEL_RATE, output="sos")
+        self.bandwidth_hz = None
+        self.cw_pitch = 600
+        self.agc = "mid"
+        self.settings = {}
         # Narrow FM voice usually carries boosted treble and may carry a
         # subaudible tone. Filter both after the discriminator.
         deemphasis = np.exp(-1 / (CHANNEL_RATE * NFM_DEEMPHASIS_SECONDS))
@@ -249,8 +344,74 @@ class _ChannelDecoder:
                 [1 - wide_deemphasis, 0, 0, 1, -wide_deemphasis, 0],
             )),
         }
+        self.audio_filters.update(dict.fromkeys(SAM_MODES, self.audio_filters["AM"]))
+        narrow_audio = signal.butter(3, [150, 2800], fs=CHANNEL_RATE, btype="bandpass", output="sos")
+        self.audio_filters.update(dict.fromkeys(CW_MODES | FSK_MODES, narrow_audio))
         self.sample_indexes = np.arange(IQ_SAMPLES, dtype=np.float64)
         self.reset(0, "FM")
+
+    @staticmethod
+    def _lowpass(taps, cutoff, rate=CHANNEL_RATE):
+        return signal.firwin(taps, cutoff, fs=rate, window=("kaiser", 8.0)).astype(np.float32)
+
+    @classmethod
+    def _sideband(cls, lower, upper, direction):
+        indexes = np.arange(641) - 320
+        midpoint = direction * (lower + upper) / 2
+        return (cls._lowpass(641, (upper - lower) / 2)
+                * np.exp(2j * np.pi * midpoint * indexes / CHANNEL_RATE)).astype(np.complex64)
+
+    def _filter(self, mode, rate):
+        width = self.bandwidth_hz
+        first, second = self.settings.get("pbt1", 0), self.settings.get("pbt2", 0)
+        soft = self.settings.get("if_shape") == "soft"
+        if mode == "DMR" or width is None and not (first or second or soft):
+            return self.filters[mode]
+        if mode in SSB_MODES:
+            lower = 75
+            upper = lower + min(width or 2700, 8400)
+            if mode == "LSB":
+                lower, upper = -upper, -lower
+        else:
+            width = width or METER_NOISE_BANDWIDTH[mode]
+            lower, upper = -width / 2, width / 2
+        if mode not in ("FM", "WFM"):
+            # Each PBT control shifts a complete passband; its intersection
+            # with the other passband determines the two remaining edges.
+            lower += max(first, second)
+            upper += min(first, second)
+        center = (lower + upper) / 2
+        center = float(np.clip(center, -.31 * rate, .31 * rate))
+        half = min(max(25., (upper - lower) / 2), .48 * rate - abs(center))
+        taps = 129 if soft else 769 if upper - lower < 2000 else 257
+        result = self._lowpass(taps, half, rate)
+        if center:
+            indexes = np.arange(taps) - taps // 2
+            return (result * np.exp(2j * np.pi * center * indexes / rate)).astype(np.complex64)
+        return result
+
+    def _audio_processing(self, mode):
+        settings = self.settings
+        filters = []
+        for key, band in (("tone_hpf", "highpass"), ("tone_lpf", "lowpass")):
+            if cutoff := settings.get(key, 0):
+                filters.append(signal.butter(2, cutoff, fs=SAMPLE_RATE, btype=band, output="sos"))
+        if bass := settings.get("tone_bass"):
+            filters.append(_shelf(400, bass, high=False))
+        if treble := settings.get("tone_treble"):
+            filters.append(_shelf(2400, treble, high=True))
+        if notch := settings.get("notch", 0):
+            filters.append(signal.tf2sos(*signal.iirnotch(notch, 25, fs=SAMPLE_RATE)))
+        if settings.get("audio_peak") and mode in CW_MODES:
+            filters.append(signal.tf2sos(*signal.iirpeak(self.cw_pitch, 5, fs=SAMPLE_RATE)))
+        if settings.get("fsk_tpf") and mode in FSK_MODES:
+            pitch, shift = settings.get("fsk_pitch", 1615), settings.get("fsk_shift", 170)
+            filters.append(signal.butter(3, [pitch - shift / 2 - 45, pitch + shift / 2 + 45],
+                                         fs=SAMPLE_RATE, btype="bandpass", output="sos"))
+        self.post_filter = np.concatenate(filters) if filters else None
+        self.post_history = np.zeros((len(self.post_filter), 2)) if filters else None
+        self.noise_reduction = (_NoiseReduction(IQ_SAMPLES * SAMPLE_RATE // IQ_RATE, settings.get("nr_level", 7))
+                                if settings.get("noise_reduction") and mode != "DMR" else None)
 
     def reset(self, offset_hz, mode, keep_rds=False):
         if self.rds is not None:
@@ -266,15 +427,31 @@ class _ChannelDecoder:
         self.decimation_filter = self.decimation_filters[mode]
         history_blocks = (len(self.decimation_filter) - 2) // self.channel_decimation + 1
         self.history_size = history_blocks * self.channel_decimation
+        if mode in FSK_MODES and self.settings.get("fsk_center") == "mark":
+            offset_hz -= (.5 if mode == "FSK" else -.5) * self.settings.get("fsk_shift", 170)
         self.mixer = np.exp((-2j * np.pi * offset_hz / IQ_RATE) * self.sample_indexes).astype(np.complex64)
         self.mixer_phase = 1 + 0j
         self.phase_step = np.exp((-2j * np.pi * offset_hz * IQ_SAMPLES) / IQ_RATE)
         self.iq_history = np.zeros(self.history_size, dtype=np.complex64)
-        self.channel_history = np.zeros(len(self.filters[mode]) - 1, dtype=np.complex64)
+        self.channel_filter = self._filter(mode, channel_rate)
+        self.channel_history = np.zeros(len(self.channel_filter) - 1, dtype=np.complex64)
+        self.carrier_history = np.zeros((len(self.carrier_filter), 2), dtype=np.complex128)
+        taps = self.sam_sidebands.get(mode, ())
+        self.sideband_history = np.zeros(max(0, len(taps) - 1), dtype=np.complex64)
+        self.bfo_sample = 0
         self.audio_filter = self.audio_filters.get(mode)
+        if mode == "FM" and self.settings.get("fm_deemphasis") is False:
+            self.audio_filter = self.audio_filter[:-1]
+        self._audio_processing(mode)
+        self.fsk = None
+        if mode in FSK_MODES:
+            self.fsk = RttyDecoder(channel_rate, baud=45.45 if self.settings.get("fsk_baud", 45) == 45 else 50,
+                                   reverse=mode == "FSK-R", usos=self.settings.get("fsk_usos", True),
+                                   shift=self.settings.get("fsk_shift", 170), newline=self.settings.get("fsk_newline", "any"))
         self.audio_history = np.zeros((len(self.audio_filter), 2)) if self.audio_filter is not None else None
         self.mode = mode
         self.previous_iq = 0j
+        self.narrow_iq = None
         self.am_carrier = None
         self.ssb_peak = 0.0
         self.block_offset_hz = None
@@ -282,36 +459,65 @@ class _ChannelDecoder:
     def decode(self, iq):
         translated = iq * self.mixer * np.complex64(self.mixer_phase)
         self.mixer_phase *= self.phase_step
+        if self.settings.get("noise_blanker") and self.mode not in ("FM", "WFM", "DMR"):
+            level = np.mean(np.abs(translated))
+            threshold = max(.025, level * (12 - .09 * self.settings.get("nb_level", 45)))
+            spikes = np.abs(translated) > threshold
+            if np.any(spikes):
+                mask = spikes | np.r_[False, spikes[:-1]] | np.r_[spikes[1:], False]
+                translated[mask] = 0
 
         samples = np.concatenate((self.iq_history, translated))
         filtered = signal.upfirdn(self.decimation_filter, samples, down=self.channel_decimation)
         start = self.history_size // self.channel_decimation
         channel = filtered[start:start + IQ_SAMPLES // self.channel_decimation]
+        self.narrow_iq = channel if self.mode in ("AM", "FM") else None
         self.iq_history[:] = samples[-self.history_size:]
         channel, self.channel_history = signal.lfilter(
-            self.filters[self.mode], np.array([1], dtype=np.float32), channel, zi=self.channel_history
+            self.channel_filter, np.array([1], dtype=np.float32), channel, zi=self.channel_history
         )
 
         # Exclude the head of the block when estimating signal level so the
         # channel filter's short transient cannot hide a hit after a retune.
         power = float(np.mean(np.abs(channel[self.level_start:]) ** 2))
         level = float(10 * np.log10(max(power, 1e-15)))
-        if self.mode in SSB_MODES:
-            audio = channel.real
+        if self.fsk is not None:
+            self.fsk.feed(channel)
+        if self.mode in SSB_MODES or self.mode in CW_MODES or self.mode in FSK_MODES:
+            if self.mode in SSB_MODES:
+                audio = channel.real
+            else:
+                pitch = self.cw_pitch if self.mode in CW_MODES else self.settings.get("fsk_pitch", 1615)
+                side = -1 if self.mode in ("CW-R", "FSK-R") else 1
+                indexes = np.arange(len(channel)) + self.bfo_sample
+                audio = (channel * np.exp(2j * np.pi * side * pitch * indexes / CHANNEL_RATE)).real
+                self.bfo_sample = (self.bfo_sample + len(channel)) % CHANNEL_RATE
             peak = float(np.max(np.abs(audio)))
-            self.ssb_peak = max(peak, self.ssb_peak * SSB_GAIN_DECAY)
-            # There is no carrier for the AM gain loop to follow. Track
-            # speech peaks with a slow release and cap gain during silence.
-            audio = audio * (.8 / max(self.ssb_peak, .8 / 64))
-        elif self.mode == "AM":
-            audio = np.abs(channel)
-            carrier = float(np.mean(audio[self.level_start:]))
+            decay = {"fast": .90, "mid": SSB_GAIN_DECAY, "slow": .995}.get(self.agc)
+            if decay is not None:
+                self.ssb_peak = max(peak, self.ssb_peak * decay)
+                audio = audio * (.8 / max(self.ssb_peak, .8 / 64))
+        elif self.mode == "AM" or self.mode in SAM_MODES:
+            if self.mode == "AM":
+                audio = np.abs(channel)
+            else:
+                carrier, self.carrier_history = signal.sosfilt(self.carrier_filter, channel, zi=self.carrier_history)
+                if np.mean(np.abs(carrier[self.level_start:])) < .0002:
+                    audio = np.abs(channel)
+                else:
+                    coherent = channel * np.conj(carrier) / np.maximum(np.abs(carrier), .0002)
+                    if self.mode in self.sam_sidebands:
+                        coherent, self.sideband_history = signal.lfilter(
+                            self.sam_sidebands[self.mode], [1], coherent, zi=self.sideband_history)
+                    audio = coherent.real
+            carrier = float(np.mean(np.abs(channel[self.level_start:])))
             if self.am_carrier is None:
                 self.am_carrier = carrier
-                self.audio_history = signal.sosfilt_zi(self.audio_filter) * (carrier / max(carrier, 0.005))
-            else:
-                self.am_carrier = 0.9 * self.am_carrier + 0.1 * carrier
-            audio /= max(self.am_carrier, 0.005)
+                self.audio_history = signal.sosfilt_zi(self.audio_filter) * (float(audio[-1]) / max(carrier, .005))
+            elif self.agc != "off":
+                decay = {"fast": .6, "mid": .9, "slow": .98}[self.agc]
+                self.am_carrier = decay * self.am_carrier + (1 - decay) * carrier
+            audio /= max(self.am_carrier if self.agc != "off" else 1.0, .005)
         else:
             previous = np.empty_like(channel)
             previous[0] = self.previous_iq
@@ -333,7 +539,14 @@ class _ChannelDecoder:
             self.tone_search.feed(audio)
         if self.audio_filter is not None:
             audio, self.audio_history = signal.sosfilt(self.audio_filter, audio, zi=self.audio_history)
-        pcm = (np.clip(audio[::self.audio_decimation] * 0.65, -1.0, 1.0) * 32767).astype("<i2")
+        # The fractional raw IQ block length consumes exactly 320 AF
+        # samples for both wide and narrow processing rates.
+        audio = audio[::self.audio_decimation]
+        if self.post_filter is not None:
+            audio, self.post_history = signal.sosfilt(self.post_filter, audio, zi=self.post_history)
+        if self.noise_reduction is not None:
+            audio = self.noise_reduction.process(audio)
+        pcm = (np.clip(audio * 0.65, -1.0, 1.0) * 32767).astype("<i2")
         return level, pcm.tobytes()
 
 
@@ -352,7 +565,11 @@ class Receiver:
         self._gain = None
         self._nominal_gain = None
         self._headroom_blocks = 0
+        self._gain_percent = None
         self._decoder = _ChannelDecoder()
+        self._auto_revision = None
+        self._auto_filter_history = np.zeros(len(self._decoder.filters["FM"]) - 1, dtype=np.complex64)
+        self._auto_votes = deque(maxlen=12)
         self._stream = None
         self._last_sequence = None
         self._probe_ranges = ()
@@ -389,8 +606,50 @@ class Receiver:
             raise ReceiverError("Could not read the SDR's tuner gain settings")
         self._call("set_tuner_gain_mode", 1)
         self._gains = tuple(sorted(set(values)))
-        self._nominal_gain = min(self._gains, key=lambda gain: abs(gain - TUNER_GAIN_TARGET))
+        self._select_nominal_gain()
         self._apply_gain(self._nominal_gain)
+
+    def _select_nominal_gain(self):
+        target = TUNER_GAIN_TARGET
+        if self._gain_percent is not None:
+            target = self._gains[0] + (self._gains[-1] - self._gains[0]) * self._gain_percent / 100
+        self._nominal_gain = min(self._gains, key=lambda gain: abs(gain - target))
+
+    def configure(self, settings):
+        """Apply panel changes in the same thread that owns the RTL device."""
+        rf_gain = settings.get("rf_gain")
+        if self._gain_percent != rf_gain:
+            self._gain_percent = rf_gain
+            if self._gains and not self._direct:
+                self._select_nominal_gain()
+                if self._nominal_gain != self._gain:
+                    self._apply_gain(self._nominal_gain)
+        decoder = self._decoder
+        keys = ("bandwidth_hz", "agc", "cw_pitch", "pbt1", "pbt2", "if_shape", "fsk_baud", "fsk_shift",
+                "fsk_pitch", "fsk_usos", "fsk_newline", "fsk_center", "fsk_tpf", "tone_hpf", "tone_lpf",
+                "tone_bass", "tone_treble", "fm_deemphasis", "notch", "audio_peak", "noise_reduction",
+                "nr_level", "noise_blanker", "nb_level")
+        selected = {key: settings[key] for key in keys if key in settings}
+        if selected != decoder.settings:
+            decoder.settings = selected
+            decoder.bandwidth_hz = selected.get("bandwidth_hz")
+            decoder.agc = selected.get("agc", "mid")
+            decoder.cw_pitch = selected.get("cw_pitch", 600)
+            self._prepared = None
+
+    def process_decoded_audio(self, pcm):
+        """Apply the selected AF tone controls after the digital vocoder."""
+        decoder = self._decoder
+        if decoder.post_filter is None:
+            return pcm
+        audio = np.frombuffer(pcm, "<i2").astype(np.float64)
+        audio, decoder.post_history = signal.sosfilt(decoder.post_filter, audio, zi=decoder.post_history)
+        return np.clip(audio, -32768, 32767).astype("<i2").tobytes()
+
+    @property
+    def fsk_text(self):
+        decoder = self._decoder.fsk
+        return decoder.snapshot() if decoder else None
 
     def _apply_gain(self, gain):
         self._call("set_tuner_gain", gain)
@@ -518,6 +777,7 @@ class Receiver:
         self._meter_offsets.clear()
         self._waterfall = None
         self._waterfall_at = 0.0
+        self._auto_revision = None
 
     def _stop_stream(self):
         if self._stream is not None and not self._stream.stop():
@@ -588,11 +848,32 @@ class Receiver:
             # A new stream or missing input invalidates the DSP history.
             hz, mode = self._tuning
             self._decoder.reset(hz - self._center, mode, keep_rds=True)
+            self._auto_revision = None
         self._last_sequence = sequence
         self._watch_iq = _decode_iq(raw)
         level, pcm = self._decoder.decode(self._watch_iq)
         self._measure_tuning(level)
         return level, pcm
+
+    def auto_mode_hint(self, tune_revision):
+        """Return an analogue mode only after repeated strong IQ evidence."""
+        if tune_revision != self._auto_revision:
+            self._auto_revision = tune_revision
+            self._auto_votes.clear()
+            self._auto_filter_history.fill(0)
+        if self._decoder.narrow_iq is None:
+            return None
+        # Both modes use the same analysis bandwidth, independent of the
+        # current listening filter and its user-selected settings.
+        channel, self._auto_filter_history = signal.lfilter(
+            self._decoder.filters["FM"], np.array([1], dtype=np.float32), self._decoder.narrow_iq,
+            zi=self._auto_filter_history,
+        )
+        evidence = None
+        if self._tuning_snr_db is not None and self._tuning_snr_db >= AUTO_MIN_SNR_DB:
+            evidence = _analog_mode_evidence(channel)
+        self._auto_votes.append(evidence)
+        return evidence if evidence and self._auto_votes.count(evidence) >= AUTO_VOTES else None
 
     def level_live_audio(self, pcm):
         """Raise quiet narrow-FM audio for live listening."""
@@ -756,6 +1037,57 @@ class Receiver:
         finally:
             if restore and self._tuning is not None and previous[0] is not None:
                 self._set_center(*previous, restore_gain=previous_gain)
+
+    def nearby_peak(self, center, band, lower, upper, exact, blocked, squelch, *, preserve=False):
+        """Find the strongest eligible channel, optionally preserving the listening channel."""
+        half_width = WATCH_HALF_WIDTH[band.modulation]
+        direct = center < DIRECT_LIMIT
+        previous = self._center, self._direct
+        if (self._center is not None and self._direct == direct
+                and max(abs(lower - self._center), abs(upper - self._center)) + half_width <= PROBE_HALF_WIDTH
+                and (preserve or not lower - 20_000 <= self._center <= upper + 20_000)):
+            center = self._center
+        if preserve and (center, direct) == previous and self._watch_iq is not None:
+            return self._nearby_channel(self._watch_iq, center, band, lower, upper, exact, blocked, squelch)
+
+        restore = preserve and self._tuning is not None and previous[0] is not None and (center, direct) != previous
+        previous_gain = self._gain
+        try:
+            self._set_center(center, direct)
+            _, raw = self._read_iq()
+            return self._nearby_channel(_decode_iq(raw), center, band, lower, upper, exact, blocked, squelch)
+        finally:
+            if restore:
+                self._set_center(*previous, restore_gain=previous_gain)
+            elif not preserve:
+                self._tuning = self._prepared = self._watch_iq = None
+
+    def _nearby_channel(self, iq, center, band, lower, upper, exact, blocked, squelch):
+        mode = band.modulation
+        half_width = WATCH_HALF_WIDTH[mode]
+        power = self._watch_spectrum(iq)
+        frequencies = self._probe_offsets + center
+        usable = (np.abs(self._probe_offsets) >= 20_000) & (np.abs(self._probe_offsets) <= PROBE_HALF_WIDTH)
+        floor = np.median(power[usable]) * (METER_NOISE_BANDWIDTH[mode] * PROBE_FFT / IQ_RATE)
+        threshold = max(squelch, 10 * np.log10(max(floor, 1e-15)) + NEARBY_MIN_EXCESS_DB)
+        if exact:
+            candidates = exact
+        else:
+            in_window = usable & (frequencies >= lower) & (frequencies <= upper)
+            peaks = signal.find_peaks(np.where(in_window, power, 0), distance=8)[0]
+            strongest = sorted(peaks, key=power.__getitem__, reverse=True)[:12]
+            candidates = dict.fromkeys(
+                band.nearest(round(float(frequencies[index])), band.step) for index in strongest
+            )
+        best_hz, best_level = None, threshold
+        for hz in candidates:
+            offset = abs(hz - center)
+            if hz in blocked or not lower <= hz <= upper or not 20_000 <= offset <= PROBE_HALF_WIDTH - half_width:
+                continue
+            level = self._watch_level(power, hz - center, mode)
+            if level >= best_level:
+                best_hz, best_level = hz, level
+        return best_hz
 
     def _probe_peak(self, iq, center, low, high):
         windows = iq[:3 * PROBE_FFT].reshape(3, PROBE_FFT)

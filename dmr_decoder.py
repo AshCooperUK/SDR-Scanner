@@ -136,7 +136,7 @@ def _message(row):
 class _SlotDecoder:
     """Own a DSD-neo process for one receive slot or unnumbered direct calls."""
 
-    def __init__(self, executable, slot, color_code, talkgroup):
+    def __init__(self, executable, slot=None, color_code=None, talkgroup=None, *, preset="-fs", receive_flags=()):
         self._process = None
         self._socket = None
         self._directory = None
@@ -165,9 +165,10 @@ class _SlotDecoder:
                 reservation.bind(("127.0.0.1", 0))
                 port = reservation.getsockname()[1]
 
-            command = [executable, "--no-config", "--no-decryption-keys", "-fs", "-i", "-", "-o", "-", "-s", "48000",
+            command = [executable, "--no-config", "--no-decryption-keys", preset, "-i", "-", "-o", "-", "-s", "48000",
                        "--frontend", "none", "--api", str(port), "--api-bind", "127.0.0.1",
                        "--api-token-file", str(token_file), "-V", "3" if slot == 2 else "1"]
+            command.extend(receive_flags)
             if slot is not None:
                 command.extend(("--slot-allow", str(slot)))
             if color_code is not None:
@@ -234,8 +235,12 @@ class _SlotDecoder:
                     self._calls = self._pending_calls
                     self._status = message
                     self._last_telemetry = time.monotonic()
+                    self._status_updated()
                 elif message.get("type") == "event":
                     self._read_message(message.get("row"))
+
+    def _status_updated(self):
+        """Acknowledge one coherent native call/status update."""
 
     def _read_message(self, row):
         message = _message(row)
@@ -305,10 +310,13 @@ class _SlotDecoder:
             self._read_updates()
             if time.monotonic() - self._last_telemetry > _TELEMETRY_TIMEOUT:
                 raise DmrDecoderError("DSD-neo telemetry timed out.")
-            metadata = _metadata(self._status, self._calls, self._wanted, direct_only=self._direct_only)
-            return metadata, self._decode_audio(metadata)
+            return self._read_result()
         except (OSError, ValueError) as error:
             raise DmrDecoderError("Could not read from the local DSD-neo decoder.") from error
+
+    def _read_result(self):
+        metadata = _metadata(self._status, self._calls, self._wanted, direct_only=self._direct_only)
+        return metadata, self._decode_audio(metadata)
 
     def close(self):
         if self._socket is not None:

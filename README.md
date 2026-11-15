@@ -1,12 +1,12 @@
 # SDr Scanner · Web-Based RTL-SDR Radio Scanner for Ubuntu and Debian
 
-SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can use in a web browser. Install it on an Ubuntu or Debian desktop or headless Linux server, plug in a receiver such as the **Nooelec NESDR SMArt v5**, and listen from a computer, phone or tablet. The browser panel is modelled on the Uniden UBC-355CLT and includes DAB and DAB+ digital radio, broadcast FM with RDS, AM airband, marine VHF, PMR446 and CB radio.
+SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner for Ubuntu and Debian. The current **V10.1.3** panel is inspired by the Icom IC-R8600 and includes analogue reception, digital voice, conventional DMR and DMR Tier III site following. Open it from a computer, phone or tablet.
 
-[Install on Ubuntu or Debian](#install-on-ubuntu-or-debian) · [Upgrade](#upgrade-an-existing-installation) · [Quick start](#open-the-panel-and-tune-your-first-station) · [Operating manual](#front-panel-controls) · [Stable v5.0.1 release](https://github.com/AshCooperUK/SDR-Scanner/releases/tag/v5.0.1)
+[Install on Ubuntu or Debian](#install-on-ubuntu-or-debian) · [V10 user manual](docs/V10.md) · [IC-R8600 coverage and verification](reports/SDr%20Scanner%20V10%20parity.md) · [Earlier v5.0.1 release](https://github.com/AshCooperUK/SDR-Scanner/releases/tag/v5.0.1)
 
-![SDr Scanner web radio showing a DAB station, favourite channel buttons and recording controls](docs/screenshots/scanner-dab.png)
+Open **/** for V10 and press **POWER**. The radio's **MENU** includes a link to this version's user manual. Use **/legacy** for the previous Uniden-style panel, including DAB, older presets and CHIRP.
 
-## Features
+## Legacy panel features
 
 - **Receive DAB and DAB+ digital radio.** Hold **DAB** to scan Band III, then browse the discovered station list with **UP** and **DOWN**. See station names and scrolling text, save exact stations, and resume the last station after switching modes or restarting.
 - **Receive conventional DMR voice and text.** Use the colour display for call metadata and incoming SMS. Save filtered DMR channels, log calls and replay clear audio.
@@ -22,7 +22,7 @@ SDr Scanner turns a USB RTL-SDR dongle into a receive-only radio scanner you can
 
 - [Install on Ubuntu or Debian](#install-on-ubuntu-or-debian)
 - [Upgrade an existing installation](#upgrade-an-existing-installation)
-- [Open the panel and tune your first station](#open-the-panel-and-tune-your-first-station)
+- [Open the legacy panel and tune your first station](#open-the-legacy-panel-and-tune-your-first-station)
 - [Front-panel controls](#front-panel-controls)
 - [Scan zones, search and lockouts](#scan-zones-search-and-lockouts)
 - [Favourites and programming](#favourites-and-programming)
@@ -72,7 +72,7 @@ You can choose explicitly with `bash install.sh --headless` or `bash install.sh 
 
 On the scanner host, open [the local panel](http://127.0.0.1:8766/) or choose **SDR Scanner** from the applications menu. On another device on your LAN, open the scanner host’s local name or IPv4 address on port **8766**, for example `http://192.168.1.20:8766/`. Run `hostname -I` on the host if you need its address. Direct LAN access needs no PIN. [Private network and remote access](#access-from-another-computer)
 
-If prompted to refresh the USB permissions, reconnect the receiver and follow the installer's sign-in or reboot instructions. Then click **VOLUME** on the panel to start listening.
+If prompted to refresh the USB permissions, reconnect the receiver and follow the installer's sign-in or reboot instructions. Press **POWER** on the V10 panel and choose your receive mode. [V10 quick start](docs/V10.md)
 
 ## Upgrade an existing installation
 
@@ -89,12 +89,12 @@ git pull --ff-only origin main
 bash install.sh
 ```
 
-If your checkout is on an older release tag, run `git fetch origin main`, then `git switch --detach FETCH_HEAD` before running `bash install.sh`. Refresh your browser once the service starts. After upgrading from v5.0, hold **DAB** once to refresh the discovered station list. For the earlier release, see the [v5.0.1 install instructions](https://github.com/AshCooperUK/SDR-Scanner/blob/v5.0.1/README.md#install-on-ubuntu-or-debian).
+If your checkout is on an older release tag, run `git fetch origin main`, then `git switch --detach FETCH_HEAD` before running `bash install.sh`. Refresh your browser once the service starts. For the previous panel’s DAB station list, open **/legacy** and hold **DAB** once to refresh discovery. For the earlier release, see the [v5.0.1 install instructions](https://github.com/AshCooperUK/SDR-Scanner/blob/v5.0.1/README.md#install-on-ubuntu-or-debian).
 
-## Open the panel and tune your first station
+## Open the legacy panel and tune your first station
 
 1. Connect an antenna and plug the receiver into USB. Reconnect the dongle if it was plugged in when you installed `rtl-sdr`. Close any other SDR app using it.
-2. Open [the panel](http://127.0.0.1:8766/) locally or follow [the remote access instructions](#access-from-another-computer). The app starts in clock standby.
+2. Open [the legacy panel](http://127.0.0.1:8766/legacy) locally or add `/legacy` to your [scanner's address](#access-from-another-computer). The legacy panel starts in clock standby.
 3. Click **VOLUME** to power on and claim a receiver. A receiver starting from standby opens the first saved favourite in **HOLD**. Use **UP** and **DOWN** to browse saved analogue and DAB favourites. Adjust the volume and turn **SQUELCH** down until you can hear the signal. Turning **VOLUME** to zero returns this tab to clock standby and releases its assignment.
 4. Click or hover over the LCD, type a local broadcast FM frequency in MHz such as `98.4`, and press **Enter**. The app tunes it in wide FM and enters **HOLD**. Turn on **RDS** to see the station details when available.
 5. To stop **SCAN** or **SEARCH** on the current frequency, press **HOLD**. To resume, press **HOLD** again or use **SCAN** or **SEARCH** to select that operation.
@@ -410,7 +410,7 @@ From the repo, `/usr/bin/python3 launcher.py open` starts the service if needed 
 
 For a foreground session, stop the service, run `/usr/bin/python3 app.py` from the checkout, and open [the local panel](http://127.0.0.1:8766/). **Ctrl+C** ends the foreground session.
 
-The default state file is `.scanner-state.json` in the checkout. It saves memories, names, permanent lockouts, clock and band settings, RDS, DAB discovery and the recording destination. Additional independent receivers save their settings under `.scanner-radios/`. Back up those paths, `.scanner-state.dmr.json` for DMR favourites, `.scanner-state.access.json` for remote access settings, and any recording folders you selected. Keep the access backup private. Stop the service before restoring state files. If you move to a new checkout, run the installer there and update any private-network drop-in paths before restarting. Each new browser session starts in clock standby.
+The checkout stores V10 memories and settings in `.scanner-state.v10.json`. The legacy panel uses `.scanner-state.json` and `.scanner-state.dmr.json` for its settings, including DAB discovery and DMR favourites. Additional independent receivers save their settings under `.scanner-radios/`. Back up those paths, `.scanner-state.access.json` for remote access settings, and any recording folders you selected. Keep the access backup private. Stop the service before restoring state files. If you move to a new checkout, run the installer there and update any private-network drop-in paths before restarting.
 
 ## Access from another computer
 
@@ -453,7 +453,9 @@ Restart the service, then open the numeric address and port in the browser. Clie
 
 ### Set the remote PIN
 
-On the scanner host or through an [SSH tunnel](#use-an-ssh-tunnel), open [the local panel](http://127.0.0.1:8766/) and turn **VOLUME** off to show the standby clock. Double-tap **PROG**, enter six digits and press **PROG**. Enter the same digits again and press **PROG** to save. Use **F01–F09** for 1–9 and **F10** for 0, or use the mobile keypad. **L/O** deletes a digit and **HOLD** cancels setup.
+In V10, use **MENU → SET → PIN** from the local panel. See the manual for the one-time setup code when programming the PIN from a LAN browser. [V10 remote PIN setup](docs/V10.md#set-a-remote-pin)
+
+On the scanner host or through an [SSH tunnel](#use-an-ssh-tunnel), open [the legacy panel](http://127.0.0.1:8766/legacy) and turn **VOLUME** off to show the standby clock. Double-tap **PROG**, enter six digits and press **PROG**. Enter the same digits again and press **PROG** to save. Use **F01–F09** for 1–9 and **F10** for 0, or use the mobile keypad. **L/O** deletes a digit and **HOLD** cancels setup.
 
 You can also set the PIN in CHIRP under [Remote Access](#program-with-chirp). When a remote connection shows `PIN`, enter the digits and press **PROG** or **Return**, then turn on **VOLUME**. Until the PIN is set on the scanner host, remote clients that need it stay locked. Unlocking is per tab and survives a refresh. Changing the PIN or remote URL, or restarting the service, clears remote unlocks.
 
@@ -465,17 +467,17 @@ A proxy running on the scanner host can reach `http://127.0.0.1:8766`. For a pro
 
 ## Share the scanner with multiple listeners
 
-A new browser tab opens at the standby clock. Click **VOLUME** to request a free RTL-SDR. When all receivers are assigned, additional powered-on tabs share the main radio and its tuning.
+A new browser tab opens in standby. Press **POWER** in V10 or click **VOLUME** in the legacy panel to request a free RTL-SDR. When all receivers are assigned, additional powered-on tabs share the main radio and its tuning.
 
-Refreshing the same tab keeps its power, receiver assignment and tuning while its session is still active. The session can also reconnect after a brief network interruption. After the service restarts or the session expires, click **VOLUME** to power on again. Some browsers require a tap before resuming audio after a refresh.
+Refreshing the same tab keeps its power, receiver assignment and tuning while its session is still active. The session can also reconnect after a brief network interruption. Some browsers require a tap before resuming audio after a refresh.
 
-On a shared receiver, changing station, band, squelch or scan mode affects the other listeners using that tuner. **MUTE** acts on the current browser. Turn **VOLUME** to zero to release your assignment. Your tab stays at the clock while other tabs keep listening. When the last listener turns off a radio, the receiver returns to standby and becomes available. The server checks for newly connected and freed receivers automatically. An independent radio has its own saved favourites and recording settings. **WATCH** can use a spare until a listener needs it.
+On a shared receiver, changing station, band, squelch or scan mode affects the other listeners using that tuner. Mute acts on the current browser. To release your assignment, hold **POWER** in V10 or turn **VOLUME** to zero in the legacy panel. When the last listener turns off a radio, the receiver returns to standby and becomes available. The server checks for newly connected and freed receivers automatically. An independent radio has its own saved favourites and recording settings.
 
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
-| Clock on the LCD | Click **VOLUME** to leave standby. |
+| Clock on the LCD | Press **POWER** in V10 or click **VOLUME** in the legacy panel to leave standby. |
 | Panel fails to load | Check the service status and journal. On a remote computer, verify the SSH tunnel or private IP and port. |
 | `systemctl --user` cannot connect | Install `dbus-user-session` and `libpam-systemd`, then start a fresh login session. Check that the host boots with systemd. |
 | `Err` when tuning | Confirm the SDR is plugged into the Linux host. Put the panel in standby before running the USB test below. Close other apps using the same dongle. |

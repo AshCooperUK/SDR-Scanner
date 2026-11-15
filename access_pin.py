@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 PIN_PATTERN = re.compile(r"[0-9]{6}")
 SESSION_PATTERN = re.compile(r"[0-9a-f]{32}")
 CAPABILITY_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
+PIN_SETUP_PATTERN = re.compile(r"[0-9a-f]{32}")
 REMOTE_URL_LIMIT = 270
 HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 REMOTE_AUTHORITY = re.compile(rf"(\[[0-9a-f:.]+\]|{HOST_LABEL}(?:\.{HOST_LABEL})*\.?)(?::([1-9][0-9]{{0,4}}))?")
@@ -28,6 +29,7 @@ PIN_FILE_LIMIT = 1024
 PIN_ITERATIONS = 600_000
 SALT_BYTES = 32
 ACCESS_SECONDS = 8 * 60 * 60
+PIN_SETUP_SECONDS = 5 * 60
 MAX_GRANTS = 256
 ATTEMPT_WINDOW = 300
 SOURCE_ATTEMPTS = 5
@@ -85,6 +87,7 @@ class AccessPin:
         self._lock = threading.RLock()
         self._attempts = deque()
         self._grants = {}
+        self._setup_grant = None
 
     @property
     def configured(self):
@@ -169,6 +172,7 @@ class AccessPin:
         self._revision = secrets.token_hex(16)
         self._attempts.clear()
         self._grants.clear()
+        self._setup_grant = None
 
     @contextmanager
     def program(self, changes, revision):
@@ -194,6 +198,24 @@ class AccessPin:
         credential = self._make_credential(pin)
         with self._lock, self._stage(credential, self._remote_url) as temporary:
             self._commit(temporary, credential, self._remote_url)
+
+    def issue_setup_code(self):
+        """Replace the current owner-issued PIN setup grant."""
+        code = secrets.token_hex(16)
+        with self._lock:
+            self._setup_grant = hashlib.sha256(code.encode("ascii")).digest(), time.monotonic() + PIN_SETUP_SECONDS
+        return code
+
+    def set_pin_with_setup_code(self, pin, code):
+        if not _matches(PIN_SETUP_PATTERN, code):
+            return False
+        digest = hashlib.sha256(code.encode("ascii")).digest()
+        with self._lock:
+            grant = self._setup_grant
+            if grant is None or grant[1] <= time.monotonic() or not hmac.compare_digest(grant[0], digest):
+                return False
+            self.set_pin(pin)
+            return True
 
     def _retry_after(self, source, now):
         while self._attempts and now - self._attempts[0][0] >= ATTEMPT_WINDOW:

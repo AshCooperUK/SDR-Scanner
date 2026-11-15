@@ -9,3 +9,6 @@ __pycache__/
 /recordings/
 /releases/
 /research_notes/
+
+/.scanner-state.v10.json
+/.scanner-state.v10.json.*

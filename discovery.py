@@ -3,6 +3,7 @@
 from collections import deque
 from dataclasses import dataclass
 from io import BytesIO
+from math import isfinite
 from time import time_ns
 import wave
 
@@ -13,6 +14,13 @@ DISCOVERY_URL = "/api/discovery"
 REPLAY_SECONDS = 30
 MAX_HITS = 100
 SAMPLE_BYTES = 2
+DIGITAL_FIELDS = ("receive_kind", "receive_code", "talkgroup", "unit_id", "source", "destination", "encrypted")
+
+
+def _digital_call_changed(previous, current):
+    if previous is None or current is None:
+        return previous is not current
+    return any(previous[key] != current[key] for key in previous.keys() & current.keys())
 
 
 @dataclass
@@ -30,6 +38,10 @@ class DiscoveryHit:
     station_name: str | None
     dmr: dict | None = None
     sms_target_id: int | None = None
+    digital: dict | None = None
+    snr_db: float | None = None
+    offset_hz: float | None = None
+    mode_detected: bool = False
 
 
 class Discovery:
@@ -43,7 +55,16 @@ class Discovery:
         self._hits = deque(maxlen=MAX_HITS)
         self._next_id = 1
         self._active = None
-        self.enabled = self.started = False
+        self._panel = "legacy"
+        self._logging = {"legacy": None, "v10": True}
+
+    @property
+    def enabled(self):
+        return self._logging[self._panel] is True
+
+    @property
+    def started(self):
+        return self._logging[self._panel] is not None
 
     @property
     def replay_available(self):
@@ -62,15 +83,20 @@ class Discovery:
     def control(self, command):
         if command == "open" and self.started:
             return
-        self.enabled = not self.enabled if command == "toggle" else True
-        self.started = True
+        self._logging[self._panel] = not self.enabled if command == "toggle" else True
         self.boundary()
+
+    def select_panel(self, panel):
+        if self._panel != panel:
+            self._panel = panel
+            self.boundary()
 
     def boundary(self):
         self._active = None
 
     def receive(self, pcm, *, channel=None, revision=0, signal_dbfs=None, tone=None,
-                dab_sid=None, station_name=None, dmr=None):
+                dab_sid=None, station_name=None, dmr=None, digital=None, snr_db=None, offset_hz=None,
+                mode_detected=False):
         if not pcm:
             self.boundary()
             return
@@ -92,19 +118,30 @@ class Discovery:
         if dmr is not None:
             dmr = {key: dmr.get(key) for key in ("color_code", "slot", "talkgroup", "unit_id")}
         active = self._active
+        if digital is not None:
+            digital = {key: digital[key] for key in DIGITAL_FIELDS if digital.get(key) is not None}
         if (active is None or (active.hz, active.mode) != channel
-                or active.revision != revision or active.dab_sid != dab_sid or active.dmr != dmr):
+                or active.revision != revision or active.dab_sid != dab_sid or active.dmr != dmr
+                or _digital_call_changed(active.digital, digital)):
             active = DiscoveryHit(self._next_id, time_ns() // 1_000_000, *channel, revision,
-                                  start, self._end, signal_dbfs, tone, dab_sid, station_name, dmr)
+                                  start, self._end, None, None, dab_sid, None, dmr, digital=digital)
             self._next_id += 1
             self._hits.appendleft(active)
             self._active = active
-        else:
-            active.end = self._end
-            if tone is not None:
-                active.tone = tone
-            if signal_dbfs is not None:
-                active.signal_dbfs = signal_dbfs if active.signal_dbfs is None else max(active.signal_dbfs, signal_dbfs)
+        active.end = self._end
+        active.mode_detected = active.mode_detected or mode_detected
+        if digital is not None:
+            active.digital = active.digital | digital
+        if tone is not None:
+            active.tone = tone
+        if station_name:
+            active.station_name = station_name
+        if signal_dbfs is not None and isfinite(signal_dbfs):
+            active.signal_dbfs = signal_dbfs if active.signal_dbfs is None else max(active.signal_dbfs, signal_dbfs)
+        if snr_db is not None and isfinite(snr_db):
+            active.snr_db = snr_db if active.snr_db is None else max(active.snr_db, snr_db)
+        if offset_hz is not None and isfinite(offset_hz):
+            active.offset_hz = offset_hz
 
     def receive_sms(self, message, *, revision=0, signal_dbfs=None):
         if not self.enabled:
@@ -114,6 +151,7 @@ class Discovery:
         self._hits.appendleft(DiscoveryHit(
             self._next_id, message["time_ms"], message["hz"], "DMR", revision,
             self._end, self._end, signal_dbfs, None, None, None, dmr, message["target_id"],
+            mode_detected=True,
         ))
         self._next_id += 1
 
@@ -128,9 +166,14 @@ class Discovery:
                 "time_ms": hit.time_ms,
                 "hz": hit.hz,
                 "mode": hit.mode,
+                "mode_detected": hit.mode_detected,
                 "tone": hit.tone,
                 "dmr": hit.dmr,
+                "digital": hit.digital,
+                "station_name": hit.station_name,
                 "signal_dbfs": hit.signal_dbfs,
+                "snr_db": hit.snr_db,
+                "offset_hz": hit.offset_hz,
                 "duration_ms": round((hit.end - hit.start) * 1000 / bytes_per_second),
                 "playable": hit.sms_target_id is None and hit.end > self._start,
                 "recordable": hit.sms_target_id is None

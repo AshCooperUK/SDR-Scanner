@@ -225,11 +225,12 @@ while not panel_ready():
 PY
 )
 
-printf '\nSDr Scanner is ready with DAB and DMR.\n'
+printf '\nSDr Scanner is ready with analogue and digital reception.\n'
 printf 'On this computer: http://127.0.0.1:8766/\n'
 while read -r address; do
     printf 'On your network: http://%s:8766/\n' "$address"
 done < <(ip -o -4 addr show up scope global |
     awk '$2 !~ /^(docker[0-9]*|br-[[:xdigit:]]+)$/ {split($4, address, "/"); print address[1]}')
-printf '%s\n' 'Plug in or reconnect the SDR, open the panel and click VOLUME to power it on.' \
-    'LAN connections use the local IP. Remote connections require the PIN set on the radio or in CHIRP.'
+printf '%s\n' 'Plug in or reconnect the SDR, open the panel and press POWER.' \
+    'Open /legacy for DAB and CHIRP programming.' \
+    'LAN connections use the local IP. Set the remote PIN in MENU > SET > PIN or in CHIRP.'

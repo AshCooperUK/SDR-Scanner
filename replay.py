@@ -8,7 +8,7 @@ from contextlib import ExitStack
 from urllib.parse import quote, unquote
 
 from recording import (
-    CLIP_NAME, DAB_CLIP_NAME, DIRECTORY_FLAGS, FLAT_CLIP_NAME, FREQUENCY_NAME,
+    CLIP_NAME, DAB_CLIP_NAME, DIRECTORY_FLAGS, FLAT_CLIP_NAME, FREQUENCY_NAME, V10_CLIP_NAME,
     _frequency_folder, _open_directory, _station_folder,
 )
 from scanner import MANUAL_MAX_HZ, MANUAL_MIN_HZ
@@ -36,9 +36,15 @@ def _clip_pattern(folder):
     return None
 
 
-def _flat_clip(name):
+def _flat_clip(name, *, v10_only=False):
+    match = V10_CLIP_NAME.fullmatch(name)
+    if match is not None:
+        prefix = match["frequency"] + "mhz"
+        return (prefix, match["stamp"]) if _valid_frequency(prefix) else None
+    if v10_only:
+        return None
     match = FLAT_CLIP_NAME.fullmatch(name)
-    return match if match and _clip_pattern(match["prefix"]) is not None else None
+    return (match["prefix"], match["stamp"]) if match and _clip_pattern(match["prefix"]) is not None else None
 
 
 def _finalized(info):
@@ -50,12 +56,20 @@ def _fingerprint(info):
     return hashlib.sha256(identity.encode("ascii")).hexdigest()[:24]
 
 
-def _list_clips(directory):
+def _recording_roots(root, older_roots):
+    roots = tuple(dict.fromkeys((root, *older_roots)))
+    for index, candidate in enumerate(roots):
+        # Keep old layouts inside their dedicated folder when the exact V10
+        # destination is a separate directory selected by the user.
+        yield candidate, index == 0 and len(roots) > 1
+
+
+def _list_clips(directory, *, v10_only):
     with os.scandir(directory) as entries:
         for entry in entries:
-            if _flat_clip(entry.name):
+            if _flat_clip(entry.name, v10_only=v10_only):
                 yield "", entry
-            if not entry.is_dir(follow_symlinks=False):
+            if v10_only or not entry.is_dir(follow_symlinks=False):
                 continue
             pattern = _clip_pattern(entry.name)
             if pattern is None:
@@ -73,25 +87,30 @@ def _list_clips(directory):
                 os.close(folder)
 
 
-def latest_clip(root):
+def latest_clip(root, *older_roots):
     """Find the most recently finalized clip without following directory links."""
-    try:
-        directory = _open_directory(root)
-    except FileNotFoundError:
-        return None
     newest = None
-    try:
-        for folder, clip in _list_clips(directory):
-            try:
-                info = clip.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            if _finalized(info):
-                candidate = (info.st_mtime_ns, info.st_ctime_ns, folder, clip.name)
-                if newest is None or candidate > newest[0]:
-                    newest = candidate, _fingerprint(info)
-    finally:
-        os.close(directory)
+    for candidate_root, v10_only in _recording_roots(root, older_roots):
+        try:
+            directory = _open_directory(candidate_root)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            if candidate_root == root:
+                raise
+            continue
+        try:
+            for folder, clip in _list_clips(directory, v10_only=v10_only):
+                try:
+                    info = clip.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if _finalized(info):
+                    candidate = (info.st_mtime_ns, info.st_ctime_ns, folder, clip.name)
+                    if newest is None or candidate > newest[0]:
+                        newest = candidate, _fingerprint(info)
+        finally:
+            os.close(directory)
     if newest is None:
         return None
     (_, _, folder, name), fingerprint = newest
@@ -99,14 +118,13 @@ def latest_clip(root):
         prefix, stamp = folder, name
         route = f"{quote(folder, safe='')}/{name}"
     else:
-        match = FLAT_CLIP_NAME.fullmatch(name)
-        prefix, stamp = match["prefix"], match["stamp"]
+        prefix, stamp = _flat_clip(name)
         route = quote(name, safe="")
     label = f"{prefix.removesuffix('mhz')} MHz" if _valid_frequency(prefix) else prefix
     return {"url": f"{RECORDINGS_URL}{route}/{fingerprint}", "label": f"{label} · {stamp}"}
 
 
-def open_clip(root, route):
+def open_clip(root, route, *older_roots):
     """Open the exact file selected for replay. The caller owns the stream."""
     parts = route.split("/")
     if len(parts) not in (2, 3) or CLIP_ID.fullmatch(parts[-1]) is None:
@@ -126,6 +144,18 @@ def open_clip(root, route):
         pattern = _clip_pattern(folder_name)
         if pattern is None or not pattern.fullmatch(name):
             raise FileNotFoundError
+    last_error = FileNotFoundError()
+    for candidate_root, v10_only in _recording_roots(root, older_roots):
+        if v10_only and (folder_name is not None or _flat_clip(name, v10_only=True) is None):
+            continue
+        try:
+            return _open_selected_clip(candidate_root, folder_name, name, fingerprint)
+        except OSError as error:
+            last_error = error
+    raise last_error
+
+
+def _open_selected_clip(root, folder_name, name, fingerprint):
     with ExitStack() as stack:
         directory = _open_directory(root)
         stack.callback(os.close, directory)

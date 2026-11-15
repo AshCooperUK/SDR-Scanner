@@ -210,6 +210,8 @@ class Scanner:
         self.dab_program_source = None
         self.tone = {"id": 0, "count": 0, "kind": "key"}
         self._build_factory()
+        self.v10_tone = None
+        self.v10_monitor = False
 
     @property
     def power(self):
@@ -256,6 +258,10 @@ class Scanner:
 
     @property
     def tone_filter(self):
+        if self.v10_monitor:
+            return None
+        if self.v10_tone is not None:
+            return self.v10_tone
         channel = self.tuned
         if (channel and channel.bank == "FAV" and channel.modulation == "FM"
                 and channel == self.memories["FAV"][channel.slot]):
@@ -1029,6 +1035,12 @@ class Scanner:
             return "AM"
         band = next((band for band in self.bands if band.lower <= hz <= band.upper), None)
         return band.modulation if band else "FM"
+
+    def receive_frequency(self, hz, mode, *, tone=None):
+        """Select an explicit receive mode independent of the factory band plan."""
+        self.close_mode = "off"
+        self.v10_tone = tone if mode == "FM" else None
+        self._hold_frequency(hz, mode)
 
     def _hold_frequency(self, hz, modulation):
         self._hold_channel(Channel(hz, modulation))
@@ -1822,7 +1834,7 @@ class Scanner:
                                   in zip(self.close_groups, CLOSE_GROUPS) if enabled]
 
     def _measure(self, level, now, detected_tone):
-        self.signal_open = self.squelch == 0 or level >= self.squelch_db
+        self.signal_open = self.v10_monitor or self.squelch == 0 or level >= self.squelch_db
         self.audio_open = self.signal_open
         tone_filter = self.tone_filter
         if tone_filter and self.signal_open:

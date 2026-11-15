@@ -347,6 +347,17 @@ CB_CEPT = (
 )
 CB_UK = tuple(range(27_601_250, 27_991_251, 10_000))
 
+# Ofcom IR 2027.2 adds sideband on the CEPT frequencies. IR 2030 and
+# ETSI TS 102 490 define the digital PMR446 channel spacing.
+V10_PRESETS = {
+    "CB": tuple(Channel(hz, mode, "CB", preset_number=number)
+                for mode in SIDEBANDS for number, hz in enumerate(CB_CEPT, 1)),
+    "PMR": (tuple(Channel(hz, "DMR", "PMR", preset_number=number)
+                  for number, hz in enumerate(PMR, 1))
+            + tuple(Channel(hz, "dPMR", "PMR", preset_number=number)
+                    for number, hz in enumerate(range(446_003_125, 446_196_876, 6_250), 1))),
+}
+
 # Appendix 18 voice channels from Ofcom's Ship Radio Licences guidance.
 # List coast first on duplex channels, then add the ship side.
 _MARINE_SIMPLEX = {6, *range(8, 18), *range(67, 78), 87, 88}

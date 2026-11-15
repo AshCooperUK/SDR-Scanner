@@ -29,6 +29,10 @@ DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 CLIP_NAME = re.compile(r"[0-9]{6}-[0-9]{8}(?:-[0-9]+)?\.mp3")
 DAB_CLIP_NAME = re.compile(r"[0-9]{6}-[0-9]{6}(?:-[0-9]+)?\.mp3")
 FLAT_CLIP_NAME = re.compile(r"(?P<prefix>.+)-(?P<stamp>[0-9]{6}-[0-9]{8}(?:-[0-9]+)?\.mp3)")
+V10_CLIP_NAME = re.compile(
+    r"(?P<stamp>(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] - [0-9]{8})"
+    r" - (?P<frequency>[0-9]{1,4}\.[0-9]{4,6})(?:-[0-9]+)?\.mp3"
+)
 FREQUENCY_NAME = re.compile(r"([0-9]{1,4})\.([0-9]{4,6})mhz")
 STATION_NAME_BYTES = 120
 STATION_FORBIDDEN = frozenset('/\\<>:"|?*')
@@ -254,6 +258,7 @@ class _PendingClip:
     path: Path
     skip_tone_only: bool
     identity: bytes
+    v10: bool
     pcm: bytearray = field(default_factory=bytearray)
 
 
@@ -269,6 +274,7 @@ class _Clip:
     cleanup: ExitStack
     tone_analysis: ToneOnlyClip | None
     identity: bytes
+    v10: bool
 
 
 class Recorder:
@@ -286,6 +292,9 @@ class Recorder:
     @property
     def root(self):
         return _recordings_root(self._parent)
+
+    def destination(self, *, v10=False):
+        return self._parent if v10 else self.root
 
     @property
     def active_hz(self):
@@ -305,12 +314,13 @@ class Recorder:
     def check_available():
         _lame()
 
-    def set_parent(self, parent):
+    def set_parent(self, parent, *, v10=False):
         parent = _recording_parent(parent)
         try:
             os.close(_open_directory(parent))
-            with suppress(FileNotFoundError):
-                os.close(_open_directory(_recordings_root(parent)))
+            if not v10:
+                with suppress(FileNotFoundError):
+                    os.close(_open_directory(_recordings_root(parent)))
         except OSError as exc:
             raise RecordingError(f"Could not open the recording folder ({exc.strerror}).") from exc
         if parent != self._parent:
@@ -336,15 +346,24 @@ class Recorder:
             stream.write(_recording_tag(pending.identity))
             analysis = ToneOnlyClip(SAMPLE_RATE) if pending.skip_tone_only else None
             return _Clip(pending.hz, pending.prefix, pending.path, directory, partial, stream,
-                         encoder, cleanup.pop_all(), analysis, pending.identity)
+                         encoder, cleanup.pop_all(), analysis, pending.identity, pending.v10)
 
-    def feed(self, hz, pcm, *, skip_tone_only=False, station_name=None, dab_sid=None):
+    def _pending_clip(self, hz, prefix, when, skip_tone_only, identity, *, v10):
+        if v10:
+            stamp = when.strftime("%H:%M:%S - %d%m%Y")
+            filename = f"{stamp} - {prefix.removesuffix('mhz')}.mp3"
+        else:
+            stamp = when.strftime("%H%M%S-%d%m%Y")
+            filename = f"{prefix}-{stamp}.mp3"
+        return _PendingClip(hz, prefix, self.destination(v10=v10) / filename, skip_tone_only, identity, v10)
+
+    def feed(self, hz, pcm, *, skip_tone_only=False, station_name=None, dab_sid=None, v10=False):
         if not pcm:
             return
         if len(pcm) % 2:
             raise RecordingError("Received an incomplete audio sample.")
         frequency = _frequency_folder(hz)
-        prefix = _station_folder(station_name) or frequency
+        prefix = frequency if v10 else _station_folder(station_name) or frequency
         identity = _recording_identity(hz, dab_sid)
         active = self._active_clip
         active_tone_filter = None
@@ -352,15 +371,13 @@ class Recorder:
             active_tone_filter = self._clip.tone_analysis is not None
         elif self._pending:
             active_tone_filter = self._pending.skip_tone_only
-        if active and (active.hz != hz or active.prefix != prefix or active.identity != identity
+        if active and (active.hz != hz or active.prefix != prefix or active.identity != identity or active.v10 != v10
                        or active_tone_filter != skip_tone_only):
             self.finish()
         try:
             if self._clip is None:
                 if self._pending is None:
-                    timestamp = datetime.now().strftime("%H%M%S-%d%m%Y")
-                    path = self.root / f"{prefix}-{timestamp}.mp3"
-                    self._pending = _PendingClip(hz, prefix, path, skip_tone_only, identity)
+                    self._pending = self._pending_clip(hz, prefix, datetime.now(), skip_tone_only, identity, v10=v10)
                 pending = self._pending
                 if len(pending.pcm) + len(pcm) < MIN_CLIP_PCM_BYTES:
                     pending.pcm.extend(pcm)
@@ -392,12 +409,12 @@ class Recorder:
         except OSError as exc:
             raise RecordingError(f"Could not save the MP3 clip ({exc.strerror}).") from exc
 
-    def save_received(self, hz, time_ms, chunks, *, station_name=None, dab_sid=None):
+    def save_received(self, hz, time_ms, chunks, *, station_name=None, dab_sid=None, v10=False):
         """Write buffered audio without altering an in-progress recording."""
-        prefix = _station_folder(station_name) or _frequency_folder(hz)
-        stamp = datetime.fromtimestamp(time_ms / 1000).strftime("%H%M%S-%d%m%Y")
-        path = self.root / f"{prefix}-{stamp}.mp3"
-        pending = _PendingClip(hz, prefix, path, False, _recording_identity(hz, dab_sid))
+        frequency = _frequency_folder(hz)
+        prefix = frequency if v10 else _station_folder(station_name) or frequency
+        pending = self._pending_clip(hz, prefix, datetime.fromtimestamp(time_ms / 1000), False,
+                                     _recording_identity(hz, dab_sid), v10=v10)
         try:
             clip = self._start(pending)
             with clip.cleanup:
@@ -407,10 +424,10 @@ class Recorder:
         except OSError as exc:
             raise RecordingError(f"Could not save the MP3 clip ({exc.strerror}).") from exc
 
-    def has_saved_hit(self, filename, hz, *, dab_sid=None):
+    def has_saved_hit(self, filename, hz, *, dab_sid=None, v10=False):
         try:
             with ExitStack() as cleanup:
-                directory = _open_directory(self.root)
+                directory = _open_directory(self.destination(v10=v10))
                 cleanup.callback(os.close, directory)
                 return _has_identity(directory, filename, _recording_identity(hz, dab_sid))
         except OSError as exc:

@@ -112,6 +112,15 @@ class RadioPool:
                         lease.seen = now
             return self._assignment(token)
 
+    def lcd_display(self):
+        """Follow the lowest-index active V10 tuner without taking a lease."""
+        with self._lock:
+            radios = [self._radios[index] for index in sorted(self._radios)]
+        for runtime in radios:
+            if display := runtime.lcd_display(active_only=True):
+                return display
+        return self.primary.lcd_display()
+
     def parked_backlight(self, token):
         with self._lock:
             lease = self._leases.get(token)
@@ -298,6 +307,9 @@ class RadioPool:
     def _continue_listening(source, destination, volume):
         state = source.state()
         if not state["power"]:
+            return
+        if state.get("v10", {}).get("active"):
+            destination.resume_v10(state, volume)
             return
         if state.get("dmr_enabled"):
             destination.resume_dmr(state.get("tune_hz"), volume)
