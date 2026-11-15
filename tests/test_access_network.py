@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from access_network import LocalNetworks
 from access_pin import AccessPin, PIN_SETUP_PATTERN, PIN_SETUP_SECONDS
-from app import PanelHandler, ScannerRuntime
+from app import PanelHandler, ScannerRuntime, valid_action
 from radio_pool import RadioPool
 from receiver import WATERFALL_BINS
 
@@ -220,6 +220,78 @@ class AccessPolicyTests(unittest.TestCase):
             now.return_value += PIN_SETUP_SECONDS
             self.assertFalse(pin.set_pin_with_setup_code("123456", code))
             self.assertFalse(pin.configured)
+
+    def test_root_and_lcd_serve_only_the_current_panel(self):
+        allowed, handler = self.request("192.168.42.18:8766")
+        self.assertTrue(allowed)
+        handler.response = Mock()
+        for path in ("/", "/lcd"):
+            with self.subTest(path=path):
+                handler.path = path
+                handler.response.reset_mock()
+                handler.do_GET()
+                handler.response.assert_called_once()
+                media_type, body = handler.response.call_args.args
+                self.assertEqual(media_type, "text/html")
+                self.assertIn(b'id="sdr-v10-panel"', body)
+                self.assertIn(b'src="/v10.js"', body)
+                handler.send_error.assert_not_called()
+        retired_paths = (
+            "/legacy", "/index.html", "/panel.css", "/panel.js", "/panel.png",
+            "/dmr-panel.css", "/dmr-panel.js", "/field-background.webp",
+            "/waterfall.js", "/workbench.webp",
+        )
+        with TemporaryDirectory() as folder, patch("app.ROOT", Path(folder)):
+            web = Path(folder) / "web"
+            web.mkdir()
+            for path in retired_paths:
+                with self.subTest(path=path):
+                    (web / path.removeprefix("/")).touch()
+                    handler.path = path
+                    handler.response.reset_mock()
+                    handler.send_error.reset_mock()
+                    handler.do_GET()
+                    handler.send_error.assert_called_once_with(HTTPStatus.NOT_FOUND)
+                    handler.response.assert_not_called()
+
+    def test_current_panel_actions_are_accepted(self):
+        for action in (
+            {"knob": "volume", "value": 0.5, "panel": "v10"},
+            {"knob": "volume", "value": 0},
+            {"knob": "squelch", "value": 0.25},
+            {"v10": "tune", "hz": 98_400_000, "mode": "WFM"},
+            {"setting": "tone"},
+            {"record": "toggle"},
+            {"record": "select", "path": "/var/lib/scanner/recordings"},
+            {"discovery": "toggle"},
+            {"dmr": "delete_sms", "id": 1, "time_ms": 1000},
+        ):
+            with self.subTest(action=action):
+                self.assertTrue(valid_action(action))
+
+    def test_retired_panel_actions_cannot_reach_the_receiver(self):
+        for action in (
+            {"knob": "volume", "value": 0.5},
+            {"knob": "volume", "value": 0.5, "panel": "legacy"},
+            {"setting": "dab"},
+            {"setting": "dab", "gesture": "long"},
+            {"tune": "frequency", "mhz": "98.4"},
+            {"favorite": 1, "gesture": "tap"},
+            {"key": "scan", "gesture": "tap"},
+            {"dmr": "toggle", "enabled": True},
+        ):
+            with self.subTest(action=action):
+                allowed, handler = self.request("192.168.42.18:8766")
+                self.assertTrue(allowed)
+                handler.path = "/api/action"
+                payload = json.dumps(action).encode()
+                handler.headers["Content-Type"] = "application/json"
+                handler.headers["Content-Length"] = str(len(payload))
+                handler.rfile = BytesIO(payload)
+                handler.radio = Mock()
+                handler.do_POST()
+                handler.send_error.assert_called_once_with(HTTPStatus.BAD_REQUEST)
+                handler.radio.assert_not_called()
 
     def test_remote_display_exposes_only_lcd_telemetry_without_a_lease(self):
         with TemporaryDirectory() as folder:

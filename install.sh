@@ -5,13 +5,12 @@ repository=https://github.com/AshCooperUK/SDR-Scanner.git
 service=local-sdr-scanner.service
 decoder_dir="$HOME/.local/share/sdr-scanner"
 dmr_version=2.12.1
-welle_commit=512558d1f8ac4c524d3c63e97510ea36c1bd7a70
 desktop=
 stage="checking the host"
 
 usage() {
     printf '%s\n' 'Usage: bash install.sh [--headless | --desktop]' \
-        'Install SDr Scanner, DAB and DMR on Ubuntu or Debian (AMD64 or ARM64).' \
+        'Install SDr Scanner and its digital voice decoder on Ubuntu or Debian (AMD64 or ARM64).' \
         'LAN access and boot startup are enabled. The desktop launcher is detected automatically.'
 }
 
@@ -69,16 +68,7 @@ work_dir=$(mktemp -d)
 decoder_staging=
 trap 'rm -rf -- "$work_dir"; if [[ -n $decoder_staging ]]; then rm -rf -- "$decoder_staging"; fi' EXIT
 
-welle="$decoder_dir/bin/welle-cli"
 dmr_bundle="$decoder_dir/dsd-neo-$dmr_version"
-welle_ready() {
-    local help
-    [[ -x $1 ]] || return 1
-    # welle-cli prints its usage with exit status 1.
-    help=$(timeout 10 "$1" -h 2>&1 || :)
-    [[ $help == *'Usage: welle-cli'* ]]
-}
-
 dmr_ready() {
     local help
     [[ -x $1 ]] || return 1
@@ -89,11 +79,7 @@ dmr_ready() {
 stage="installing Linux packages"
 printf '%s\n' 'Checking scanner dependencies…'
 packages=(git curl ca-certificates python3 python3-numpy python3-scipy rtl-sdr
-    libmp3lame0 libpam-systemd dbus-user-session iproute2
-    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good)
-if ! welle_ready "$welle"; then
-    packages+=(build-essential cmake xxd libfaad-dev libmpg123-dev libmp3lame-dev)
-fi
+    libmp3lame0 libpam-systemd dbus-user-session iproute2)
 if [[ $desktop == --desktop ]]; then
     packages+=(xdg-utils)
 fi
@@ -123,29 +109,8 @@ if [[ ! -f $source_dir/launcher.py || ! -f $source_dir/app.py || ! -f $source_di
     [[ -f $source_dir/install.sh && -f $source_dir/launcher.py && -f $source_dir/app.py && -f $source_dir/dmr_decoder.py ]] ||
         fail "The directory $source_dir already exists. Update your SDr Scanner checkout and run its install.sh."
 fi
-
-stage="setting up the DAB decoder"
-if ! welle_ready "$welle"; then
-    printf '%s\n' 'Building the headless DAB decoder. This can take a few minutes…'
-    git clone --depth 1 --branch v2.7 https://github.com/AlbrechtL/welle.io.git "$work_dir/welle"
-    [[ $(git -C "$work_dir/welle" rev-parse HEAD) == "$welle_commit" ]] || fail 'The welle.io source revision did not match.'
-    dab_socket="$work_dir/welle/src/various/Socket.cpp"
-    grep -Fq 'htons(INADDR_ANY)' "$dab_socket" || fail 'Could not locate the DAB HTTP listener.'
-    sed -i 's/htons(INADDR_ANY)/htonl(INADDR_LOOPBACK)/g' "$dab_socket"
-    cmake -S "$work_dir/welle" -B "$work_dir/welle-build" \
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_WELLE_IO=OFF -DBUILD_WELLE_CLI=ON -DKISS_FFT=ON \
-        -DRTLSDR=OFF -DSOAPYSDR=OFF
-    cmake --build "$work_dir/welle-build" --parallel 2
-    welle_ready "$work_dir/welle-build/welle-cli" || fail 'The packaged DAB decoder could not start.'
-    mkdir -p "$decoder_dir/bin"
-    decoder_staging=$(mktemp -d "$decoder_dir/.install.XXXXXXXX")
-    install -m 0755 "$work_dir/welle-build/welle-cli" "$decoder_staging/welle-cli"
-    mv -fT -- "$decoder_staging/welle-cli" "$welle"
-fi
-for plugin in souphttpsrc mpegaudioparse mpg123audiodec audioconvert audioresample fdsink; do
-    gst-inspect-1.0 "$plugin" >/dev/null
-done
+[[ -f $source_dir/v10.py && -f $source_dir/web/v10.html ]] ||
+    fail "Update the SDr Scanner checkout at $source_dir before running the installer."
 
 stage="setting up the DMR decoder"
 if ! dmr_ready "$dmr_bundle/AppRun"; then
@@ -156,9 +121,7 @@ if ! dmr_ready "$dmr_bundle/AppRun"; then
     printf '%s  %s\n' "$dmr_sha" "$work_dir/dsd-neo.AppImage" | sha256sum -c -
     chmod +x "$work_dir/dsd-neo.AppImage"
     mkdir -p "$decoder_dir"
-    if [[ -z $decoder_staging ]]; then
-        decoder_staging=$(mktemp -d "$decoder_dir/.install.XXXXXXXX")
-    fi
+    decoder_staging=$(mktemp -d "$decoder_dir/.install.XXXXXXXX")
     (cd "$decoder_staging" && "$work_dir/dsd-neo.AppImage" --appimage-extract > /dev/null)
     dmr_ready "$decoder_staging/squashfs-root/AppRun" || fail 'The packaged DMR decoder could not start.'
     if [[ -e $dmr_bundle || -L $dmr_bundle ]]; then
@@ -232,5 +195,4 @@ while read -r address; do
 done < <(ip -o -4 addr show up scope global |
     awk '$2 !~ /^(docker[0-9]*|br-[[:xdigit:]]+)$/ {split($4, address, "/"); print address[1]}')
 printf '%s\n' 'Plug in or reconnect the SDR, open the panel and press POWER.' \
-    'Open /legacy for DAB and CHIRP programming.' \
-    'LAN connections use the local IP. Set the remote PIN in MENU > SET > PIN or in CHIRP.'
+    'Use the scanner host’s name or IP address on the LAN. Set the remote PIN in MENU > SET > PIN.'

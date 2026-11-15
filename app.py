@@ -28,10 +28,10 @@ from access_network import LAN_RANGES, TAILSCALE_RANGE, LocalNetworks
 from access_pin import (ACCESS_SECONDS, PIN_PATTERN, PIN_SETUP_PATTERN, PIN_SETUP_SECONDS, REMOTE_AUTHORITY,
                         AccessConflict, AccessPin)
 from bandplan import BANK_KEYS
-from dab import BAND_III, SERVICE_ID, DabError, DabReceiver
+from dab import BAND_III, DabError, DabReceiver
 from discovery import DISCOVERY_URL, MAX_HITS, Discovery, wave_audio
 from digital_modes import DigitalDecoder
-from dmr import DmrState, valid_dmr_action
+from dmr import DmrState
 from dmr_decoder import DmrDecoder, DmrDecoderError
 from folder_picker import browse_folders, select_folder
 from radio_pool import RadioPool
@@ -39,7 +39,7 @@ from receiver import METER_MIN_EXCESS_DB, SAMPLE_RATE, WATERFALL_BINS, WATERFALL
 from recording import MIN_CLIP_PCM_BYTES, Recorder, RecordingError
 from replay import RECORDINGS_URL, byte_range, latest_clip, open_clip
 from scanner import (
-    FAVORITE_COUNT, FINE_STEP_HZ, KEY_ALIASES, KEYS, MANUAL_MAX_HZ, MANUAL_MIN_HZ,
+    FAVORITE_COUNT, FINE_STEP_HZ, KEY_ALIASES, MANUAL_MAX_HZ, MANUAL_MIN_HZ,
     ChirpConflict, Scanner, format_frequency, normalize_favorite_name,
 )
 from tone_search import normalize_tone_filter
@@ -52,18 +52,15 @@ from v10 import (
 
 
 ROOT = Path(__file__).resolve().parent
-ASSETS = frozenset({"index.html", "panel.css", "panel.js", "dmr-panel.css", "dmr-panel.js", "panel.png", "field-background.webp", "workbench.webp",
-                    "waterfall.js", "pcm-buffer.js", "pcm-worklet.js", "ashcooperuk-avatar.png",
+ASSETS = frozenset({"pcm-buffer.js", "pcm-worklet.js", "ashcooperuk-avatar.png",
                     "v10.html", "v10.css", "v10.js", "v10-menus.js"})
 SILENCE = bytes(960)
-FREQUENCY_ENTRY = re.compile(r"[0-9]{1,4}(?:\.[0-9]{0,6})?")
 SESSION_QUERY = re.compile(r"session=([0-9a-f]{32})(?:&radio=([1-9][0-9]{0,5}))?")
 CHIRP_ROUTE = "/api/chirp"
 V10_DISPLAY_ROUTE = "/api/v10/display"
 CHIRP_LIMIT = 8 * 1024 * 1024
 PROXY_HEADERS = ("Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Port",
                  "X-Forwarded-Proto", "X-Real-IP", "CF-Connecting-IP", "CF-Visitor", "CF-Ray")
-WHEEL_STEPS_HZ = frozenset(10 ** position for position in range(10))
 WATCH_INTERVAL = 0.12
 WATCH_LISTENING_INTERVAL = 0.85
 WATCH_IDLE_INTERVAL = 0.30
@@ -2761,16 +2758,15 @@ class ScannerRuntime:
 
 
 def valid_action(action):
+    """Validate actions exposed by the receiver's browser panel."""
     if not isinstance(action, dict):
         return False
     if "v10" in action:
         return valid_v10_action(action)
     if "dmr" in action:
-        if action["dmr"] == "delete_sms":
-            return (action.keys() == {"dmr", "id", "time_ms"}
-                    and all(type(action[key]) is int and 0 < action[key] < (1 << 53)
-                            for key in ("id", "time_ms")))
-        return valid_dmr_action(action)
+        return (action["dmr"] == "delete_sms" and action.keys() == {"dmr", "id", "time_ms"}
+                and all(type(action[key]) is int and 0 < action[key] < (1 << 53)
+                        for key in ("id", "time_ms")))
     if "discovery" in action:
         return set(action) == {"discovery"} and action["discovery"] in ("open", "toggle")
     if "record" in action:
@@ -2783,61 +2779,19 @@ def valid_action(action):
             path = action.get("path")
             return (set(action) == {"record", "path"} and isinstance(path, str)
                     and 0 < len(path) <= 1024 and "\0" not in path and Path(path).is_absolute())
-        hz = action.get("hz")
-        if (command != "delete" or type(hz) is not int or not MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ
-                or set(action) not in ({"record", "hz"}, {"record", "hz", "dab"})):
-            return False
-        if "dab" not in action:
-            return True
-        dab = action["dab"]
-        return (isinstance(dab, dict) and set(dab) == {"sid", "name"}
-                and isinstance(dab["sid"], str) and SERVICE_ID.fullmatch(dab["sid"]) is not None
-                and (dab["name"] is None or normalize_favorite_name(dab["name"]) is not None))
-    if "name" in action and set(action) != {"favorite", "name"}:
         return False
-    if "tone" in action:
-        favorite, tone, hz = action.get("favorite"), action["tone"], action.get("hz")
-        return (set(action) in ({"favorite", "tone"}, {"favorite", "tone", "hz"})
-                and type(favorite) is int and 1 <= favorite <= FAVORITE_COUNT
-                and ("hz" not in action or type(hz) is int and MANUAL_MIN_HZ <= hz <= MANUAL_MAX_HZ)
-                and (tone is None or normalize_tone_filter(tone) is not None))
     if "key" in action:
-        key = action["key"]
-        if key == "watch":
-            return action.get("gesture", "tap") in ("tap", "long")
-        return (isinstance(key, str) and (key in KEYS or key in KEY_ALIASES)
-                and action.get("gesture", "tap") in ("tap", "long", "double"))
-    if "favorite" in action:
-        number = action["favorite"]
-        if type(number) is not int or not 1 <= number <= FAVORITE_COUNT:
-            return False
-        if "name" in action:
-            return normalize_favorite_name(action["name"]) is not None
-        return action.get("gesture", "tap") in ("tap", "long", "lock", "select", "delete")
+        return (action.keys() <= {"key", "gesture"} and action["key"] == "mute"
+                and action.get("gesture", "tap") == "tap")
     if "setting" in action:
-        setting = action["setting"]
-        return setting in ("rds", "watch", "dab", "tone") and (
-            "gesture" not in action or (setting == "dab" and action["gesture"] in ("tap", "long")))
-    if "tune" in action:
-        if action["tune"] == "step":
-            direction = action.get("direction")
-            step_hz = action.get("step_hz", FINE_STEP_HZ)
-            return (type(direction) is int and direction in (-1, 1)
-                    and type(step_hz) is int and step_hz in WHEEL_STEPS_HZ)
-        if action["tune"] == "frequency":
-            mhz = action.get("mhz")
-            return isinstance(mhz, str) and FREQUENCY_ENTRY.fullmatch(mhz) is not None
-        return False
+        return action.keys() == {"setting"} and action["setting"] == "tone"
     knob = action.get("knob")
     value = action.get("value")
-    held = action.get("held", [])
-    return (
-        knob in ("volume", "squelch")
-        and ("panel" not in action or (knob == "volume" and action["panel"] == "v10" and not held))
-        and type(value) in (int, float) and 0 <= value <= 1 and math.isfinite(value)
-        and isinstance(held, list) and len(held) <= len(KEYS)
-        and all(isinstance(key, str) and (key in KEYS or key in KEY_ALIASES) for key in held)
-    )
+    if type(value) not in (int, float) or not 0 <= value <= 1:
+        return False
+    if knob == "squelch" or (knob == "volume" and value == 0 and "panel" not in action):
+        return action.keys() == {"knob", "value"}
+    return knob == "volume" and action.keys() == {"knob", "value", "panel"} and action["panel"] == "v10"
 
 
 class PanelHandler(BaseHTTPRequestHandler):
@@ -3173,7 +3127,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         if path.startswith(RECORDINGS_URL):
             self.replay_recording(path, token, expected_radio)
             return
-        name = {"/": "v10.html", "/lcd": "v10.html", "/legacy": "index.html"}.get(path, path.removeprefix("/"))
+        name = "v10.html" if path in ("/", "/lcd") else path.removeprefix("/")
         if name not in ASSETS or not (ROOT / "web" / name).is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
             return
