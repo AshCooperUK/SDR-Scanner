@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from access_network import LocalNetworks
 from access_pin import AccessPin, PIN_SETUP_PATTERN, PIN_SETUP_SECONDS
-from app import PanelHandler, ScannerRuntime, valid_action
+from app import PanelHandler, ScannerRuntime, SignalMeasurement, valid_action
 from radio_pool import RadioPool
 from receiver import WATERFALL_BINS
 
@@ -305,7 +305,7 @@ class AccessPolicyTests(unittest.TestCase):
             radio._dmr_messages.append({"message": "Private message", "radio_id": 1898})
             radio.receiver_status = "ready"
             target = (446_006_250, "DMR")
-            radio.signal = (target, -65.1, -67.2, 0)
+            radio.signal = SignalMeasurement(target, -65.1, -67.2, 0, 24.0)
             frame = {"sequence": 1, "time_ms": 512, "center_hz": target[0], "span_hz": 1_000_000,
                      "levels": (-80,) * WATERFALL_BINS, "private": "Extra FFT metadata"}
             radio.waterfall = (target, frame)
@@ -323,10 +323,11 @@ class AccessPolicyTests(unittest.TestCase):
                 display, = handler.json_response.call_args.args
                 self.assertEqual((display["power"], display["tune_hz"], display["modulation"]), (True, *target))
                 self.assertEqual(display["signal_dbfs"], -65.1)
+                self.assertAlmostEqual(display["signal_snr_db"], 21.9)
                 self.assertRegex(display["clock"], r"^\d{2}:\d{2}$")
                 self.assertEqual(display["waterfall"], {key: value for key, value in frame.items() if key != "private"})
                 self.assertEqual(set(display), {"power", "tune_hz", "modulation", "clock", "receiver", "muted",
-                                               "audio_open", "signal_dbfs", "signal_meter_dbfs", "squelch_db",
+                                               "audio_open", "signal_dbfs", "signal_meter_dbfs", "signal_snr_db", "squelch_db",
                                                "scan_active", "search_active", "scan_direction", "waterfall", "v10"})
                 self.assertEqual(set(display["v10"]), {"auto_mode", "frequency_mode", "scan_held", "scan_kind", "scan_paused",
                                                      "scan_zone", "scan_zones", "nearby_sweeping", "filter", "tune_step",

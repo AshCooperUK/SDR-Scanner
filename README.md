@@ -14,7 +14,7 @@ SDr Scanner V10.1.3 turns a USB RTL-SDR dongle into a receive-only radio scanner
 | --- | --- |
 | **Analogue reception** | Tune FM, WFM with RDS, AM, synchronous AM, USB, LSB and CW. Use AUTO for common analogue signals, or choose the receive mode directly. |
 | **Digital reception** | Receive supported clear DMR, D-STAR, P25 Phase I, dPMR and NXDN-VN signals with DSD-neo. Follow a configured DMR Tier III site, read received DMR SMS, and decode ITA2 RTTY in the browser. |
-| **Presets and scanning** | Scan editable UK zones for airband, marine VHF, PMR446, CB, business, amateur radio and other services. Add your own ranges, scan tagged memories, or check for nearby signals during reception. |
+| **Presets and scanning** | Scan editable UK zones for airband, marine VHF, PMR446, CB, business, amateur radio and other services. Add your own ranges, scan tagged memories, link scan speed to the spectrum span, or check for nearby signals during reception. |
 | **Memories and controls** | Save frequencies, modes and filters in memory groups. Use the two front-panel favourite banks for quick recall. Assign functions and sensitivities to individual dials. |
 | **Spectrum and second display** | Tune from the spectrum or waterfall, adjust its span and reference level, and open an LCD-only view on a second screen. |
 | **Recordings and history** | Arm squelch-triggered MP3 recording, review received signals and available metadata, and play or save recent captured audio. |
@@ -48,7 +48,7 @@ The installer sets up the RTL-SDR dependencies, MP3 recording, DSD-neo and the s
 ### Open the scanner
 
 1. Open [the local panel](http://127.0.0.1:8766/) on the receiver host. From another device on the same network, open the host’s local name or IPv4 address on port **8766**.
-2. Press **POWER**, choose a receive mode with **MODE**, then click the frequency readout to enter a frequency in MHz. Choose **WFM** for broadcast FM.
+2. Press **POWER**, then click the frequency readout and enter a frequency in MHz. Submitting it selects **AUTO**. Use **MODE** afterwards to select a specific mode.
 3. Turn **VOLUME** to adjust the sound. Press that knob to mute or unmute. Hold **POWER** to return to standby.
 4. Open the [user manual](docs/V10.md) from **MENU** for the full control guide.
 

@@ -285,6 +285,70 @@ BUSINESS_SEARCH = {
 }
 
 BAND_SEARCH_RANGES = {"HAM": AMATEUR_SEARCH, "BUS": BUSINESS_SEARCH}
+
+
+def _preset_scan_range(name, start, end, step, mode):
+    return {"name": name, "start_hz": start, "end_hz": end, "step_hz": step, "mode": mode}
+
+
+def _registered_voice_ranges(frequencies):
+    # The Ofcom register records assignments. Use their envelopes for
+    # scanning and leave gaps larger than 1 MHz between observed clusters.
+    ordered = sorted(set(frequencies))
+    if not ordered:
+        return ()
+    runs = []
+    start = end = ordered[0]
+    for frequency in ordered[1:]:
+        if frequency - end > 1_000_000:
+            runs.append((start, end))
+            start = frequency
+        end = frequency
+    runs.append((start, end))
+    return tuple(_preset_scan_range(
+        f"Registered range {index}", low, max(high, low + 6_250), 6_250, "FM",
+    ) for index, (low, high) in enumerate(runs, 1))
+
+
+# Receiver search ranges. The amateur bounds use Ofcom OFW611 Schedule 1
+# and RSGB EX307/EX309; the spacing is a scan-grid choice.
+# https://rsgb.org/main/operating/band-plans/
+_EVENT_TALKBACK_RANGES = ((470_006_250, 470_993_750), (474_006_250, 474_993_750))
+PRESET_SCAN_RANGES = {
+    # CAA VHF communications allocation and 8⅓ kHz RF raster.
+    "AIR": (_preset_scan_range("Civil airband voice", 117_975_000, 136_991_667, AIR_STEP, "AM"),),
+    # Ofcom Appendix 18 and published UK coast/ship assignments. DSC
+    # (156.525 MHz) and the two AIS carriers are outside these voice ranges.
+    "MRN": (
+        _preset_scan_range("Marine VHF low 1", 156_000_000, 156_512_500, 12_500, "FM"),
+        _preset_scan_range("Marine VHF low 2", 156_537_500, 158_500_000, 12_500, "FM"),
+        _preset_scan_range("Marine VHF high 1", 160_625_000, 161_962_500, 12_500, "FM"),
+        _preset_scan_range("Marine VHF high 2", 161_987_500, 162_012_500, 12_500, "FM"),
+        _preset_scan_range("Marine VHF high 3", 162_037_500, 163_000_000, 12_500, "FM"),
+        _preset_scan_range("Onboard UHF low", 457_525_000, 457_575_000, 12_500, "FM"),
+        _preset_scan_range("Onboard UHF high", 467_525_000, 467_575_000, 12_500, "FM"),
+    ),
+    "BCAST": (_preset_scan_range("FM broadcast", 87_500_000, 107_900_000, 100_000, "WFM"),),
+    "HAM": tuple(
+        _preset_scan_range(name if len(segments) == 1 else f"{name} {index}", start, end, step, "AUTO")
+        for name, segments in AMATEUR_SEARCH.items()
+        for index, (start, end, step) in enumerate(segments, 1)
+    ),
+    "BUS": tuple(
+        _preset_scan_range(name, start, end, step, "AM" if end < 1_000_000 else "FM")
+        for name, segments in BUSINESS_SEARCH.items()
+        for start, end, step in segments
+    ),
+    "RAIL": _registered_voice_ranges(RAIL_FM),
+    "EVT": _registered_voice_ranges(
+        hz for hz in EVENTS_FM if not any(low <= hz <= high for low, high in _EVENT_TALKBACK_RANGES)
+    ) + tuple(
+        _preset_scan_range(name, start, end, 6_250, "FM")
+        for name, (start, end) in zip(("Ch 21 portable", "Ch 21 base"), _EVENT_TALKBACK_RANGES)
+    ),
+    "UTIL": _registered_voice_ranges(UTILITIES_FM),
+}
+
 _AMATEUR_SEARCH_FM = frozenset(AMATEUR_FM)
 _AMATEUR_SEARCH_AM = frozenset(AMATEUR_AM)
 _AMATEUR_SEARCH_USB = frozenset(AMATEUR_USB)

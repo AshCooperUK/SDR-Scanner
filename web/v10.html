@@ -14,12 +14,20 @@
 
   <div class="radio">
     <div class="controls-left">
-      <div class="left-stack">
-        <button type="button" class="hardware switch" data-action="power" title="Press to power on. Hold for one second to power off." aria-pressed="false"><i class="lamp" aria-hidden="true"></i>POWER</button>
-        <button type="button" class="hardware switch mode-key" data-action="mode" aria-controls="sdr-v10-mode" aria-expanded="false" title="Choose how to demodulate the signal, or let AUTO select a supported mode.">MODE</button>
-        <button type="button" class="hardware switch" data-action="record" aria-pressed="false" title="Arm recording. Audio is saved when a signal opens squelch."><i class="lamp" aria-hidden="true"></i>RECORD</button>
+      <div class="power-controls">
+        <button type="button" class="power-button" data-action="power" aria-labelledby="sdr-v10-power-label" title="Press to power on. Hold for one second to power off." aria-pressed="false">
+          <span class="power-led-ring" aria-hidden="true">
+            <i style="--led-index:0"></i><i style="--led-index:1"></i><i style="--led-index:2"></i><i style="--led-index:3"></i>
+            <i style="--led-index:4"></i><i style="--led-index:5"></i><i style="--led-index:6"></i><i style="--led-index:7"></i>
+            <i style="--led-index:8"></i><i style="--led-index:9"></i><i style="--led-index:10"></i><i style="--led-index:11"></i>
+            <i style="--led-index:12"></i><i style="--led-index:13"></i><i style="--led-index:14"></i><i style="--led-index:15"></i>
+            <i style="--led-index:16"></i><i style="--led-index:17"></i><i style="--led-index:18"></i><i style="--led-index:19"></i>
+            <i style="--led-index:20"></i><i style="--led-index:21"></i><i style="--led-index:22"></i><i style="--led-index:23"></i>
+          </span>
+          <span class="power-symbol" aria-hidden="true"></span>
+        </button>
+        <span class="power-label" id="sdr-v10-power-label">POWER</span>
       </div>
-      <div class="dial-unit dial-a"><span class="dial-label">DIAL A</span><button type="button" class="knob" style="--angle:27deg" data-action="dial-a" aria-label="Dial A, scan settings"></button></div>
       <div class="preset-bank recess" role="group" aria-labelledby="preset-bank-label">
         <span class="bank-label" id="preset-bank-label">PRESETS</span>
         <button type="button" class="hardware" data-action="zone" data-zone="FAV" title="Open the saved favourite channels.">FAV</button>
@@ -47,18 +55,10 @@
         <button type="button" class="hardware" data-action="zone" data-zone="CUSTOM11" title="Set the name and frequency range for Custom 11.">CUSTOM 11</button>
         <button type="button" class="hardware" data-action="zone" data-zone="CUSTOM12" title="Set the name and frequency range for Custom 12.">CUSTOM 12</button>
       </div>
-      <div class="dial-b-bank">
-        <div class="scan-bank recess">
-          <button type="button" class="hardware" data-action="lockout" aria-pressed="false" title="Skip the current scan frequency or toggle a saved channel’s skip flag. Hold to clear temporary lockouts.">LOCK OUT</button>
-          <button type="button" class="hardware" data-action="scan" title="Choose a scan type or stop the running scan. Hold to repeat the last scan.">SCAN</button>
-          <button type="button" class="hardware" data-action="simple-scan" aria-pressed="false" title="Simple Scan. Press to search upwards from the current frequency or stop. Hold to start downwards or reverse direction.">S.SCAN</button>
-          <button type="button" class="hardware" data-action="prio" title="Check a priority memory periodically. Hold during priority watch to recall that channel.">PRIO</button>
-        </div>
-        <div class="aux-dials">
-          <div class="dial-unit"><span class="dial-label">DIAL D</span><button type="button" class="knob" data-action="dial-d" aria-label="Dial D"></button></div>
-          <div class="dial-unit"><span class="dial-label">DIAL E</span><button type="button" class="knob" data-action="dial-e" aria-label="Dial E"></button></div>
-          <div class="dial-unit dial-b"><span class="dial-label">DIAL B</span><button type="button" class="knob" style="--angle:-42deg" data-action="dial-b" aria-label="Dial B, audio and squelch"></button></div>
-        </div>
+      <div class="aux-dials">
+        <div class="dial-unit"><span class="dial-label">DIAL D</span><button type="button" class="knob" data-action="dial-d" aria-label="Dial D"></button></div>
+        <div class="dial-unit"><span class="dial-label">DIAL E</span><button type="button" class="knob" data-action="dial-e" aria-label="Dial E"></button></div>
+        <div class="dial-unit"><span class="dial-label">DIAL B</span><button type="button" class="knob" style="--angle:-42deg" data-action="dial-b" aria-label="Dial B, audio and squelch"></button></div>
       </div>
     </div>
     <div class="lcd" data-off="true" aria-label="Colour radio LCD">
@@ -90,7 +90,10 @@
         <div class="rds-text" data-el="rds-text"></div>
         <div class="meter">
           <span class="meter-tick" data-el="offset" title="Tuning error"></span>
-          <div class="meter-reading"><div class="meter-scale" aria-hidden="true">1　3　5　7　9　<span>+20　+40　+60dB</span></div><div class="meter-body" aria-hidden="true"><i></i></div></div>
+          <div class="meter-reading" title="Signal strength above the receiver noise floor">
+            <div class="meter-scale" aria-hidden="true"><span>5</span><span>15</span><span>25</span><span>35</span><span>45 dB SNR</span></div>
+            <div class="meter-body" aria-hidden="true"><i></i></div>
+          </div>
           <span data-el="level" title="Signal level relative to the SDR full scale">—</span>
           <button class="lcd-indicator step-indicator" data-action="tune-step" data-el="step" type="button" title="Choose how far normal frequency tuning moves per dial step.">TS</button>
         </div>
@@ -111,7 +114,7 @@
           <button type="button" class="key" data-action="ref" data-page="2" title="Adjust the display reference level for the spectrum and waterfall." hidden>REF</button>
           <button type="button" class="key" data-action="speed" data-page="2" title="Cycle through slow, medium and fast spectrum updates." hidden>SPEED</button>
           <button type="button" class="key" data-action="peak" data-page="2" aria-label="Marker, strongest signal" aria-pressed="false" title="Mark the strongest signal visible in the current span." hidden>MARKER</button>
-          <button type="button" class="key expand-key" data-action="expand" aria-pressed="false" title="Tap to expand or restore the scope. Hold for one second to open Scope Set.">EXPD/SET</button>
+          <button type="button" class="key expand-key" data-action="expand" aria-pressed="false" title="Tap to toggle the scope-only display. Hold for one second to open Scope Set.">EXPD/SET</button>
         </div>
       </div>
       <div class="overlay" id="v10-menus" hidden></div>
@@ -144,6 +147,7 @@
         <div class="scope-values" data-el="scope-values"></div>
         <p class="error" data-el="scope-error" role="alert" hidden></p>
         <div class="overlay-actions">
+          <button class="key" type="button" data-el="scope-full" title="Set the fixed edges to the full SDR capture." hidden>Full capture</button>
           <button class="key" type="submit" title="Apply the entered scope values.">ENT</button>
           <button class="key" type="button" data-panel-back aria-label="Back" title="Cancel these scope edits and go back.">↩</button>
         </div>
@@ -171,8 +175,8 @@
           </div>
         </div>
         <div class="favorite-banks">
-          <div class="favorite-bank recess" role="group" aria-labelledby="favorite-bank-0-label">
-            <span class="bank-label" id="favorite-bank-0-label">FAV · BANK 0</span>
+          <div class="favorite-bank recess" data-favorite-side="a" role="group" aria-labelledby="favorite-bank-0-label">
+            <span class="bank-label" id="favorite-bank-0-label">FAV A · BANK 0</span>
             <button type="button" class="hardware" data-action="favorite" data-bank="0" data-slot="0" aria-label="Favourite bank 0, channel 0" aria-pressed="false"><i class="lamp" aria-hidden="true"></i>CH0</button>
             <button type="button" class="hardware" data-action="favorite" data-bank="0" data-slot="1" aria-label="Favourite bank 0, channel 1" aria-pressed="false"><i class="lamp" aria-hidden="true"></i>CH1</button>
             <button type="button" class="hardware" data-action="favorite" data-bank="0" data-slot="2" aria-label="Favourite bank 0, channel 2" aria-pressed="false"><i class="lamp" aria-hidden="true"></i>CH2</button>
@@ -184,8 +188,8 @@
             <button type="button" class="hardware" data-action="favorite" data-bank="0" data-slot="8" aria-label="Favourite bank 0, channel 8" aria-pressed="false"><i class="lamp" aria-hidden="true"></i>CH8</button>
             <button type="button" class="hardware" data-action="favorite" data-bank="0" data-slot="9" aria-label="Favourite bank 0, channel 9" aria-pressed="false"><i class="lamp" aria-hidden="true"></i>CH9</button>
           </div>
-          <div class="favorite-bank recess" role="group" aria-labelledby="favorite-bank-1-label">
-            <span class="bank-label" id="favorite-bank-1-label">FAV · BANK 1</span>
+          <div class="favorite-bank recess" data-favorite-side="b" role="group" aria-labelledby="favorite-bank-1-label">
+            <span class="bank-label" id="favorite-bank-1-label">FAV B · BANK 1</span>
             <button type="button" class="hardware" data-action="favorite" data-bank="1" data-slot="0" aria-label="Favourite bank 1, channel 0" aria-pressed="false"><i class="lamp" aria-hidden="true"></i>CH0</button>
             <button type="button" class="hardware" data-action="favorite" data-bank="1" data-slot="1" aria-label="Favourite bank 1, channel 1" aria-pressed="false"><i class="lamp" aria-hidden="true"></i>CH1</button>
             <button type="button" class="hardware" data-action="favorite" data-bank="1" data-slot="2" aria-label="Favourite bank 1, channel 2" aria-pressed="false"><i class="lamp" aria-hidden="true"></i>CH2</button>
@@ -202,22 +206,66 @@
       <div class="right-bottom">
         <div class="main-tune">
           <div class="readouts recess"><span class="engrave" title="Lights when receive audio or monitor is active."><i class="lamp" data-el="receive" aria-hidden="true"></i> RECEIVE</span><span class="engrave" title="Lights when the main tuning dial is locked."><i class="lamp" data-el="lock" aria-hidden="true"></i> LOCK</span><button type="button" class="hardware" data-action="channel" aria-pressed="false" title="Switch the main dial between memory channels and its assigned function.">M-CH DIAL</button></div>
-          <span class="dial-label">MAIN</span>
-          <button type="button" class="knob main-knob" data-action="frequency" aria-label="Main dial, scroll to tune or press to enter frequency"></button>
+          <div class="tuning-controls">
+            <div class="side-dials">
+              <div class="dial-unit">
+                <span class="dial-label">F - Scope Pan</span>
+                <button type="button" class="knob" data-action="dial-f" aria-label="Dial F, Scope Pan"></button>
+              </div>
+              <div class="dial-unit">
+                <span class="dial-label">G</span>
+                <button type="button" class="knob" data-action="dial-g" aria-label="Dial G, Unassigned"></button>
+              </div>
+            </div>
+            <div class="dial-unit tuning-dial">
+              <span class="dial-label">MAIN</span>
+              <button type="button" class="knob main-knob" data-action="frequency" aria-label="Main dial, scroll to tune or press to enter frequency"></button>
+            </div>
+            <div class="side-dials">
+              <div class="dial-unit">
+                <span class="dial-label">H</span>
+                <button type="button" class="knob" data-action="dial-h" aria-label="Dial H, Unassigned"></button>
+              </div>
+              <div class="dial-unit">
+                <span class="dial-label">I</span>
+                <button type="button" class="knob" data-action="dial-i" aria-label="Dial I, Unassigned"></button>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="dial-unit volume-unit">
-          <span class="dial-label">VOLUME</span>
-          <button type="button" class="knob volume-knob" data-action="volume" data-volume-dial aria-label="Volume and mute" aria-pressed="false" title="Turn to adjust the volume. Press to mute or unmute audio and dim or restore this LCD."></button>
+        <div class="corner-dials">
+          <div class="dial-unit dial-a">
+            <span class="dial-label">DIAL A</span>
+            <button type="button" class="knob" style="--angle:27deg" data-action="dial-a" aria-label="Dial A, scan settings"></button>
+          </div>
+          <div class="dial-unit dial-j">
+            <span class="dial-label">J</span>
+            <button type="button" class="knob" data-action="dial-j" aria-label="Dial J, None"></button>
+          </div>
+          <div class="dial-unit volume-dial">
+            <span class="dial-label">VOLUME</span>
+            <button type="button" class="knob volume-knob" data-action="volume" data-volume-dial aria-label="Volume and mute" aria-pressed="false" title="Turn to adjust the volume. Press to mute or unmute audio and dim or restore this LCD."></button>
+          </div>
         </div>
       </div>
     </div>
     <div class="function-keys">
-      <button type="button" class="hardware" data-action="menu" title="Open the receiver menu.">MENU</button>
-      <button type="button" class="hardware" data-action="function" title="Open receive functions for the current mode.">FUNCTION</button>
-      <button type="button" class="hardware" data-action="scope" title="Show or hide the spectrum scope.">M.SCOPE</button>
-      <button type="button" class="hardware" data-action="quick" title="Open the configured shortcuts or actions for the current setting.">QUICK</button>
-      <button type="button" class="hardware" data-action="exit" title="Go back one screen.">EXIT</button>
-      <button type="button" class="hardware" data-action="speech" aria-label="Speech and dial lock" title="Announce the tuned frequency and mode. Hold to lock or unlock main tuning.">SPEECH<span class="secondary-label">LOCK</span></button>
+      <div class="hardware-row" role="group" aria-label="Menu controls">
+        <button type="button" class="hardware" data-action="menu" title="Open the receiver menu.">MENU</button>
+        <button type="button" class="hardware" data-action="function" title="Open receive functions for the current mode.">FUNCTION</button>
+        <button type="button" class="hardware" data-action="scope" title="Show or hide the spectrum scope.">M.SCOPE</button>
+        <button type="button" class="hardware" data-action="quick" title="Open the configured shortcuts or actions for the current setting.">QUICK</button>
+        <button type="button" class="hardware" data-action="exit" title="Go back one screen.">EXIT</button>
+        <button type="button" class="hardware" data-action="speech" aria-label="Speech and dial lock" title="Announce the tuned frequency and mode. Hold to lock or unlock main tuning.">SPEECH<span class="secondary-label">LOCK</span></button>
+      </div>
+      <div class="hardware-row" role="group" aria-label="Receiver controls">
+        <button type="button" class="hardware switch" data-action="record" aria-label="Record" aria-pressed="false" title="Arm recording. Audio is saved when a signal opens squelch."><i class="lamp" aria-hidden="true"></i>REC</button>
+        <button type="button" class="hardware" data-action="lockout" aria-label="Lock out and clear temporary lockouts" aria-pressed="false" title="Skip the current scan frequency or toggle a saved channel’s skip flag. Hold to clear temporary lockouts.">LOCK OUT<span class="secondary-label">CLEAR</span></button>
+        <button type="button" class="hardware" data-action="scan" title="Choose a scan type or stop the running scan. Hold to repeat the last scan.">SCAN</button>
+        <button type="button" class="hardware" data-action="simple-scan" aria-pressed="false" title="Simple Scan. Press to search upwards from the current frequency or stop. Hold to start downwards or reverse direction.">S.SCAN</button>
+        <button type="button" class="hardware" data-action="prio" title="Check a priority memory periodically. Hold during priority watch to recall that channel.">PRIO</button>
+        <button type="button" class="hardware" data-action="mode" aria-controls="sdr-v10-mode" aria-expanded="false" title="Choose how to demodulate the signal, or let AUTO select a supported mode.">MODE</button>
+      </div>
     </div>
   </div>
 </section>

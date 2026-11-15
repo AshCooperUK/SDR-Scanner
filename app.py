@@ -46,7 +46,8 @@ from tone_search import normalize_tone_filter
 from tier3 import Tier3Decoder
 from v10 import (
     AUTO_GROUP, CUSTOM_ZONES, MAX_ACTION_BYTES, MODES, SCAN_KINDS, SETTINGS as V10_SETTINGS, TIMER_DEFAULT, VOICE_MODES, ZONES,
-    NEARBY_ACQUIRE_SECONDS, NEARBY_RESUME_SECONDS, NEARBY_ZONE, RANGE_SCAN_SETTINGS, ReceiverPanel, auto_band_mode, nearby_windows,
+    NEARBY_ACQUIRE_SECONDS, NEARBY_IDLE_INTERVAL, NEARBY_OFFSET_LIMITS, NEARBY_RESUME_SECONDS, NEARBY_ZONE,
+    ReceiverPanel, auto_band_mode, nearby_windows,
     valid_action as valid_v10_action, valid_timer,
 )
 
@@ -196,6 +197,23 @@ def wfm_scan_channel(offset, snr):
     if offset is not None:
         return abs(offset) < TUNING_LIMITS_HZ["WFM"][1]
     return snr is None or snr < METER_MIN_EXCESS_DB
+
+
+@dataclass(frozen=True)
+class SignalMeasurement:
+    target: tuple[int, str]
+    dbfs: float
+    meter_dbfs: float
+    offset_hz: float | None = None
+    rf_excess_db: float | None = None
+
+    @property
+    def snr_db(self):
+        if self.rf_excess_db is None:
+            return None
+        # Apply the same usable-signal correction as the absolute meter.
+        snr = self.rf_excess_db + (self.meter_dbfs - self.dbfs)
+        return snr if math.isfinite(snr) else None
 
 
 @dataclass(frozen=True)
@@ -771,6 +789,7 @@ class ScannerRuntime:
         self.wake.set()
 
     def _v10_vfo(self, hz, mode):
+        self.v10.preset_point = None
         self.v10.vfo = hz, mode
         self.v10.frequency_mode = "vfo"
         automatic = mode == "AUTO"
@@ -845,19 +864,19 @@ class ScannerRuntime:
                 self._v10_set_nearby(action["enabled"], now)
             elif command == "step":
                 self._v10_step(action["direction"], now)
+            elif command == "preset_step":
+                self._v10_preset_step(action["steps"], now)
             elif command == "setting":
                 key, value = action["key"], action["value"]
                 panel.set_value(key, value, action.get("mode", self._v10_current()[1]))
                 if key == "sleep_minutes":
                     panel.sleep_until = now + value * 60 if value else 0.0
-                if panel.scan and panel.scan["kind"] == "ZONE" and key in (
-                        RANGE_SCAN_SETTINGS.get(zone) for zone in panel.scan["zones"]):
-                    self._v10_nearby_end(now)
-                    if entry := panel.start_scan({"kind": "ZONE", "zones": panel.scan["zones"]},
-                                                 self._v10_current(), now):
-                        self._v10_receive(entry)
+                elif key == "scan_follow_scope" and value:
+                    panel.set_scan_scope_span(action.get("scope_span_hz"))
             elif command == "memory":
                 self._v10_memory(action)
+            elif command == "bank_name":
+                panel.set_bank_name(action["group"], action["name"])
             elif command == "zone":
                 self._v10_zone(action, now)
             elif command == "lockout":
@@ -888,7 +907,7 @@ class ScannerRuntime:
                     self._v10_set_nearby(True, now)
                     zones = [zone for zone in zones if zone != NEARBY_ZONE]
                     if zones:
-                        action = {"v10": "scan", "kind": "ZONE", "zones": zones, "enabled": True}
+                        action = {**action, "zones": zones}
                 if action["enabled"] and zones:
                     current = self._v10_current()
                     updating_zones = action["kind"] == "ZONE" and panel.scan and panel.scan["kind"] == "ZONE"
@@ -930,9 +949,11 @@ class ScannerRuntime:
             elif command == "reset":
                 panel.save(settings={key: value[0] for key, value in V10_SETTINGS.items()}, by_mode={},
                            memories={} if action["scope"] == "all" else None,
+                           bank_names={} if action["scope"] == "all" else None,
                            edges={} if action["scope"] == "all" else None,
                            zones={} if action["scope"] == "all" else None,
                            custom_presets={} if action["scope"] == "all" else None,
+                           preset_ranges={} if action["scope"] == "all" else None,
                            profile=None if action["scope"] == "all" else ..., timer=TIMER_DEFAULT.copy())
                 panel.power_off()
                 self.scanner.v10_monitor = False
@@ -955,6 +976,9 @@ class ScannerRuntime:
     def _v10_scan_control(self, action, now):
         panel = self.v10
         operation = action["operation"]
+        if operation == "scope_span":
+            panel.set_scan_scope_span(action["scope_span_hz"])
+            return
         if operation in ("hold", "resume") and panel.nearby_current:
             if operation == "hold":
                 panel.nearby["held"] = True
@@ -1046,14 +1070,19 @@ class ScannerRuntime:
     def _v10_zone(self, action, now):
         panel = self.v10
         zone, index, operation = action["zone"], action.get("index"), action["operation"]
-        if operation == "configure":
-            preset = {"name": normalize_favorite_name(action["name"]),
-                      "start_hz": action["start_hz"], "end_hz": action["end_hz"]}
-            if "step_hz" in action:
-                preset["step_hz"] = action["step_hz"]
-            panel.save(custom_presets={**panel.custom_presets, zone: preset})
+        if operation in ("configure", "configure_ranges", "reset_ranges"):
+            if operation == "configure":
+                preset = {"name": normalize_favorite_name(action["name"]),
+                          "start_hz": action["start_hz"], "end_hz": action["end_hz"]}
+                if "step_hz" in action:
+                    preset["step_hz"] = action["step_hz"]
+                panel.save(custom_presets={**panel.custom_presets, zone: preset})
+            elif not panel.set_zone_ranges(zone, action.get("ranges"), action.get("expected_ranges")):
+                return
             scan = panel.scan
             if scan and scan["kind"] == "ZONE" and zone in scan["zones"]:
+                panel.invalidate_nearby_probe()
+                self._v10_nearby_end(now)
                 if entry := panel.start_scan({"kind": "ZONE", "zones": scan["zones"]}, self._v10_current(), now):
                     panel.priority_return = None
                     self._v10_receive(entry)
@@ -1069,6 +1098,7 @@ class ScannerRuntime:
                 panel.stop_scan()
                 panel.priority_return = None
                 self._v10_vfo(current["hz"], current["mode"])
+                panel.preset_point = (zone, index)
             return
         entry = None if operation == "delete" else {
             "hz": action["hz"], "mode": action["mode"], "name": normalize_favorite_name(action.get("name", "")),
@@ -1115,7 +1145,27 @@ class ScannerRuntime:
         self.v10.stop_scan()
         self.v10.priority_return = None
         self.v10.frequency_mode = "memory"
+        group = entry["group"]
+        self.v10.preset_point = ("FAV", group * 100 + entry["slot"]) if group < AUTO_GROUP else None
         self._v10_receive(entry)
+
+    def _v10_preset_step(self, steps, now):
+        panel = self.v10
+        if panel.trunk_enabled or panel.preset_position() is None:
+            return
+        panel.invalidate_nearby_probe()
+        self._v10_nearby_end(now)
+        self._v10_priority_end(now)
+        entry = panel.step_preset(steps, now)
+        if entry is None:
+            return
+        if panel.scan is None:
+            panel.frequency_mode = "memory" if "group" in entry else "vfo"
+            if panel.frequency_mode == "vfo":
+                panel.vfo = entry["hz"], "AUTO" if entry.get("automatic") else entry["mode"]
+        self._v10_receive(entry)
+        if panel.nearby:
+            panel.nearby["windows"] = nearby_windows(self._v10_current())
 
     def _v10_step(self, direction, now):
         panel = self.v10
@@ -1230,7 +1280,7 @@ class ScannerRuntime:
         foreground = watch.pop("return")
         for key in ("hit", "confirmed", "closed_at", "acquire_until", "held"):
             watch.pop(key, None)
-        watch["ready_at"] = now + 1 / panel.settings["scan_speed"]
+        watch["ready_at"] = now + NEARBY_IDLE_INTERVAL
         self._v10_receive(foreground, update_position=False)
         if panel.scan and panel.scan["kind"] == "ZONE" and not panel.scan_waiting:
             panel._measure_zone_entry(foreground, now)
@@ -1242,49 +1292,60 @@ class ScannerRuntime:
                 and self.scanner.power and not self.dab_enabled and not self.watch_only
                 and self.receiver_status == "ready" and not self.stopped.is_set())
 
-    def _v10_sweep_nearby(self, receiver, *, secondary=False):
+    def _v10_sweep_nearby(self, receiver, *, secondary=False, live_for=None):
+        live = live_for is not None
+        job_key = "live_job" if live else "job"
         with self.lock:
             panel = self.v10
             if (not self.scanner.power or self._receiver_reopen or panel.priority_return is not None
-                    or self.stopped.is_set() or not secondary and self._nearby_secondary_ready):
+                    or self.stopped.is_set() or (not live and not secondary and self._nearby_secondary_ready)):
                 return False
             current = self._v10_current()
             started = time.monotonic()
-            request = panel.next_nearby_probe(started, current)
+            if live:
+                if live_for[0] != current[0]:
+                    return False
+                request = panel.next_nearby_live_probe(started, current)
+            else:
+                request = panel.next_nearby_probe(started, current)
             if request is None:
                 return False
             squelch = self.scanner.squelch_db
             audible = self._dmr_audio if self.dmr.enabled else self.scanner.audio_gate_open
         job, center, band, lower, upper, exact, blocked = request
         try:
-            frequency = receiver.nearby_peak(center, band, lower, upper, exact, blocked, squelch,
-                                             preserve=not secondary)
+            if live:
+                frequency = receiver.nearby_live_peak(band, lower, upper, exact, blocked, squelch)
+            else:
+                frequency = receiver.nearby_peak(center, band, lower, upper, exact, blocked, squelch,
+                                                 preserve=not secondary)
         except ReceiverError:
             with self.lock:
-                if panel.nearby and panel.nearby.get("job") is job:
-                    panel.invalidate_nearby_probe()
+                if panel.nearby and panel.nearby.get(job_key) is job:
+                    panel.nearby.pop(job_key)
             raise
         with self.lock:
-            if not panel.nearby or panel.nearby.get("job") is not job:
+            if not panel.nearby or panel.nearby.get(job_key) is not job:
                 return False
             if not self.scanner.power or self._receiver_reopen:
                 panel.invalidate_nearby_probe()
                 return False
             now = time.monotonic()
-            current = self._v10_current()
-            if panel.priority_return is not None or frequency == current[0]:
+            latest = self._v10_current()
+            if panel.priority_return is not None or frequency == latest[0] or (live and latest != current):
                 frequency = None
             entry = panel.finish_nearby_probe(job, frequency, band.modulation, now,
-                                              listening=audible and not secondary)
+                                              listening=audible and not secondary, live=live)
             if entry:
-                foreground = panel.active_memory or {"hz": current[0], "mode": current[1],
+                panel.invalidate_nearby_probe()
+                foreground = panel.active_memory or {"hz": latest[0], "mode": latest[1],
                                                      "tone": self.scanner.v10_tone}
                 panel.nearby.update(hit=entry, acquire_until=now + NEARBY_ACQUIRE_SECONDS)
                 panel.nearby["return"] = foreground
                 self._v10_receive(entry, update_position=False)
                 return True
-            if audible and not secondary and now - started >= .02:
-                self._pad_watch_gap(current, now - started)
+            if audible and not live and not secondary and now - started >= .02:
+                self._pad_watch_gap(latest, now - started)
         return False
 
     def _v10_autowrite(self, current):
@@ -1318,7 +1379,8 @@ class ScannerRuntime:
                 hz, mode = panel.trunk_frequency, "DMR"
             tuned = (hz, mode) if hz is not None and mode in MODES else None
             receiver = self.receiver_status if power else "standby"
-            signal = self.signal if tuned and receiver == "ready" and self.signal and self.signal[0] == tuned else None
+            signal = (self.signal if tuned and receiver == "ready" and self.signal
+                      and self.signal.target == tuned else None)
             capture = self.waterfall if tuned and receiver == "ready" and self.waterfall and self.waterfall[0] == tuned else None
             scan = panel.scan if power else None
             kind = scan["kind"] if scan and scan["kind"] in SCAN_KINDS else None
@@ -1334,7 +1396,9 @@ class ScannerRuntime:
                 "clock": datetime.now().strftime("%H:%M"), "receiver": receiver, "muted": power and scanner.muted,
                 "audio_open": (power and receiver == "ready" and audio_open and not scanner.muted
                                and not panel.scan_waiting),
-                "signal_dbfs": signal[1] if signal else None, "signal_meter_dbfs": signal[2] if signal else None,
+                "signal_dbfs": signal.dbfs if signal else None,
+                "signal_meter_dbfs": signal.meter_dbfs if signal else None,
+                "signal_snr_db": signal.snr_db if signal else None,
                 "squelch_db": scanner.squelch_db if power and scanner.squelch > 0 else None,
                 "scan_active": kind in ("MEMO", "SEL", "MODE", "ZONE"),
                 "search_active": kind in ("PROG", "DELTA", "AUTO", "SIMPLE"),
@@ -1401,10 +1465,11 @@ class ScannerRuntime:
                              active_favorite=None, close_probe=None, audio_open=False)
             state["receiver"] = "standby" if parked else self.receiver_status
             current_signal = (self.signal if self.signal and state["receiver"] == "ready"
-                              and self.signal[0] == target(state) else None)
-            state["signal_dbfs"] = current_signal[1] if current_signal else None
-            state["signal_meter_dbfs"] = current_signal[2] if current_signal else None
-            state["tuning_offset_hz"] = current_signal[3] if current_signal else None
+                              and self.signal.target == target(state) else None)
+            state["signal_dbfs"] = current_signal.dbfs if current_signal else None
+            state["signal_meter_dbfs"] = current_signal.meter_dbfs if current_signal else None
+            state["signal_snr_db"] = current_signal.snr_db if current_signal else None
+            state["tuning_offset_hz"] = current_signal.offset_hz if current_signal else None
             state.update(self.recording.state())
             if parked:
                 state.update(record_enabled=False, record_active=False, record_choosing=False)
@@ -2133,7 +2198,7 @@ class ScannerRuntime:
         self.wake.wait(seconds)
         self.wake.clear()
 
-    def _receive_dmr(self, wanted, revision, epoch, level, status, pcm, messages=(), frame=None):
+    def _receive_dmr(self, wanted, revision, epoch, level, status, pcm, messages=(), frame=None, *, snr_db=None):
         with self.lock:
             if (self._receiver_reopen or not (self.dmr.enabled and self.scanner.power)
                     or self.v10.trunk_enabled or revision != self.dmr.revision or epoch != self._dab_epoch):
@@ -2150,7 +2215,8 @@ class ScannerRuntime:
                 self._dmr_messages.appendleft(received)
                 self.discovery.receive_sms(received, revision=revision,
                                            signal_dbfs=level if math.isfinite(level) else None)
-            self.signal = (wanted, level, level, None) if math.isfinite(level) else None
+            signal = SignalMeasurement(wanted, level, level, rf_excess_db=snr_db) if math.isfinite(level) else None
+            self.signal = signal
             now = time.monotonic()
             if level >= self.scanner.squelch_db or self.v10.monitor:
                 self._dmr_rf_until = now + DMR_SQUELCH_HANG
@@ -2164,7 +2230,7 @@ class ScannerRuntime:
                 self.v10.observe_nearby(None, revision, now)
                 if self._dmr_audio:
                     self._dmr_boundary()
-                    self.signal = (wanted, level, level, None) if math.isfinite(level) else None
+                    self.signal = signal
                     self.waterfall = (wanted, frame) if frame else None
                 self._v10_advance(now, False, digital_carrier=rf_open if math.isfinite(level) else None)
                 return
@@ -2183,7 +2249,7 @@ class ScannerRuntime:
                     self.publish(pcm)
             self._v10_advance(now, True, digital_carrier=True)
 
-    def _receive_digital(self, wanted, revision, epoch, level, status, pcm, frame):
+    def _receive_digital(self, wanted, revision, epoch, level, status, pcm, frame, *, snr_db=None):
         with self.lock:
             panel = self.v10
             if (self._receiver_reopen or not self.scanner.power or not self.dmr.enabled or not panel.active
@@ -2201,7 +2267,7 @@ class ScannerRuntime:
                 self._dmr_boundary()
             panel.digital_status = status if status["sync"] else None
             self._dmr_audio = gate
-            self.signal = (wanted, level, level, None) if math.isfinite(level) else None
+            self.signal = SignalMeasurement(wanted, level, level, rf_excess_db=snr_db) if math.isfinite(level) else None
             self.waterfall = (wanted, frame) if frame else None
             if gate and pcm:
                 name = (panel.active_memory or {}).get("name")
@@ -2215,7 +2281,7 @@ class ScannerRuntime:
                 panel.observe_nearby(None, revision, now)
             self._v10_advance(now, gate, digital_carrier=rf_open if math.isfinite(level) else None)
 
-    def _receive_trunk(self, wanted, generation, level, status, pcm, frame):
+    def _receive_trunk(self, wanted, generation, level, status, pcm, frame, *, snr_db=None):
         with self.lock:
             panel = self.v10
             if (self._receiver_reopen or not self.scanner.power or not panel.trunk_enabled
@@ -2233,7 +2299,7 @@ class ScannerRuntime:
             panel.trunk_audio = gate
             panel.trunk_frequency = wanted[0]
             panel.trunk_error = None
-            self.signal = (wanted, level, level, None) if math.isfinite(level) else None
+            self.signal = SignalMeasurement(wanted, level, level, rf_excess_db=snr_db) if math.isfinite(level) else None
             self.waterfall = (wanted, frame) if frame else None
             if gate and pcm:
                 groups = panel.trunk_profile.get("talkgroups", {})
@@ -2496,6 +2562,8 @@ class ScannerRuntime:
                     if hasattr(receiver, "configure"):
                         receiver.configure(settings)
 
+                    if tuned is not None and self._v10_sweep_nearby(receiver, live_for=tuned):
+                        continue
                     if self._v10_sweep_nearby(receiver):
                         continue
 
@@ -2530,7 +2598,8 @@ class ScannerRuntime:
                                 tuned = next_hz, "DMR"
                                 self._trunk_retuned(next_hz, generation)
                             else:
-                                self._receive_trunk(tuned, generation, level, status, pcm, receiver.waterfall)
+                                self._receive_trunk(tuned, generation, level, status, pcm, receiver.waterfall,
+                                                    snr_db=getattr(receiver, "tuning_snr_db", None))
                         except (DmrDecoderError, ValueError) as error:
                             if trunk is not None:
                                 trunk.close()
@@ -2582,11 +2651,13 @@ class ScannerRuntime:
                             status, pcm = decoder.process(discriminator)
                             if pcm and hasattr(receiver, "process_decoded_audio"):
                                 pcm = receiver.process_decoded_audio(pcm)
+                            snr_db = getattr(receiver, "tuning_snr_db", None)
                             if voice_mode == "DMR":
                                 self._receive_dmr(wanted, dmr_revision, dab_epoch, level, status, pcm,
-                                                  decoder.take_messages(), receiver.waterfall)
+                                                  decoder.take_messages(), receiver.waterfall, snr_db=snr_db)
                             else:
-                                self._receive_digital(wanted, dmr_revision, dab_epoch, level, status, pcm, receiver.waterfall)
+                                self._receive_digital(wanted, dmr_revision, dab_epoch, level, status, pcm,
+                                                      receiver.waterfall, snr_db=snr_db)
                         except (DmrDecoderError, ValueError) as error:
                             if decoder is not None:
                                 decoder.close()
@@ -2673,7 +2744,7 @@ class ScannerRuntime:
                         self.tone_result = ((wanted, tone) if tone and primary == wanted and self.scanner.signal_open
                                             and tune_revision == self.scanner.tune_revision
                                             and (self.tone_enabled or current["tone_filter"]) else None)
-                        self.signal = ((wanted, level, usable_level, offset)
+                        self.signal = (SignalMeasurement(wanted, level, usable_level, offset, rf_excess)
                                        if primary == wanted and math.isfinite(level) else None)
                         self.fsk_text = getattr(receiver, "fsk_text", None) if primary == wanted else None
                         frame = receiver.waterfall
@@ -2690,8 +2761,12 @@ class ScannerRuntime:
                                                station_name=name, snr_db=rf_excess, offset_hz=offset,
                                                mode_detected=detected_mode == wanted[1])
                         now = time.monotonic()
-                        nearby = (primary if capture and math.isfinite(usable_level)
-                                  and usable_level >= self.scanner.squelch_db and rf_excess is not None
+                        nearby_level = usable_level
+                        if self.v10.nearby_current:
+                            limit = NEARBY_OFFSET_LIMITS.get(wanted[1], math.inf)
+                            nearby_level = level if offset is None or abs(offset) < limit else -math.inf
+                        nearby = (primary if capture and math.isfinite(nearby_level)
+                                  and nearby_level >= self.scanner.squelch_db and rf_excess is not None
                                   and rf_excess >= METER_MIN_EXCESS_DB else None)
                         self.v10.observe_nearby(nearby, tune_revision, now, name=rds.get("ps") if rds else None)
                         if audible:
@@ -3108,6 +3183,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                 if zone in CUSTOM_ZONES:
                     preset = runtime.v10.custom_presets.get(zone)
                     result["range"] = preset.copy() if preset else None
+                if ranges := runtime.v10.zone_ranges(zone):
+                    result["ranges"] = ranges
+                    result["ranges_customized"] = zone in runtime.v10.preset_ranges
             self.json_response(result)
             return
         if path == "/api/state":

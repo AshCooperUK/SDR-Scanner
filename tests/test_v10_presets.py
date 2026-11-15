@@ -7,10 +7,11 @@ from unittest.mock import call, patch
 import numpy as np
 
 from app import ScannerRuntime, valid_action
-from bandplan import AIR_STEP, factory_banks
+from bandplan import AIR_STEP, PRESET_SCAN_RANGES, factory_banks
 from receiver import IQ_RATE, IQ_SAMPLES, Receiver, ReceiverError
 from scanner import CHIRP_ZONE_LIMIT
-from v10 import NEARBY_LIMIT, NEARBY_MIN_SECONDS, NEARBY_PMR, NEARBY_RESUME_SECONDS
+from v10 import (NEARBY_IDLE_INTERVAL, NEARBY_LIMIT, NEARBY_LISTENING_INTERVAL, NEARBY_LIVE_INTERVAL,
+                 NEARBY_MIN_SECONDS, NEARBY_PMR, NEARBY_RESUME_SECONDS, NEARBY_SWEEPS, nearby_windows)
 
 
 class NearbyTests(unittest.TestCase):
@@ -277,6 +278,96 @@ class NearbyTests(unittest.TestCase):
         self.assertEqual(radio.state()["tune_hz"], 145_500_000)
         self.assertEqual(controls, ["retune", "disarm"])
 
+    def test_primary_live_capture_can_interrupt_an_in_flight_distant_probe(self):
+        radio = self.runtime
+        radio.act({"knob": "volume", "value": .5, "panel": "v10"})
+        current = 445_950_000, "FM"
+        hit = 446_006_250
+        radio.act({"v10": "tune", "hz": current[0], "mode": current[1]})
+        self.arm()
+        start = time.monotonic() + 1
+        pending = self.panel.next_nearby_probe(start, current)
+        radio._nearby_secondary_ready = True
+        probes = []
+
+        class Probe:
+            def nearby_live_peak(self, *args):
+                probes.append(args)
+                return hit
+
+        with patch("app.time.monotonic", return_value=start):
+            self.assertFalse(radio._v10_sweep_nearby(Probe(), live_for=(445_600_000, "FM")))
+            self.assertTrue(radio._v10_sweep_nearby(Probe(), live_for=current))
+        self.assertEqual(len(probes), 1)
+        band, lower, upper, exact, blocked, _ = probes[0]
+        self.assertEqual((band.label, lower, upper, exact), ("UHF", 430_000_000, 470_000_000, ()))
+        self.assertIn(current[0], blocked)
+        self.assertIsNone(self.panel.finish_nearby_probe(pending[0], hit + 12_500, "FM", start, listening=False))
+        self.assertEqual(radio.state()["tune_hz"], hit)
+        self.advance(start + 1, False)
+        self.assertEqual(radio.state()["tune_hz"], current[0])
+
+    def test_live_and_distant_probe_timers_are_separate_from_preset_scan_speed(self):
+        radio = self.runtime
+        radio.act({"knob": "volume", "value": .5, "panel": "v10"})
+        radio.act({"v10": "setting", "key": "scan_speed", "value": 1})
+        current = 146_500_000, "FM"
+        radio.act({"v10": "tune", "hz": current[0], "mode": current[1]})
+        self.arm()
+        start = time.monotonic() + 1
+        live = self.panel.next_nearby_live_probe(start, current)
+        distant = self.panel.next_nearby_probe(start, current)
+        self.assertIsNotNone(live)
+        self.assertIsNotNone(distant)
+        self.panel.finish_nearby_probe(live[0], None, "FM", start, listening=True, live=True)
+        self.panel.finish_nearby_probe(distant[0], None, "FM", start, listening=True)
+        self.assertIsNone(self.panel.next_nearby_live_probe(start + NEARBY_LIVE_INTERVAL - .001, current))
+        self.assertIsNotNone(self.panel.next_nearby_live_probe(start + NEARBY_LIVE_INTERVAL, current))
+        self.assertIsNone(self.panel.next_nearby_probe(start + NEARBY_LISTENING_INTERVAL - .001, current))
+        distant = self.panel.next_nearby_probe(start + NEARBY_LISTENING_INTERVAL, current)
+        self.assertIsNotNone(distant)
+        done = start + NEARBY_LISTENING_INTERVAL
+        self.panel.finish_nearby_probe(distant[0], None, "FM", done, listening=False)
+        self.assertIsNone(self.panel.next_nearby_probe(done + NEARBY_IDLE_INTERVAL - .001, current))
+        self.assertIsNotNone(self.panel.next_nearby_probe(done + NEARBY_IDLE_INTERVAL, current))
+
+    def test_wider_nearby_tiles_still_cover_the_full_voice_allocations(self):
+        windows = nearby_windows((98_400_000, "WFM"))
+        self.assertLess(len(windows), 60)
+        for expected in NEARBY_SWEEPS:
+            ranges = [(lower, upper) for band, lower, upper, _ in windows if band == expected]
+            self.assertEqual(ranges[0][0], expected.lower)
+            self.assertEqual(ranges[-1][1], expected.upper)
+            self.assertTrue(all(right == next_left for (_, right), (next_left, _) in zip(ranges, ranges[1:])))
+        band, lower, upper, _ = nearby_windows((118_125_000, "AM"))[0]
+        self.assertEqual((band.label, band.modulation, band.step), ("AIR", "AM", AIR_STEP))
+        self.assertEqual((lower, upper), (117_975_000, 118_925_000))
+
+    def test_live_nearby_ignores_off_grid_foreground_but_finds_separate_carrier(self):
+        frequency = 166_921_206
+        adjacent_hz = 166_931_250
+        locked_hz = 166_942_610
+        canonical_lock = 166_943_750
+        self.runtime.act({"knob": "volume", "value": .5, "panel": "v10"})
+        self.runtime.act({"v10": "tune", "hz": frequency, "mode": "FM"})
+        self.panel.temporary_locks.add(locked_hz)
+        self.arm()
+        _, _, band, lower, upper, exact, blocked = self.panel.next_nearby_live_probe(
+            time.monotonic() + 1, (frequency, "FM")
+        )
+        self.assertTrue({166_918_750, 166_925_000, canonical_lock, locked_hz} <= blocked)
+        self.assertNotIn(adjacent_hz, blocked)
+
+        receiver = Receiver()
+        center = frequency + 300_000
+        seconds = np.arange(IQ_SAMPLES) / IQ_RATE
+        voice = np.cumsum(np.cos(2 * np.pi * 700 * seconds)) * 1600 / IQ_RATE
+        foreground = .08 * np.exp(2j * np.pi * ((frequency - center) * seconds + voice))
+        adjacent = .06 * np.exp(2j * np.pi * (adjacent_hz - center) * seconds)
+        self.assertIsNone(receiver._nearby_channel(foreground, center, band, lower, upper, exact, blocked, -45))
+        self.assertEqual(receiver._nearby_channel(foreground + adjacent, center, band, lower, upper,
+                                                 exact, blocked, -45), adjacent_hz)
+
     def test_fft_detects_the_exact_pmr_channel_and_obeys_squelch(self):
         band = NEARBY_PMR
         receiver = Receiver()
@@ -405,17 +496,17 @@ class BroadcastPresetTests(unittest.TestCase):
                     now = 100.0
                     entry = panel.start_scan({"kind": "ZONE", "zones": [zone]}, (101_800_000, "WFM"), now)
                     self.assertEqual(entry["mode"], "WFM")
-                    point = panel.scan["current_point"]
+                    point = panel.preset_position()
                     self.assertIsNone(panel.scan_tick(now, False))
                     self.assertIsNone(panel.scan_tick(now + .07, False))
-                    self.assertEqual(panel.scan["current_point"], point)
+                    self.assertEqual(panel.preset_position(), point)
                     self.assertIsNotNone(panel.scan_tick(now + .13, False))
-                    self.assertNotEqual(panel.scan["current_point"], point)
-                    point = panel.scan["current_point"]
+                    self.assertNotEqual(panel.preset_position(), point)
+                    point = panel.preset_position()
                     self.assertIsNone(panel.scan_tick(now + .14, False))
                     self.assertIsNone(panel.scan_tick(now + .22, True))
                     self.assertIsNone(panel.scan_tick(now + 60, True))
-                    self.assertEqual(panel.scan["current_point"], point)
+                    self.assertEqual(panel.preset_position(), point)
                     self.assertFalse(panel.closed_at)
 
     def test_wfm_scan_qualification_uses_measured_offset_and_signal_excess(self):
@@ -459,7 +550,7 @@ class BroadcastPresetTests(unittest.TestCase):
                 self.assertEqual(qualified[5:], [is_centred] * 5)
 
 
-class FavoritePresetTests(unittest.TestCase):
+class PresetControlTests(unittest.TestCase):
     def setUp(self):
         folder = TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -537,3 +628,205 @@ class FavoritePresetTests(unittest.TestCase):
         state = self.act("memory", operation="delete", group=1, slot=4)
         self.assertIsNone(state["v10"]["scan_kind"])
         self.assertEqual(self.panel.zone_entries("FAV"), [])
+
+    def assert_tuned(self, state, hz, mode):
+        self.assertEqual((state["tune_hz"], state["modulation"]), (hz, mode))
+
+    def test_preset_dial_requires_a_valid_step_and_current_preset(self):
+        for steps in (-81, 81, 0, True, False, 1.0, "1", None):
+            with self.subTest(steps=steps):
+                self.assertFalse(valid_action({"v10": "preset_step", "steps": steps}))
+        for steps in (-80, 80):
+            self.assertTrue(valid_action({"v10": "preset_step", "steps": steps}))
+        self.assertFalse(valid_action({"v10": "preset_step"}))
+        self.assertFalse(valid_action({"v10": "preset_step", "steps": 1, "zone": "PMR"}))
+
+        self.act("tune", hz=446_006_250, mode="FM")
+        revision = self.runtime.scanner.tune_revision
+        self.assert_tuned(self.act("preset_step", steps=1), 446_006_250, "FM")
+        self.assertEqual(self.runtime.scanner.tune_revision, revision)
+
+    def test_preset_dial_holds_current_zone_and_preserves_scan_direction(self):
+        state = self.act("scan", kind="ZONE", zones=["PMR", "CB"], enabled=True)
+        self.assertEqual(state["v10"]["scan_zone"], "PMR")
+        state = self.act("step", direction=-1)
+        self.assertEqual(state["v10"]["scan_zone"], "CB")
+        self.assert_tuned(state, 27_405_000, "LSB")
+        self.panel.temporary_locks.add(26_965_000)
+
+        state = self.act("preset_step", steps=1)
+        self.assert_tuned(state, 26_975_000, "AM")
+        self.assertEqual(state["v10"]["scan_zones"], ["PMR", "CB"])
+        self.assertEqual(state["v10"]["scan_zone"], "CB")
+        self.assertEqual(state["v10"]["scan_direction"], -1)
+        self.assertTrue(state["v10"]["scan_held"])
+        self.assertIsNone(self.panel.scan_tick(self.panel.next_scan_at + 10, False))
+
+        state = self.act("scan_control", operation="resume")
+        self.assert_tuned(state, 26_975_000, "AM")
+        self.assertFalse(state["v10"]["scan_held"])
+        self.assertEqual(state["v10"]["scan_direction"], -1)
+
+        self.act("scan", kind="ZONE", enabled=False)
+        state = self.act("preset_step", steps=1)
+        self.assert_tuned(state, 26_985_000, "AM")
+        self.assertIsNone(state["v10"]["scan_kind"])
+
+    def test_preset_dial_steps_recalled_channels_in_their_programmed_modes(self):
+        self.assert_tuned(self.act("zone", zone="CB", operation="recall", index=39), 27_405_000, "AM")
+        state = self.act("preset_step", steps=1)
+        self.assert_tuned(state, 27_601_250, "FM")
+        self.assertIsNone(state["v10"]["scan_kind"])
+        self.assert_tuned(self.act("preset_step", steps=-2), 27_395_000, "AM")
+
+        self.act("tune", hz=27_395_000, mode="AM")
+        self.assert_tuned(self.act("preset_step", steps=1), 27_395_000, "AM")
+
+    def test_preset_dial_reaches_locked_and_scan_skipped_favourites_during_manual_recall(self):
+        self.save(0, 0, 446_006_250)
+        self.save(0, 1, 145_450_000)
+        self.save(0, 2, 135_375_000, "AM")
+        self.save(0, 3, 145_550_000)
+        self.save(0, 4, 145_600_000)
+        self.save(1, 4, 430_400_000, "DMR")
+        self.save(2, 0, 162_550_000)
+        self.act("memory", operation="skip", group=0, slot=4, skip=True)
+        self.panel.temporary_locks.add(135_375_000)
+        self.act("memory", operation="recall", group=0, slot=1)
+
+        state = self.act("preset_step", steps=1)
+        self.assert_tuned(state, 135_375_000, "AM")
+        self.assertEqual((state["v10"]["group"], state["v10"]["slot"]), (0, 2))
+        self.assertTrue(state["v10"]["current_lockout"])
+        self.assertEqual(state["v10"]["frequency_mode"], "memory")
+        self.assertIsNone(state["v10"]["scan_kind"])
+        self.assert_tuned(self.act("preset_step", steps=1), 145_550_000, "FM")
+        self.assert_tuned(self.act("preset_step", steps=-1), 135_375_000, "AM")
+        self.assert_tuned(self.act("preset_step", steps=2), 145_600_000, "FM")
+        self.assert_tuned(self.act("preset_step", steps=1), 430_400_000, "DMR")
+        self.assert_tuned(self.act("preset_step", steps=1), 446_006_250, "FM")
+        self.assert_tuned(self.act("preset_step", steps=-1), 430_400_000, "DMR")
+
+        self.start()
+        state = self.act("step", direction=1)
+        self.assert_tuned(state, 145_450_000, "FM")
+        state = self.act("step", direction=1)
+        self.assert_tuned(state, 145_550_000, "FM")
+        state = self.act("step", direction=1)
+        self.assert_tuned(state, 430_400_000, "DMR")
+        state = self.act("preset_step", steps=-1)
+        self.assert_tuned(state, 145_550_000, "FM")
+        self.assertTrue(state["v10"]["scan_held"])
+        state = self.act("preset_step", steps=-1)
+        self.assert_tuned(state, 145_450_000, "FM")
+        self.assertTrue(state["v10"]["scan_held"])
+        state = self.act("preset_step", steps=2)
+        self.assert_tuned(state, 430_400_000, "DMR")
+        self.assertEqual((state["v10"]["group"], state["v10"]["slot"]), (1, 4))
+        self.assertEqual(state["v10"]["scan_kind"], "ZONE")
+
+    def test_preset_dial_wraps_within_additional_recalled_favourite_group(self):
+        self.save(0, 1, 146_500_000)
+        self.save(1, 8, 446_006_250)
+        self.save(98, 0, 162_550_000)
+        self.save(99, 0, 162_600_000)
+        self.save(99, 2, 125_000_000, "AM")
+        self.save(99, 9, 430_400_000, "DMR")
+        self.save(100, 0, 100_000_000, "WFM")
+        self.act("memory", operation="recall", group=99, slot=0)
+
+        state = self.act("preset_step", steps=1)
+        self.assert_tuned(state, 125_000_000, "AM")
+        self.assertEqual((state["v10"]["group"], state["v10"]["slot"]), (99, 2))
+        self.assert_tuned(self.act("preset_step", steps=1), 430_400_000, "DMR")
+        self.assert_tuned(self.act("preset_step", steps=1), 162_600_000, "FM")
+        self.assert_tuned(self.act("preset_step", steps=-1), 430_400_000, "DMR")
+
+        self.act("memory", operation="recall", group=100, slot=0)
+        self.assert_tuned(self.act("preset_step", steps=1), 100_000_000, "WFM")
+        self.assert_tuned(self.start(), 146_500_000, "FM")
+        self.assert_tuned(self.act("step", direction=1), 446_006_250, "FM")
+        self.assert_tuned(self.act("step", direction=1), 146_500_000, "FM")
+
+    def test_preset_dial_steps_custom_range_with_auto_and_wraps(self):
+        self.act("zone", zone="CUSTOM1", operation="configure", name="Local Air",
+                 start_hz=128_125_000, end_hz=128_144_000)
+        self.act("scan", kind="ZONE", zone="CUSTOM1", enabled=True)
+
+        state = self.act("preset_step", steps=-1)
+        self.assert_tuned(state, 128_144_000, "AM")
+        self.assertTrue(state["v10"]["auto_mode"])
+        self.assertTrue(state["v10"]["scan_held"])
+        self.assert_tuned(self.act("preset_step", steps=2), 128_133_333, "AM")
+
+        self.act("scan", kind="ZONE", enabled=False)
+        state = self.act("preset_step", steps=1)
+        self.assert_tuned(state, 128_141_667, "AM")
+        self.assertTrue(state["v10"]["auto_mode"])
+        self.assertIsNone(state["v10"]["scan_kind"])
+
+    def test_builtin_ranges_cover_both_directions_and_preserve_dial_hold(self):
+        ranges = [
+            {"name": "Local AM", "start_hz": 128_125_000, "end_hz": 128_140_000, "step_hz": 10_000, "mode": "AM"},
+            {"name": "Local USB", "start_hz": 129_500_000, "end_hz": 129_510_000, "step_hz": 5_000, "mode": "USB"},
+        ]
+        original = self.panel.zone_entries("AIR")
+        self.act("zone", zone="AIR", operation="configure_ranges", ranges=ranges)
+        self.assertEqual(self.panel.zone_entries("AIR"), original)
+        self.assert_tuned(self.act("scan", kind="ZONE", zone="AIR", enabled=True), 128_125_000, "AM")
+        state = self.act("preset_step", steps=-1)
+        self.assert_tuned(state, 129_510_000, "USB")
+        self.assertTrue(state["v10"]["scan_held"])
+        self.assert_tuned(self.act("preset_step", steps=-3), 128_140_000, "AM")
+        self.assert_tuned(self.act("scan_control", operation="resume"), 128_140_000, "AM")
+        self.assert_tuned(self.act("step", direction=1), 129_500_000, "USB")
+        self.act("scan", kind="ZONE", enabled=False)
+        self.assert_tuned(self.act("preset_step", steps=-1), 128_140_000, "AM")
+
+    def test_range_edit_during_scan_rebuilds_the_grid_and_keeps_temporary_lockouts(self):
+        preset = {"name": "UHF local", "start_hz": 446_000_000, "end_hz": 446_012_500,
+                  "step_hz": 6_250, "mode": "FM"}
+        self.act("zone", zone="BUS", operation="configure_ranges", ranges=[preset])
+        state = self.act("scan", kind="ZONE", zones=["BUS", "PMR"], enabled=True)
+        self.assert_tuned(state, 446_000_000, "FM")
+        self.panel.temporary_locks.add(446_012_500)
+        self.assertEqual(self.act("step", direction=1)["v10"]["scan_zone"], "PMR")
+        self.act("zone", zone="BUS", operation="configure_ranges",
+                 ranges=[{**preset, "start_hz": 446_012_500, "end_hz": 446_025_000}])
+        for _ in range(30):
+            state = self.act("step", direction=1)
+            if state["v10"]["scan_zone"] == "BUS":
+                break
+        self.assertEqual(state["v10"]["scan_zone"], "BUS")
+        self.assert_tuned(state, 446_018_750, "FM")
+        self.assertEqual(self.panel.temporary_locks, {446_012_500})
+
+    def test_builtin_ranges_persist_in_backups_allow_reset_and_reject_stale_edits(self):
+        original = list(PRESET_SCAN_RANGES["HAM"])
+        preset = {"name": "Wide coverage", "start_hz": 100_000, "end_hz": 1_750_000_000,
+                  "step_hz": 100, "mode": "FM"}
+        command = {"v10": "zone", "zone": "HAM", "operation": "configure_ranges", "ranges": [preset]}
+        for invalid in ({"zone": "CB"}, {"zone": "PMR"}, {"zone": "FAV"}, {"ranges": []},
+                        {"ranges": [{**preset, "step_hz": True}]}, {"ranges": [{**preset, "mode": "NO"}]},
+                        {"ranges": [{**preset, "end_hz": 1_750_000_001}]}):
+            self.assertFalse(valid_action({**command, **invalid}), invalid)
+        self.act("zone", zone="HAM", operation="configure_ranges", ranges=[preset], expected_ranges=original)
+        newer = self.runtime.act({**command, "expected_ranges": original})
+        self.assertIn("ranges changed", newer["v10_error"])
+        self.assertEqual(self.panel.zone_ranges("HAM"), [preset])
+        state = self.act("scan", kind="ZONE", zone="HAM", enabled=True)
+        self.assert_tuned(state, 100_000, "FM")
+        self.assertEqual(len(self.panel.scan["points"]), 1)
+        self.assert_tuned(self.act("preset_step", steps=-1), 1_750_000_000, "FM")
+
+        reloaded = ScannerRuntime(self.runtime.scanner.state_path)
+        self.addCleanup(reloaded.close)
+        self.assertEqual(reloaded.v10.zone_ranges("HAM"), [preset])
+        backup = self.panel.backup()
+        self.act("zone", zone="HAM", operation="reset_ranges", expected_ranges=[preset])
+        self.assertEqual(self.panel.zone_ranges("HAM"), original)
+        self.act("restore", backup=backup)
+        self.assertEqual(self.panel.zone_ranges("HAM"), [preset])
+        backup.pop("preset_ranges")
+        self.act("restore", backup=backup)
+        self.assertEqual(self.panel.zone_ranges("HAM"), original)

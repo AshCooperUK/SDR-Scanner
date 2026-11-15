@@ -33,8 +33,9 @@ PROBE_FFT = 8192
 PROBE_HALF_WIDTH = 900_000
 PROBE_STRIDE = 1_600_000
 NEARBY_MIN_EXCESS_DB = 10
-WATERFALL_BINS = 172
-WATERFALL_SPAN_HZ = 1_000_000
+NEARBY_DC_GUARD_HZ = 20_000
+WATERFALL_BINS = 320
+WATERFALL_SPAN_HZ = 2 * PROBE_HALF_WIDTH
 WATERFALL_INTERVAL = 1 / 7
 SSB_MODES = frozenset(("USB", "LSB"))
 CW_MODES = frozenset(("CW", "CW-R"))
@@ -910,7 +911,7 @@ class Receiver:
             spectrum = self._watch_spectrum(self._watch_iq)
             now = monotonic()
             if now >= self._waterfall_at:
-                self._update_waterfall(spectrum, hz, now)
+                self._update_waterfall(spectrum, now)
             relative = self._probe_offsets - offset
             noise_bins = self._meter_noise_bins & (np.abs(relative) > WATCH_HALF_WIDTH[mode])
             noise = np.median(spectrum[noise_bins]) * (METER_NOISE_BANDWIDTH[mode] * PROBE_FFT / IQ_RATE)
@@ -928,15 +929,13 @@ class Receiver:
             if len(self._meter_offsets) >= (6 if mode == "WFM" else 4):
                 self._tuning_offset_hz = sum(self._meter_offsets) / len(self._meter_offsets)
 
-    def _update_waterfall(self, spectrum, hz, now):
-        # Stay away from passband edges and keep the full plot in the tuning
-        # range. Near a band limit, shift the view so the selected RF stays visible.
+    def _update_waterfall(self, spectrum, now):
+        # Send the usable IQ window so the display can pan around the receive frequency.
         low_limit, high_limit = (100_000, DIRECT_LIMIT) if self._direct else (DIRECT_LIMIT, TUNER_LIMIT)
         low = max(low_limit, self._center - PROBE_HALF_WIDTH)
         high = min(high_limit, self._center + PROBE_HALF_WIDTH)
-        span = min(WATERFALL_SPAN_HZ, high - low)
-        left = min(max(hz - span // 2, low), high - span)
-        edges = np.linspace(left - self._center, left + span - self._center, WATERFALL_BINS + 1)
+        span = high - low
+        edges = np.linspace(low - self._center, high - self._center, WATERFALL_BINS + 1)
         boundaries = np.searchsorted(self._probe_offsets, edges)
         first, last = boundaries[0], boundaries[-1]
         visible_power = spectrum[first:last]
@@ -951,7 +950,7 @@ class Receiver:
         grouped = np.maximum.reduceat(visible_power, boundaries[:-1] - first)
         levels = np.rint(10 * np.log10(np.clip(grouped, 1e-12, 1))).astype(int)
         self._waterfall_sequence += 1
-        self._waterfall = {"sequence": self._waterfall_sequence, "center_hz": left + span // 2,
+        self._waterfall = {"sequence": self._waterfall_sequence, "center_hz": low + span // 2,
                            "span_hz": span, "levels": tuple(levels.tolist()), "time_ms": round(now * 1000)}
         self._waterfall_at = now + WATERFALL_INTERVAL
 
@@ -1038,15 +1037,35 @@ class Receiver:
             if restore and self._tuning is not None and previous[0] is not None:
                 self._set_center(*previous, restore_gain=previous_gain)
 
+    def nearby_live_peak(self, band, lower, upper, exact, blocked, squelch):
+        """Check the part of a Nearby window already captured by the audio tuner."""
+        if self._watch_iq is None or self._center is None:
+            return None
+        margin = PROBE_HALF_WIDTH - WATCH_HALF_WIDTH[band.modulation]
+        lower = max(lower, self._center - margin)
+        upper = min(upper, self._center + margin)
+        if self._direct:
+            upper = min(upper, DIRECT_LIMIT - 1)
+        else:
+            lower = max(lower, DIRECT_LIMIT)
+        if lower > upper:
+            return None
+        return self._nearby_channel(self._watch_iq, self._center, band, lower, upper, exact, blocked, squelch)
+
     def nearby_peak(self, center, band, lower, upper, exact, blocked, squelch, *, preserve=False):
         """Find the strongest eligible channel, optionally preserving the listening channel."""
         half_width = WATCH_HALF_WIDTH[band.modulation]
         direct = center < DIRECT_LIMIT
         previous = self._center, self._direct
-        if (self._center is not None and self._direct == direct
-                and max(abs(lower - self._center), abs(upper - self._center)) + half_width <= PROBE_HALF_WIDTH
-                and (preserve or not lower - 20_000 <= self._center <= upper + 20_000)):
-            center = self._center
+        if self._center is not None and self._direct == direct:
+            covers_window = max(abs(lower - self._center), abs(upper - self._center)) + half_width <= PROBE_HALF_WIDTH
+            if exact:
+                dc_clear = all(abs(hz - self._center) >= NEARBY_DC_GUARD_HZ for hz in exact if hz not in blocked)
+            else:
+                # Keep the sweep's alternating centers when the current LO hides part of the tile.
+                dc_clear = not lower - NEARBY_DC_GUARD_HZ < self._center < upper + NEARBY_DC_GUARD_HZ
+            if covers_window and dc_clear:
+                center = self._center
         if preserve and (center, direct) == previous and self._watch_iq is not None:
             return self._nearby_channel(self._watch_iq, center, band, lower, upper, exact, blocked, squelch)
 
@@ -1067,22 +1086,23 @@ class Receiver:
         half_width = WATCH_HALF_WIDTH[mode]
         power = self._watch_spectrum(iq)
         frequencies = self._probe_offsets + center
-        usable = (np.abs(self._probe_offsets) >= 20_000) & (np.abs(self._probe_offsets) <= PROBE_HALF_WIDTH)
+        usable = ((np.abs(self._probe_offsets) >= NEARBY_DC_GUARD_HZ)
+                  & (np.abs(self._probe_offsets) <= PROBE_HALF_WIDTH))
         floor = np.median(power[usable]) * (METER_NOISE_BANDWIDTH[mode] * PROBE_FFT / IQ_RATE)
         threshold = max(squelch, 10 * np.log10(max(floor, 1e-15)) + NEARBY_MIN_EXCESS_DB)
         if exact:
             candidates = exact
         else:
             in_window = usable & (frequencies >= lower) & (frequencies <= upper)
-            peaks = signal.find_peaks(np.where(in_window, power, 0), distance=8)[0]
-            strongest = sorted(peaks, key=power.__getitem__, reverse=True)[:12]
+            peaks = signal.find_peaks(power, distance=8)[0]
             candidates = dict.fromkeys(
-                band.nearest(round(float(frequencies[index])), band.step) for index in strongest
+                band.nearest(round(float(frequencies[index])), band.step) for index in peaks[in_window[peaks]]
             )
         best_hz, best_level = None, threshold
         for hz in candidates:
             offset = abs(hz - center)
-            if hz in blocked or not lower <= hz <= upper or not 20_000 <= offset <= PROBE_HALF_WIDTH - half_width:
+            if (hz in blocked or not lower <= hz <= upper
+                    or not NEARBY_DC_GUARD_HZ <= offset <= PROBE_HALF_WIDTH - half_width):
                 continue
             level = self._watch_level(power, hz - center, mode)
             if level >= best_level:

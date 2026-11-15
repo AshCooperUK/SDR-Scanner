@@ -1,5 +1,5 @@
 import { PcmBuffer } from "./pcm-buffer.js";
-import { AF_VOLUME_STEP, createReceiverMenus, formatP25Talkgroup, hasAnalogFilter, isCustomPreset, supportsSsbDsp, TUNING_STEPS, ZONE_NAMES } from "./v10-menus.js";
+import { AF_VOLUME_STEP, createReceiverMenus, favoriteBankLabel, formatP25Talkgroup, hasAnalogFilter, isCustomPreset, supportsSsbDsp, TUNING_STEPS, ZONE_NAMES } from "./v10-menus.js";
 
 const root = document.getElementById("sdr-v10-panel");
 const lcd = root.querySelector(".lcd");
@@ -9,8 +9,21 @@ const panels = [...lcd.querySelectorAll("[data-panel]")];
 const view = Object.fromEntries([...root.querySelectorAll("[data-el]")].map(node => [node.dataset.el, node]));
 const control = name => root.querySelector('[data-action="' + name + '"]');
 const knob = name => root.querySelector('.knob[data-action="' + name + '"]');
-const dialNames = ["dial-a", "dial-b", "dial-c", "dial-d", "dial-e", "frequency"];
-const favoriteKeys = [...root.querySelectorAll('[data-action="favorite"]')];
+const powerLedRing = root.querySelector(".power-led-ring");
+const powerLeds = [...powerLedRing.children];
+const bottomDials = ["dial-f", "dial-g", "dial-h", "dial-i", "dial-j"];
+const extraDials = ["dial-d", "dial-e", ...bottomDials];
+const dialNames = ["dial-a", "dial-b", "dial-c", ...extraDials, "frequency"];
+const favoriteBanks = [...root.querySelectorAll("[data-favorite-side]")].map(element => {
+  const label = element.querySelector(".bank-label");
+  const labelText = document.createTextNode(label.textContent);
+  const customName = document.createElement("span");
+  customName.className = "bank-custom-name";
+  customName.hidden = true;
+  label.replaceChildren(labelText, customName);
+  return {side: element.dataset.favoriteSide, label, labelText, customName,
+    keys: [...element.querySelectorAll('[data-action="favorite"]')]};
+});
 const zoneKeys = [...root.querySelectorAll('[data-action="zone"]')];
 const zoneKeyNames = Object.fromEntries(zoneKeys.map(key => [key.dataset.zone, key.textContent.trim()]));
 const frequency = root.querySelector(".frequency-button");
@@ -59,6 +72,7 @@ const modeHelp = {
 const displayMode = name => name?.toUpperCase() === "DPMR" ? "dPMR" : name;
 const spans = [12500, 25000, 50000, 75000, 100000, 150000, 200000, 250000, 300000,
   400000, 500000, 750000, 1000000];
+const maximumScopeSpan = 1800000;
 const speeds = ["Slow", "Mid", "Fast"];
 const clockFormat = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 const mirrorFields = ["mode", "top-state", "clock", "level", "site", "status", "detail-a", "detail-b",
@@ -92,10 +106,11 @@ let pinSetup;
 let menu;
 const panelDefaults = {
   dialLock: false, channelDial: false, page: 1, expanded: false, visible: true,
-  freeze: false, fixed: false, marker: false, span: 1000000, edges: null,
+  freeze: false, fixed: false, marker: false, span: 1000000, edges: null, scopePan: 0,
 };
 const ui = {...panelDefaults, dialAngles: {}, menuDialAngles: {}, frame: null, history: [], lastLineAt: 0, scopeForm: null};
 let panelSettingsSaved;
+let previousScanScopeSpan;
 let mirror;
 let mirrorId;
 let mirrorWindow;
@@ -108,6 +123,14 @@ let audioRequest;
 let audioRetry;
 let audioSignature;
 let playback;
+let audioAnalyser;
+let audioMeterSamples;
+let audioMeterFrame = 0;
+let audioMeterAt = 0;
+let liveMeterUntil = 0;
+let audioMeterLevel = 0;
+let litPowerLeds = 0;
+let powerPulseUntil = 0;
 let audioVolume = 32;
 let volumeMuted = false;
 let powerPending = false;
@@ -146,11 +169,15 @@ function restorePanelSettings() {
     if (typeof fallback === "boolean" && typeof saved?.[key] === "boolean") ui[key] = saved[key];
   }
   if (saved?.page === 2) ui.page = 2;
-  if (finite(saved?.span) && saved.span > 0 && saved.span <= spans.at(-1)) ui.span = saved.span;
+  if (saved?.span === "full" || (finite(saved?.span) && saved.span > 0 && saved.span <= maximumScopeSpan)) {
+    ui.span = saved.span;
+  }
+  if (finite(saved?.scopePan)) ui.scopePan = saved.scopePan;
   if (Array.isArray(saved?.edges) && saved.edges.length === 2
       && saved.edges.every(finite) && saved.edges[0] < saved.edges[1]) ui.edges = saved.edges;
   if (!ui.edges) ui.fixed = false;
   panelSettingsSaved = JSON.stringify(panelSettings());
+  previousScanScopeSpan = selectedScanScopeSpan();
 }
 
 function rememberPanelSettings() {
@@ -158,6 +185,19 @@ function rememberPanelSettings() {
   if (current === panelSettingsSaved) return;
   panelSettingsSaved = current;
   try { localStorage.setItem(preferencePrefix + panelSettingsKey, current); } catch {}
+  const scopeSpan = selectedScanScopeSpan();
+  if (scopeSpan === previousScanScopeSpan) return;
+  previousScanScopeSpan = scopeSpan;
+  if (!state.power || access.pin_required) return;
+  if (!actionCount && (!settings().scan_follow_scope || !activeScan())) return;
+  // Send the latest deliberate span change, including those made while a request was in flight.
+  void act(() => {
+    const scope_span_hz = selectedScanScopeSpan();
+    if (state.power && !access.pin_required && settings().scan_follow_scope && activeScan()
+        && scope_span_hz !== receiver().scan_scope_span_hz) {
+      return {v10: "scan_control", operation: "scope_span", scope_span_hz};
+    }
+  }).catch(showError);
 }
 
 const receiver = () => state.v10 || {};
@@ -249,7 +289,10 @@ function act(action) {
   const result = actionChain.then(async () => {
     const payload = typeof action === "function" ? action() : action;
     if (!payload) return;
-    const next = await request("/api/action", { method: "POST", body: payload });
+    const sendScopeSpan = (payload.v10 === "scan" && payload.enabled && settings().scan_follow_scope)
+      || (payload.v10 === "setting" && payload.key === "scan_follow_scope" && payload.value === true);
+    const body = sendScopeSpan ? {...payload, scope_span_hz: selectedScanScopeSpan()} : payload;
+    const next = await request("/api/action", { method: "POST", body });
     if (payload.v10 === "setting" && payload.key === "tune_step" && !next?.v10_error) {
       ui.stepOverride = null;
       lastMainTurn = -Infinity;
@@ -453,7 +496,7 @@ async function tune(hz, mode = vfoMode()) {
 }
 
 function parseFrequency(value, current = 0) {
-  const entry = value.trim();
+  const entry = value.trim().replace(/^(\d{1,4}\.\d{3})\.(\d{3})$/, "$1$2");
   if (!/^(?:\d+\.?\d*|\.\d+)$/.test(entry)) return NaN;
   const mhz = entry.startsWith(".") ? Math.floor(current / 1e6) + Number(entry) : Number(entry);
   return Math.round(mhz * 1e6);
@@ -589,6 +632,55 @@ function audioLevel() {
   return state.power && !state.muted && !volumeMuted ? Math.pow(audioVolume / 100, 1.45) : 0;
 }
 
+function paintPowerLeds(level) {
+  const count = Math.round(level * powerLeds.length);
+  for (let index = Math.min(count, litPowerLeds); index < Math.max(count, litPowerLeds); index++) {
+    powerLeds[index].classList.toggle("lit", index < count);
+  }
+  litPowerLeds = count;
+}
+
+function shouldMeterAudio() {
+  return state.power && audioAnalyser && audioContext.state === "running" && !document.hidden && !playback
+    && performance.now() < liveMeterUntil;
+}
+
+function samplePowerLeds(now) {
+  audioMeterFrame = 0;
+  if (!shouldMeterAudio()) {
+    syncPowerLeds();
+    return;
+  }
+  audioAnalyser.getFloatTimeDomainData(audioMeterSamples);
+  let sum = 0;
+  for (const sample of audioMeterSamples) sum += sample * sample;
+  const db = 10 * Math.log10(sum / audioMeterSamples.length);
+  if (db >= -80) powerPulseUntil = now + 180;
+  powerLedRing.classList.toggle("is-pulsing", now < powerPulseUntil);
+  const level = clamp((db + 68) / 64, 0, 1);
+  const release = Math.max(0, now - audioMeterAt) / 180;
+  audioMeterLevel = Math.max(level, audioMeterLevel - release);
+  audioMeterAt = now;
+  paintPowerLeds(audioMeterLevel);
+  audioMeterFrame = requestAnimationFrame(samplePowerLeds);
+}
+
+function syncPowerLeds() {
+  if (shouldMeterAudio()) {
+    if (!audioMeterFrame) {
+      audioMeterAt = performance.now();
+      audioMeterFrame = requestAnimationFrame(samplePowerLeds);
+    }
+    return;
+  }
+  if (audioMeterFrame) cancelAnimationFrame(audioMeterFrame);
+  audioMeterFrame = 0;
+  audioMeterLevel = 0;
+  powerPulseUntil = 0;
+  powerLedRing.classList.remove("is-pulsing");
+  paintPowerLeds(0);
+}
+
 function updateAudioGain() {
   const level = audioLevel();
   const boostDb = clamp(Number(getPreference("audio_boost", 0)) || 0, 0, maxBoostDb);
@@ -598,6 +690,7 @@ function updateAudioGain() {
     playback.muted = level === 0;
     playback.volume = level;
   }
+  syncPowerLeds();
 }
 
 function liveAudioLimiter() {
@@ -622,7 +715,14 @@ async function prepareAudio() {
     audioContext = new Audio({ latencyHint: "interactive" });
     audioGain = audioContext.createGain();
     audioGain.gain.value = 0;
-    audioGain.connect(liveAudioLimiter()).connect(audioContext.destination);
+    const limiter = liveAudioLimiter();
+    audioGain.connect(limiter).connect(audioContext.destination);
+    if (powerLeds.length) {
+      audioAnalyser = audioContext.createAnalyser();
+      audioAnalyser.fftSize = 1024;
+      audioMeterSamples = new Float32Array(audioAnalyser.fftSize);
+      audioContext.addEventListener("statechange", syncPowerLeds);
+    }
     audioStarting = (async () => {
       const resume = audioContext.resume().catch(() => {});
       try {
@@ -636,6 +736,8 @@ async function prepareAudio() {
         audioNode.onaudioprocess = event => audioBuffer.readInto(event.outputBuffer.getChannelData(0));
       }
       audioNode.connect(audioGain);
+      // Meter received audio before the browser's speaker volume and mute.
+      if (audioAnalyser) audioNode.connect(audioAnalyser);
       // Some browsers keep resume pending until their first explicit activation.
       void resume;
       syncAudio();
@@ -689,6 +791,11 @@ async function readAudio() {
       const samples = new Float32Array(Math.floor(input.length / 2));
       const pcm = new DataView(input.buffer);
       for (let index = 0; index < samples.length; index++) samples[index] = pcm.getInt16(index * 2, true) / 32768;
+      if (audioAnalyser && !playback && !document.hidden && samples.some(sample => sample !== 0)) {
+        // Keep sampling while this packet passes through the PCM playback queue.
+        liveMeterUntil = performance.now() + 350;
+        syncPowerLeds();
+      }
       if (audioBuffer) audioBuffer.enqueue(samples);
       else audioNode.port.postMessage(samples, [samples.buffer]);
     }
@@ -738,16 +845,35 @@ function resetScope() {
 }
 
 function spanHz() {
-  return Math.min(ui.span, captureSpan());
+  return ui.span === "full" ? captureSpan() : Math.min(ui.span, captureSpan());
+}
+
+function selectedScanScopeSpan() {
+  // The visible scope can fit itself as capture moves during a scan. Use the selected
+  // span so those automatic adjustments do not alter the scan rate.
+  const span = ui.fixed && ui.edges ? ui.edges[1] - ui.edges[0]
+    : ui.span === "full" ? maximumScopeSpan : ui.span;
+  return clamp(Math.round(span), 1, maximumScopeSpan);
 }
 
 function captureSpan() {
   return ui.frame?.span_hz ?? spans.at(-1);
 }
 
+function fullScopeRange() {
+  if (!ui.frame) return null;
+  const low = ui.frame.center_hz - Math.floor(ui.frame.span_hz / 2);
+  return [low, low + ui.frame.span_hz];
+}
+
 function scopeSpans() {
   const limit = captureSpan();
-  return [...new Set([...spans.filter(span => span <= limit), limit])];
+  return [...spans.filter(span => span < limit), limit];
+}
+
+function setScopeSpan(span) {
+  ui.span = span;
+  if (span === "full" || span >= captureSpan()) ui.scopePan = 0;
 }
 
 function scopeSpanLabel(hz) {
@@ -758,7 +884,8 @@ function scopeSpanLabel(hz) {
 function ingestScope(frame) {
   if ((ui.freeze && ui.frame) || !frame?.levels?.length || !finite(frame.center_hz) || !finite(frame.span_hz)) return;
   if (ui.frame?.sequence === frame.sequence && ui.frame?.time_ms === frame.time_ms) return;
-  const consecutive = ui.frame?.center_hz === frame.center_hz && ui.frame?.span_hz === frame.span_hz;
+  const consecutive = ui.frame?.center_hz === frame.center_hz && ui.frame?.span_hz === frame.span_hz
+    && ui.frame.levels.length === frame.levels.length;
   const sweep = getPreference("scope_sweep_speed", "mid");
   const sampleInterval = { slow: 420, mid: 180, fast: 0 }[sweep] ?? 0;
   if (consecutive && frame.time_ms - ui.frame.time_ms < sampleInterval) return;
@@ -793,44 +920,60 @@ function ingestScope(frame) {
   }
 }
 
+function scopeAnchor() {
+  return (ui.freeze ? ui.heldCenter : null) ?? receiverHz();
+}
+
 function scopeRange() {
-  const frame = ui.frame;
-  if (ui.fixed && ui.edges) return ui.edges;
-  const center = (ui.freeze ? ui.heldCenter : null) ?? receiverHz();
-  const span = spanHz();
-  const {min_hz = minimumHz, max_hz = maximumHz} = receiver().capabilities ?? {};
-  let low = clamp(center - span / 2, min_hz, max_hz - span);
-  if (frame) {
-    const captureLow = frame.center_hz - frame.span_hz / 2;
-    const captureHigh = frame.center_hz + frame.span_hz / 2;
-    // The exported FFT shifts at the band limits to keep the tuned signal in view.
-    if (center >= captureLow && center <= captureHigh) {
-      low = clamp(low, captureLow, captureHigh - span);
-    }
+  const capture = fullScopeRange();
+  if (ui.fixed && ui.edges) {
+    if (!capture) return ui.edges;
+    const low = Math.max(ui.edges[0], capture[0]);
+    const high = Math.min(ui.edges[1], capture[1]);
+    return high > low ? [low, high] : capture;
   }
+  if (ui.span === "full" && capture) return capture;
+  const anchor = scopeAnchor();
+  const {min_hz = minimumHz, max_hz = maximumHz} = receiver().capabilities ?? {};
+  const [availableLow, availableHigh] = capture ?? [min_hz, max_hz];
+  let span = Math.min(spanHz(), availableHigh - availableLow);
+  if (!ui.scopePan) {
+    const centeredSpan = 2 * Math.min(anchor - availableLow, availableHigh - anchor);
+    // Leave the selected span intact so it can widen again as the capture moves.
+    if (centeredSpan >= Math.min(span, spans[0])) span = Math.min(span, centeredSpan);
+  }
+  const desired = Math.round(anchor + ui.scopePan - span / 2);
+  const low = clamp(desired, availableLow, availableHigh - span);
   return [low, low + span];
 }
 
 const scopeFrequencyAt = (range, fraction) => range[0] + (range[1] - range[0]) * fraction;
 
 function sampleAt(frame, row, hz) {
-  const index = Math.floor((hz - frame.center_hz + frame.span_hz / 2) / frame.span_hz * row.length);
+  const index = Math.floor((hz - frame.center_hz + Math.floor(frame.span_hz / 2)) / frame.span_hz * row.length);
   return index >= 0 && index < row.length ? row[index] : null;
 }
 
-// Turbo-style waterfall: a dark low end and warm colours for strong carriers.
-const scopeColorStops = [0x050a12, 0x101d46, 0x233c86, 0x266bdd, 0x1baddb, 0x26c995,
-  0x87d94d, 0xdadf43, 0xffbf3e, 0xf6832e, 0xe44824, 0xc51d21];
-const scopeColors = Array.from({length: 256}, (_, index) => {
-  const position = index * (scopeColorStops.length - 1) / 255;
-  const left = Math.floor(position);
-  const right = Math.min(left + 1, scopeColorStops.length - 1);
-  return [16, 8, 0].map(shift => {
-    const from = (scopeColorStops[left] >> shift) & 255;
-    const to = (scopeColorStops[right] >> shift) & 255;
-    return Math.round(from + (to - from) * (position - left));
+function waterfallGradient(stops) {
+  return Array.from({length: 256}, (_, index) => {
+    const position = index * (stops.length - 1) / 255;
+    const left = Math.floor(position);
+    const right = Math.min(left + 1, stops.length - 1);
+    return [16, 8, 0].map(shift => {
+      const from = (stops[left] >> shift) & 255;
+      const to = (stops[right] >> shift) & 255;
+      return Math.round(from + (to - from) * (position - left));
+    });
   });
-});
+}
+
+const waterfallPalettes = {
+  spectrum: waterfallGradient([0x050a12, 0x101d46, 0x233c86, 0x266bdd, 0x1baddb, 0x26c995,
+    0x87d94d, 0xdadf43, 0xffbf3e, 0xf6832e, 0xe44824, 0xc51d21]),
+  blue: waterfallGradient([0x050a12, 0x122151, 0x1e52ae, 0x2faadb, 0x93e1f5, 0xf0fbff]),
+  amber: waterfallGradient([0x050a12, 0x302011, 0x894514, 0xc67720, 0xffbd50, 0xfff1bc]),
+  greyscale: waterfallGradient([0x0a0a0a, 0x303030, 0x606060, 0xa8a8a8, 0xfafafa]),
+};
 
 const waterfallNoiseMarginDb = 5;
 const waterfallContrastDb = 40;
@@ -896,8 +1039,9 @@ function drawScope(frame, history, range, options, average, maxTrace) {
   const showWaterfall = options.waterfall;
   const divide = showWaterfall ? Math.floor(height * scopeSpectrumFraction) : height;
   const reference = Number(options.reference) || 0;
+  const colors = Object.hasOwn(waterfallPalettes, options.palette) ? waterfallPalettes[options.palette] : waterfallPalettes.spectrum;
   const drawKey = [frame?.sequence, frame?.time_ms, range[0], range[1], options.marker, options.hz,
-    reference, options.squelchDb, options.waterfall, options.scopeHold, options.maxHold, history.length].join(":");
+    reference, options.squelchDb, options.channelDb, options.waterfall, options.palette, options.scopeHold, options.maxHold, history.length].join(":");
   if (drawKey === previousScopeDraw) return;
   previousScopeDraw = drawKey;
   context.fillStyle = "#050a12";
@@ -915,7 +1059,7 @@ function drawScope(frame, history, range, options, average, maxTrace) {
         const value = sampleAt(historicalFrame, row, scopeFrequencyAt(range, (x + 0.5) / width));
         if (!finite(value)) continue;
         const fraction = clamp((value - bottom) / waterfallContrastDb, 0, 1);
-        const color = scopeColors[Math.round(fraction * (scopeColors.length - 1))];
+        const color = colors[Math.round(fraction * (colors.length - 1))];
         const pixel = 4 * (y * width + x);
         strip.data.set(color, pixel);
         strip.data[pixel + 3] = 255;
@@ -968,6 +1112,18 @@ function drawScope(frame, history, range, options, average, maxTrace) {
     context.setLineDash([6, 3]);
     context.beginPath(); context.moveTo(0, y); context.lineTo(width, y); context.stroke();
     context.restore();
+    if (frame && !options.scopeHold && x >= 0 && x <= width && finite(options.channelDb)) {
+      // The squelch compares filtered channel power. The FFT trace shows individual bins.
+      const levelY = spectrumY(options.channelDb, divide, reference);
+      context.fillStyle = "#e8f6ff";
+      context.beginPath();
+      context.moveTo(x, levelY - 4);
+      context.lineTo(x + 4, levelY);
+      context.lineTo(x, levelY + 4);
+      context.lineTo(x - 4, levelY);
+      context.closePath();
+      context.fill();
+    }
   }
 }
 
@@ -1031,18 +1187,27 @@ function updateScope() {
   const range = scopeRange();
   displayedScopeRange = range;
   const validFrame = Boolean(ui.frame);
+  const midpoint = scopeFrequencyAt(range, 0.5);
   view["axis-left"].textContent = validFrame ? formatAxis(range[0]) : "—";
-  view["axis-center"].textContent = validFrame ? formatAxis(scopeFrequencyAt(range, 0.5)) + " MHz" : "—";
+  view["axis-center"].textContent = validFrame ? formatAxis(midpoint) + " MHz" : "—";
   view["axis-right"].textContent = validFrame ? formatAxis(range[1]) : "—";
   view["scope-hold"].textContent = receiver().nearby_receiving ? (receiver().nearby_held ? "HOLD" : "")
     : zoneScanning() && receiver().scan_held ? "SCAN HOLD" : ui.freeze ? "HOLD" : "";
-  view["scope-reference-mode"].textContent = ui.fixed ? "FIX" : "CENTER";
-  view["scope-grid"].textContent = validFrame ? "Grid " + stepLabel((range[1] - range[0]) / 10) : "";
+  const capture = fullScopeRange();
+  const full = capture && range[0] === capture[0] && range[1] === capture[1];
+  const fittedEdges = ui.fixed && ui.edges && range.some((edge, index) => edge !== ui.edges[index]);
+  const centered = Math.abs(midpoint - scopeAnchor()) <= 0.5;
+  view["scope-reference-mode"].textContent = ui.fixed ? (fittedEdges ? "FIX FIT" : "FIX")
+    : ui.scopePan ? "PAN" : centered ? "CENTER" : "CAPTURE";
+  view["scope-grid"].textContent = validFrame
+    ? (full ? "FULL " : "SPAN ") + scopeSpanLabel(range[1] - range[0]) : "";
+  const channelDb = state.modulation === "WFM" ? state.signal_meter_dbfs ?? state.signal_dbfs : state.signal_dbfs;
   const scopeOptions = { marker: ui.marker, hz: receiverHz(), reference: getPreference("scope_reference", 0),
-    waterfall: getPreference("scope_waterfall", true), scopeHold: ui.freeze,
+    waterfall: getPreference("scope_waterfall", true), palette: getPreference("waterfall_colours", "spectrum"),
+    scopeHold: ui.freeze,
     maxHold: getPreference("scope_max_hold", "off"), nearbySweep: Boolean(state.power && receiver().nearby_sweeping),
     nearbyListening: state.power && state.receiver === "ready" && receiver().nearby_sweeping && !activeScan(),
-    squelchDb: state.power && (isMirror || state.squelch > 0) ? state.squelch_db : null };
+    squelchDb: state.power && (isMirror || state.squelch > 0) ? state.squelch_db : null, channelDb };
   drawScope(ui.frame, ui.history, range, scopeOptions, ui.average, ui.peakTrace);
   if (scopePointer) refreshScopeTip();
   return { frame: ui.frame, history: ui.history, range, options: scopeOptions, average: ui.average, maxTrace: ui.peakTrace };
@@ -1083,19 +1248,45 @@ function favoriteMemory(bank, slot) {
   return receiver().memories?.find(entry => entry.group === bank && entry.slot === slot);
 }
 
+const favoriteBankCount = 100;
+
+function displayedFavoriteBank(side) {
+  const group = getPreference("favorite_bank_" + side, null);
+  return Number.isInteger(group) && group >= 0 && group < favoriteBankCount ? group : side === "a" ? 0 : 1;
+}
+
 function renderFavorites() {
-  for (const key of favoriteKeys) {
-    const bank = Number(key.dataset.bank);
-    const slot = Number(key.dataset.slot);
-    const entry = favoriteMemory(bank, slot);
-    const current = Boolean(state.power && entry && state.tune_hz === entry.hz && state.modulation === entry.mode);
-    const lamp = key.querySelector(".lamp");
-    lamp?.classList.toggle("green", current);
-    lamp?.classList.toggle("amber", Boolean(state.power && entry && !current));
-    pressed(key, current);
-    key.title = entry ? [entry.name, (entry.hz / 1e6).toFixed(6) + " MHz", entry.mode,
-      "Click to recall. Hold to replace. Right-click twice to clear."].filter(Boolean).join(" · ")
-      : "Empty favourite. Hold to save the tuned frequency.";
+  for (const {side, label, labelText, customName, keys} of favoriteBanks) {
+    const bank = displayedFavoriteBank(side);
+    const panelLabel = favoriteBankLabel(side, bank);
+    const name = receiver().bank_names?.[bank] ?? "";
+    if (labelText.data !== panelLabel) labelText.data = panelLabel;
+    if (customName.textContent !== name) {
+      customName.textContent = name;
+      customName.hidden = !name;
+      label.title = name;
+    }
+    for (const key of keys) {
+      const slot = Number(key.dataset.slot);
+      if (Number(key.dataset.bank) !== bank) {
+        const gesture = gestures.get(key);
+        if (gesture?.timer) {
+          finishGesture(key, gesture);
+          gesture.suppressClick = true;
+        }
+        key.dataset.bank = String(bank);
+        key.setAttribute("aria-label", `Favourite bank ${bank}, channel ${slot}`);
+      }
+      const entry = favoriteMemory(bank, slot);
+      const current = Boolean(state.power && entry && state.tune_hz === entry.hz && state.modulation === entry.mode);
+      const lamp = key.querySelector(".lamp");
+      lamp?.classList.toggle("green", current);
+      lamp?.classList.toggle("amber", Boolean(state.power && entry && !current));
+      pressed(key, current);
+      key.title = entry ? [entry.name, (entry.hz / 1e6).toFixed(6) + " MHz", entry.mode,
+        "Click to recall. Hold to replace. Right-click twice to clear."].filter(Boolean).join(" · ")
+        : "Empty favourite. Hold to save the tuned frequency.";
+    }
   }
 }
 
@@ -1174,6 +1365,7 @@ function setLcdExpanded(expanded, resized = false) {
 }
 
 const dialRoleHelp = {
+  unassigned: "Turning this dial has no assigned function.",
   pause_time: "Set how long scanning pauses on a signal.",
   scan_speed: "Set how fast analogue scanning checks channels.",
   resume_time: "Set how long scanning waits after the signal ends.",
@@ -1183,22 +1375,19 @@ const dialRoleHelp = {
   tone_treble: "Adjust the higher audio frequencies.", tone_bass: "Adjust the lower audio frequencies.",
   beep_level: "Adjust the loudness of confirmation beeps.",
   "memory-channel": "Step through saved channels.", "fine-tuning": "Tune in fixed 10 Hz steps.",
+  "preset-channel": "Step through the current preset zone. Turning holds the new channel during a preset scan.",
+  "favorite-bank-a": "Choose the memory group shown on the left favourite bank.",
+  "favorite-bank-b": "Choose the memory group shown on the right favourite bank.",
   "coarse-tuning": "Tune in fixed 10 kHz steps.", "tuning-step": "Change the increment used for normal tuning.",
   "scope-span": "Change the range of frequencies visible on the scope.",
+  "scope-pan": "Move the spectrum and waterfall across the SDR’s live bandwidth without retuning.",
   scope_reference: "Shift the scope display level and waterfall contrast.",
   "scan-direction": "Change direction during an active scan.", tuning: "Tune using the selected tuning step.",
 };
 
-const dialPressHelp = {
-  "dial-a": "Press for scan settings.",
-  "dial-b": "Press for audio and reception settings.",
-  "dial-c": "Press for mode-specific receive settings.",
-  "dial-d": "Press to choose this dial’s function.",
-  "dial-e": "Press to choose this dial’s function.",
-  frequency: "Press to open frequency entry.",
-};
 const dialDisplayNames = {rf_gain: "RF Gain", squelch: "Squelch", audio_boost: "Audio Boost",
   tone_treble: "Treble", tone_bass: "Bass", scan_speed: "Scan Speed",
+  "favorite-bank-a": "FAV Bank A", "favorite-bank-b": "FAV Bank B",
   resume_time: "Resume Time", priority_interval: "Priority Interval"};
 
 function updateDialTooltips() {
@@ -1214,9 +1403,10 @@ function updateDialTooltips() {
       const id = name === "frequency" ? "MAIN" : name.at(-1).toUpperCase();
       const functionName = dialDisplayNames[assignment.key] ?? assignment.label;
       const labelNode = dial.previousElementSibling;
-      const visible = `${id} - ${functionName}`;
+      const visible = assignment.key === "unassigned" ? id : `${id} - ${functionName}`;
       if (labelNode.textContent !== visible) labelNode.textContent = visible;
       const accessible = `${name === "frequency" ? "Main dial" : "Dial " + id}, ${functionName}`;
+      if (labelNode.title !== accessible) labelNode.title = accessible;
       if (dial.getAttribute("aria-label") !== accessible) dial.setAttribute("aria-label", accessible);
     }
     let label = assignment?.label || dial.getAttribute("aria-label");
@@ -1229,9 +1419,12 @@ function updateDialTooltips() {
     const scopeReference = overlay === "scope-value" && ui.scopeForm === "ref"
       && overlayCursor === overlayField && name !== "dial-c";
     const contextual = menu?.dialFunction(name) || (scopeReference ? "Scope reference level" : overlayLabels[overlay]);
-    const current = (contextual ? contextual + ". Turn to navigate or adjust. Right-click to go back."
-      : [label + ".", dialRoleHelp[role], dialPressHelp[name]].filter(Boolean).join(" "))
-      + " Hold to change this dial’s assignment.";
+    const press = menu?.pressAction(name);
+    const pressHelp = press?.action === "none" ? "No press shortcut during reception."
+      : press ? `Press action is ${press.label}.` : "";
+    const current = (contextual ? contextual + ". Turn to navigate or adjust. Press to select. Right-click to go back."
+      : [label + ".", dialRoleHelp[role], pressHelp].filter(Boolean).join(" "))
+      + " Hold to configure this dial.";
     if (dial.title !== current) dial.title = current;
   }
 }
@@ -1240,6 +1433,11 @@ function assignedDialAngle(name) {
   if (name === "frequency" && (ui.channelDial || activeScan() === "SIMPLE")) return undefined;
   const fraction = menu?.dialSettingFraction(name);
   return finite(fraction) ? clamp(fraction, 0, 1) * 270 - 135 : undefined;
+}
+
+function signalMeterFraction() {
+  const strength = state.signal_snr_db;
+  return state.power && finite(strength) ? clamp((strength - 5) / 40, 0, 1) : 0;
 }
 
 function render() {
@@ -1252,7 +1450,7 @@ function render() {
   const trunk = dmr && receiver().trunk?.enabled ? receiver().trunk : null;
   const name = trunk?.profile?.name || (tuningMode === "memory" && getPreference("display_memory", true) ? memory?.name : "");
   const level = state.signal_meter_dbfs ?? state.signal_dbfs;
-  const meter = finite(level) ? clamp((level + 92) / 66, 0, 1) : 0;
+  const meter = signalMeterFraction();
   const meterType = getPreference("meter_type", "dbfs");
   const radioSettings = settings();
   const step = tuningStep();
@@ -1303,7 +1501,6 @@ function render() {
   setText("offset", finite(state.tuning_offset_hz) ? Math.round(state.tuning_offset_hz) + " Hz" : "");
   setText("step", "TS " + stepLabel(step));
   root.querySelector(".meter-body i").style.width = meter * 100 + "%";
-  control("power").querySelector(".lamp").classList.toggle("blue", Boolean(state.power));
   pressed(control("power"), state.power);
   control("power").title = getPreference("screen_capture", false)
     ? "Press to power on or capture the display. Hold for one second to return to standby."
@@ -1360,17 +1557,19 @@ function render() {
   control("speed").title = scanningPresets ? "Set the preset scan speed."
     : "Cycle through slow, medium and fast spectrum updates.";
   pressed(control("center"), ui.fixed);
+  control("center").title = ui.fixed || ui.scopePan ? "Recenter the scope on the tuned frequency."
+    : "Keep the current scope frequency edges fixed while tuning.";
   pressed(control("peak"), ui.marker);
   pressed(control("expand"), ui.expanded);
   control("span").textContent = ui.fixed ? "EDGE" : "SPAN";
-  control("span").title = ui.fixed ? "Set the lower and upper frequency edges of the fixed scope."
+  control("span").title = ui.fixed ? "Set fixed frequency edges or use the full SDR capture."
     : "Choose the width of the spectrum and waterfall.";
   control("scope-page").textContent = "<" + ui.page + ">";
   control("scope-page").setAttribute("aria-label", "Scope menu page " + ui.page + ". Switch to page " + (3 - ui.page));
   root.querySelectorAll("[data-page]").forEach(key => { key.hidden = Number(key.dataset.page) !== ui.page; });
   lcd.dataset.off = String(!state.power);
   lcd.dataset.scope = ui.visible ? "shown" : "hidden";
-  setLcdExpanded(ui.expanded);
+  setLcdExpanded(ui.visible && ui.expanded);
   lcd.dataset.displayType = String(getPreference("lcd_type", "A")).toLowerCase();
   lcdContent.style.opacity = clamp(Number(getPreference("lcd_backlight", 100)) / 100, 0, 1);
   const muted = Boolean(state.power && volumeMuted);
@@ -1487,7 +1686,7 @@ function renderPublicDisplay(snapshot = null, offline = false) {
   if (!snapshot?.power || !state.power) resetScope();
   state = snapshot ? {...snapshot, v10: {...snapshot.v10, scan_direction: snapshot.scan_direction}} : {};
   const level = state.signal_meter_dbfs ?? state.signal_dbfs;
-  const meter = state.power && finite(level) ? clamp((level + 92) / 66, 0, 1) : 0;
+  const meter = signalMeterFraction();
   const fields = {
     mode: state.power ? receiverModeLabel(state.modulation) : "",
     "top-state": state.power ? (receiver().frequency_mode === "memory" ? "MEMO" : "VFO") : "",
@@ -1507,7 +1706,7 @@ function renderPublicDisplay(snapshot = null, offline = false) {
   lcd.dataset.off = "false";
   lcd.dataset.scope = state.power ? "shown" : "hidden";
   setLcdExpanded(false);
-  lcd.dataset.displayType = "a";
+  lcd.dataset.displayType = String(getPreference("lcd_type", "A")).toLowerCase();
   lcdContent.style.opacity = "1";
   view.filter.hidden = !fields.filter;
   view["rds-text"].hidden = true;
@@ -1657,7 +1856,7 @@ function editNumber(field, key, allowed) {
 
 function editOverlayNumber(key) {
   if (overlay === "frequency" || (overlay === "scope-value" && ui.scopeForm === "edge")) {
-    return editNumber(overlayField, key, /^\d{0,4}(?:\.\d{0,6})?$/);
+    return editNumber(overlayField, key, /^(?:\d{0,4}(?:\.\d{0,6})?|\d{1,4}\.\d{3}\.\d{0,3})$/);
   }
   if (overlay === "scope-value" && ui.scopeForm === "ref") {
     return editNumber(overlayField, key, /^-?\d{0,2}(?:\.\d?)?$/);
@@ -1670,7 +1869,7 @@ async function commitFrequency(event) {
   event.preventDefault();
   const error = view["frequency-error"];
   try {
-    await tune(parseFrequency(view["frequency-input"].value, receiverHz()));
+    await tune(parseFrequency(view["frequency-input"].value, receiverHz()), "AUTO");
     ui.stepOverride = null;
     closeOverlay();
   } catch (problem) {
@@ -1696,7 +1895,7 @@ function showScopeForm(kind) {
   let fields;
   let label;
   if (kind === "span" && ui.fixed) {
-    const [low, high] = scopeRange();
+    const [low, high] = ui.edges;
     label = "FIXED SCOPE EDGES";
     fields = [
       scopeField("low", "Lower edge · MHz", (low / 1e6).toFixed(6), { inputmode: "decimal" }),
@@ -1705,8 +1904,12 @@ function showScopeForm(kind) {
     kind = "edge";
   } else if (kind === "span") {
     if (overlay) openPanel(null);
-    menu.openChoices("SCOPE SPAN", scopeSpans().map(hz => [hz, scopeSpanLabel(hz)]), spanHz(), value => {
-      ui.span = value;
+    const liveWidth = ui.frame?.span_hz;
+    const options = scopeSpans().map(hz => [hz, scopeSpanLabel(hz) + (hz === liveWidth ? " · Centered" : "")]);
+    options.push(["full", liveWidth ? scopeSpanLabel(liveWidth) + " · Full capture" : "Full capture"]);
+    const selected = ui.span === "full" ? "full" : spanHz();
+    menu.openChoices("SCOPE SPAN", options, selected, value => {
+      setScopeSpan(value);
       render();
     });
     return;
@@ -1719,6 +1922,7 @@ function showScopeForm(kind) {
   ui.scopeForm = kind;
   setText("scope-title", label);
   view["scope-values"].replaceChildren(...fields, numericKeys("Scope keypad", kind === "ref" ? [".", "-"] : ["."]));
+  if (view["scope-full"]) view["scope-full"].hidden = kind !== "edge" || !ui.frame;
   view["scope-error"].hidden = true;
   openPanel("scope-value");
   overlayField?.select();
@@ -1764,7 +1968,8 @@ function canOperate(name) {
   if (overlay === "pin" && name === "dial-c") return true;
   if (!state.power && canSetPin()) {
     if (name === "menu") return true;
-    if ((menu?.isOpen() || pinSetup) && ["dial-c", "dial-d", "dial-e", "frequency"].includes(name)) return true;
+    if ((menu?.isOpen() || pinSetup)
+        && (name === "dial-c" || name === "frequency" || extraDials.includes(name))) return true;
   }
   return Boolean(state.power && !access.pin_required);
 }
@@ -2020,6 +2225,80 @@ function openDialAssignment(name) {
   menu.openDialAssignment(name);
 }
 
+function recenterScope() {
+  // Full capture follows the SDR's hardware centre, which can differ from the tuned frequency.
+  if (ui.span === "full") setScopeSpan(captureSpan());
+  if (ui.freeze) ui.heldCenter = receiverHz();
+  ui.scopePan = 0;
+  ui.fixed = false;
+  ui.edges = null;
+}
+
+function openFavoriteBankChannels(dial) {
+  const side = menu.assignment(dial).key === "favorite-bank-a" ? "a" : "b";
+  menu.openMemoryBank(displayedFavoriteBank(side));
+}
+
+function holdPresetScan() {
+  return act(() => {
+    const held = receiver().nearby_receiving ? receiver().nearby_held : receiver().scan_held;
+    return {v10: "scan_control", operation: held ? "resume" : "hold"};
+  });
+}
+
+function holdScope(clear) {
+  if (clear) {
+    ui.peakTrace = null;
+    ui.peakStart = 0;
+    ui.freeze = false;
+    previousScopeDraw = null;
+  } else ui.freeze = !ui.freeze;
+  ui.heldCenter = ui.freeze && ui.frame ? receiverHz() : null;
+}
+
+const dialPressActions = {
+  "frequency-entry": () => { if (!ui.dialLock) openPanel("frequency"); },
+  "tuning-step": () => openMenu("tune-step"),
+  "tuning-lock": () => { ui.dialLock = !ui.dialLock; },
+  "vfo-memory": () => commands.vm(false),
+  "memory-channels": () => openMenu("memory"),
+  "memory-groups": () => openMenu("group"),
+  "favorite-bank": openFavoriteBankChannels,
+  "preset-settings": () => openMenu("presets"),
+  adjust: dial => menu.openDialSetting(dial),
+  reset: dial => menu.resetDialSetting(dial),
+  mute: () => commands.volume(),
+  monitor: () => setMonitor(!receiver().monitor),
+  "audio-controls": () => openMenu("dial-b"),
+  "scope-span": () => showScopeForm("span"),
+  "recenter-scope": recenterScope,
+  "center-fixed": () => commands.center(),
+  "full-capture": () => {
+    recenterScope();
+    ui.visible = true;
+    setScopeSpan("full");
+  },
+  "scope-hold": () => holdScope(false),
+  "scope-marker": () => commands.peak(),
+  "scope-settings": () => openMenu("scope-set"),
+  scan: () => scan(false),
+  "reverse-scan": () => activeScan() && !receiver().trunk?.enabled
+    ? turnScanDirection(-(receiver().scan_direction || 1)) : openMenu("scan-start"),
+  "preset-hold": () => receiver().nearby_receiving || zoneScanning() ? holdPresetScan() : report("NO PRESET SCAN"),
+  "scan-settings": () => openMenu("scan-set"),
+  priority: () => priority(false),
+  "dial-settings": openDialAssignment,
+  quick: () => openMenu("quick"),
+  function: () => openMenu("function"),
+  "receive-adjustments": () => openMenu("dial-c"),
+};
+
+function pressDial(name, hold) {
+  if (hold) return openDialAssignment(name);
+  if (selectMenuItem()) return;
+  return dialPressActions[menu.pressAction(name).action]?.(name);
+}
+
 const commands = {
   power: hold => state.power ? (hold ? powerOff() : snapshotScreen()) : powerOn(),
   volume: () => {
@@ -2029,11 +2308,7 @@ const commands = {
   },
   mode: () => overlay === "mode" ? closeOverlay() : openPanel("mode"),
   record: () => act({record: "toggle"}),
-  "dial-a": hold => hold ? openDialAssignment("dial-a") : openMenu("dial-a"),
-  "dial-b": hold => hold ? openDialAssignment("dial-b") : openMenu("dial-b"),
-  "dial-c": hold => { if (hold) openDialAssignment("dial-c"); else if (!selectMenuItem()) openMenu("dial-c"); },
-  "dial-d": hold => { if (hold) openDialAssignment("dial-d"); else if (!selectMenuItem()) openMenu("dial-d"); },
-  "dial-e": hold => { if (hold) openDialAssignment("dial-e"); else if (!selectMenuItem()) openMenu("dial-e"); },
+  ...Object.fromEntries(dialNames.filter(name => name !== "frequency").map(name => [name, hold => pressDial(name, hold)])),
   "group-up": () => groupChange(1),
   "group-down": () => groupChange(-1),
   vm: async hold => {
@@ -2063,6 +2338,7 @@ const commands = {
   scope: () => {
     closeOverlay();
     ui.visible = !ui.visible;
+    ui.expanded = false;
   },
   quick: () => openMenu("quick"),
   exit: () => {
@@ -2075,13 +2351,9 @@ const commands = {
   },
   speech,
   frequency: (hold, controlNode, event) => {
-    if (controlNode.matches(".knob")) {
-      if (hold) return openDialAssignment("frequency");
-      if (overlay) return selectOverlay();
-      if (menu.isOpen()) return menu.select();
-    }
+    if (controlNode.matches(".knob")) return pressDial("frequency", hold);
     if (ui.dialLock) return;
-    if (hold && !controlNode.matches(".knob")) {
+    if (hold) {
       ui.stepOverride = 1000000;
       return;
     }
@@ -2107,22 +2379,13 @@ const commands = {
   "tune-step": () => showScopeForm("step"),
   "scope-page": () => { ui.page = 3 - ui.page; },
   span: () => showScopeForm("span"),
-  hold: long => {
-    if (receiver().nearby_receiving || zoneScanning()) return act(() => {
-      const held = receiver().nearby_receiving ? receiver().nearby_held : receiver().scan_held;
-      return {v10: "scan_control", operation: held ? "resume" : "hold"};
-    });
-    if (long) {
-      ui.peakTrace = null;
-      ui.peakStart = 0;
-      ui.freeze = false;
-      previousScopeDraw = null;
-    } else ui.freeze = !ui.freeze;
-    ui.heldCenter = ui.freeze && ui.frame ? receiverHz() : null;
-  },
+  hold: long => receiver().nearby_receiving || zoneScanning() ? holdPresetScan() : holdScope(long),
   center: () => {
-    ui.edges = !ui.fixed ? scopeRange() : null;
-    ui.fixed = !ui.fixed;
+    if (ui.fixed || ui.scopePan) recenterScope();
+    else {
+      ui.edges = scopeRange();
+      ui.fixed = true;
+    }
   },
   ref: () => showScopeForm("ref"),
   speed: () => zoneScanning() ? openMenu("scan-speed") : changeScopeSpeed(),
@@ -2180,13 +2443,33 @@ function stepThrough(values, current, delta) {
 }
 
 function adjustScopeSpan(delta) {
-  const [low, high] = scopeRange();
-  const width = high - low;
-  const next = stepThrough(scopeSpans(), width, delta);
+  const [low, high] = ui.fixed ? ui.edges : scopeRange();
+  const width = ui.fixed ? high - low : spanHz();
+  const limit = captureSpan();
+  const next = Math.min(stepThrough(scopeSpans(), width, delta), limit);
+  const full = next === limit && (ui.frame || (width === limit && delta > 0));
   if (ui.fixed) {
     const left = clamp(Math.round((low + high - next) / 2), minimumHz, maximumHz - next);
-    ui.edges = [left, left + next];
-  } else if (next !== width) ui.span = next;
+    ui.edges = (full && fullScopeRange()) || [left, left + next];
+  } else if (next !== width || (full && delta > 0)) setScopeSpan(full ? "full" : next);
+}
+
+function panScope(delta) {
+  const capture = fullScopeRange();
+  if (!capture) return;
+  const [left, right] = scopeRange();
+  const [captureLow, captureHigh] = capture;
+  const width = right - left;
+  if (width >= captureSpan()) return;
+  const start = clamp(left, captureLow, captureHigh - width);
+  const step = Math.max(1, Math.round(width / 10));
+  const next = clamp(Math.round(start + delta * step), captureLow, captureHigh - width);
+  if (ui.fixed) {
+    ui.edges = [next, next + width];
+  } else {
+    ui.span = width;
+    ui.scopePan = next + width / 2 - scopeAnchor();
+  }
 }
 
 function turnScanDirection(delta) {
@@ -2208,6 +2491,12 @@ async function turnMemoryChannels(delta) {
   const start = index === -1 && delta < 0 ? 0 : index;
   const entry = channels[(start + delta % channels.length + channels.length) % channels.length];
   await act({v10: "memory", operation: "recall", group: entry.group, slot: entry.slot});
+}
+
+function turnFavoriteBank(side, delta) {
+  const bank = displayedFavoriteBank(side);
+  const next = (bank + delta % favoriteBankCount + favoriteBankCount) % favoriteBankCount;
+  if (next !== bank) setPreference("favorite_bank_" + side, next);
 }
 
 function turnMainTuning(delta) {
@@ -2232,7 +2521,11 @@ const dialActions = {
   },
   "scan-direction": turnScanDirection,
   "memory-channel": turnMemoryChannels,
+  "preset-channel": steps => act({v10: "preset_step", steps}),
+  "favorite-bank-a": delta => turnFavoriteBank("a", delta),
+  "favorite-bank-b": delta => turnFavoriteBank("b", delta),
   "scope-span": adjustScopeSpan,
+  "scope-pan": panScope,
 };
 
 async function drainDials() {
@@ -2330,8 +2623,8 @@ function configureTuningWheel(element, stepAtPointer) {
   }, {passive: false});
 }
 
-const longControls = new Set(["power", "dial-a", "dial-b", "dial-c", "dial-d", "dial-e", "scan", "simple-scan", "prio", "lockout", "zone",
-  "speech", "vm", "memory", "favorite", "frequency", "hold", "expand"]);
+const longControls = new Set(["power", ...dialNames, "scan", "simple-scan", "prio", "lockout", "zone",
+  "speech", "vm", "memory", "favorite", "hold", "expand"]);
 const gestures = new WeakMap();
 
 function finishGesture(node, data) {
@@ -2518,6 +2811,7 @@ function configurePanel() {
     getPreference: (key, fallback) => key === "volume" ? audioVolume : getPreference(key, fallback),
     setPreference,
     getTuningStep: tuningStep,
+    getFavoriteBank: displayedFavoriteBank,
     onOpen: () => { lcdContent.inert = true; syncMirror(); },
     onRender: () => { updateDialTooltips(); syncMirror(); },
     onClose: () => { lcdContent.inert = Boolean(overlay); syncMirror(); },
@@ -2548,6 +2842,13 @@ function configurePanel() {
   });
   panels.find(panel => panel.dataset.panel === "frequency").addEventListener("submit", commitFrequency);
   panels.find(panel => panel.dataset.panel === "scope-value").addEventListener("submit", commitScope);
+  view["scope-full"]?.addEventListener("click", () => {
+    const range = fullScopeRange();
+    if (!range) return;
+    ui.edges = range;
+    closeOverlay();
+    render();
+  });
   panels.find(panel => panel.dataset.panel === "pin").addEventListener("submit", unlock);
   view.modes.addEventListener("click", event => {
     const key = event.target.closest("[data-mode]");
@@ -2590,6 +2891,7 @@ function configurePanel() {
     }
   });
   document.addEventListener("keydown", handlePanelKeys);
+  document.addEventListener("visibilitychange", syncPowerLeds);
   document.addEventListener("pointerdown", () => {
     if (state.power || audioContext) void prepareAudio().catch(() => {});
   });

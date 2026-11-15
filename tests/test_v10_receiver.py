@@ -3,15 +3,17 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import numpy as np
 
-from app import ScannerRuntime, valid_action
+from app import ScannerRuntime, SignalMeasurement, usable_signal_level, valid_action
+from bandplan import AIR_STEP, Band
 from fsk import LETTERS, RttyDecoder
-from receiver import IQ_RATE, IQ_SAMPLES, SAMPLE_RATE, Receiver, _ChannelDecoder
+from receiver import (DIRECT_LIMIT, IQ_RATE, IQ_SAMPLES, SAMPLE_RATE, TUNER_LIMIT,
+                      WATERFALL_BINS, WATERFALL_SPAN_HZ, Receiver, _ChannelDecoder)
 from scanner import MANUAL_MAX_HZ, MANUAL_MIN_HZ
-from v10 import AUTO_GROUP
+from v10 import AUTO_GROUP, NEARBY_PMR
 
 
 class ProgrammingTests(unittest.TestCase):
@@ -33,6 +35,79 @@ class ProgrammingTests(unittest.TestCase):
     def write(self, slot, frequency, mode, **fields):
         return self.act("memory", operation="write", group=0, slot=slot,
                         hz=frequency, mode=mode, **fields)
+
+    def test_fm_squelch_compares_filtered_channel_power_instead_of_fft_peak(self):
+        hz = 455_628_111
+        self.act("tune", hz=hz, mode="FM")
+        radio = Receiver()
+        radio._center = hz + 300_000
+        radio._decoder.reset(hz - radio._center, "FM")
+        points = np.arange(3 * IQ_SAMPLES) / IQ_RATE
+        carrier = 2 * np.pi * (hz - radio._center) * points
+        audio = 2.4 * np.sin(2 * np.pi * 1000 * points)
+        iq = (.018 * np.exp(1j * (carrier + audio))).astype(np.complex64)
+        for start in range(0, len(iq), IQ_SAMPLES):
+            block = iq[start:start + IQ_SAMPLES]
+            channel_db, _ = radio._decoder.decode(block)
+        radio._update_waterfall(radio._watch_spectrum(block), 1.0)
+        peak_db = max(radio._waterfall["levels"])
+        scanner = self.runtime.scanner
+        scanner.knob("squelch", .62)
+        self.assertLess(peak_db, scanner.squelch_db)
+        self.assertGreater(channel_db, scanner.squelch_db)
+        scanner.tick(channel_db)
+        self.assertTrue(scanner.audio_gate_open)
+        scanner.knob("squelch", .66)
+        scanner.tick(channel_db)
+        self.assertFalse(scanner.audio_gate_open)
+
+    def test_signal_meter_distinguishes_receiver_noise_from_a_tuned_carrier(self):
+        hz = 446_006_250
+        tuned = (hz, "FM")
+        self.act("tune", hz=hz, mode="FM")
+        self.runtime.receiver_status = "ready"
+        random = np.random.default_rng(6619)
+        points = np.arange(12 * IQ_SAMPLES) / IQ_RATE
+        noise = .012 * (random.normal(size=len(points)) + 1j * random.normal(size=len(points)))
+        phase = 2 * np.pi * -300_000 * points + 2.4 * np.sin(2 * np.pi * 1_000 * points)
+
+        def measure(iq):
+            radio = Receiver()
+            radio._center = hz + 300_000
+            radio._tuning = tuned
+            radio._prepared = (*tuned, radio._center)
+            radio._decoder.reset(hz - radio._center, "FM")
+            iq = iq.astype(np.complex64)
+            for start in range(0, len(iq), IQ_SAMPLES):
+                radio._watch_iq = iq[start:start + IQ_SAMPLES]
+                level, _ = radio._decoder.decode(radio._watch_iq)
+                radio._measure_tuning(level)
+            offset, excess = radio.tuning_offset_hz, radio.tuning_snr_db
+            usable = usable_signal_level(level, "FM", offset, excess)
+            return SignalMeasurement(tuned, level, usable, offset, excess)
+
+        quiet = measure(noise)
+        self.assertGreater((quiet.dbfs + 92) / 66, .45)
+        self.assertLess(quiet.snr_db, 5)
+
+        carrier = .016 * np.exp(1j * phase)
+        centred = measure(noise + carrier)
+        amplified = measure(3 * (noise + carrier))
+        detuned = measure(noise + carrier * np.exp(2j * np.pi * 3_100 * points))
+        self.assertGreater(centred.snr_db, 19)
+        self.assertGreater(amplified.dbfs - centred.dbfs, 9)
+        self.assertAlmostEqual(amplified.snr_db, centred.snr_db, places=2)
+        self.assertLess(detuned.snr_db, 5)
+
+        self.runtime.signal = centred
+        for snapshot in (self.runtime.state(), self.runtime.lcd_display()):
+            self.assertAlmostEqual(snapshot["signal_dbfs"], centred.dbfs)
+            self.assertAlmostEqual(snapshot["signal_meter_dbfs"], centred.meter_dbfs)
+            self.assertAlmostEqual(snapshot["signal_snr_db"], centred.snr_db)
+
+        self.act("tune", hz=hz + 12_500, mode="FM")
+        self.assertIsNone(self.runtime.state()["signal_snr_db"])
+        self.assertIsNone(self.runtime.lcd_display()["signal_snr_db"])
 
     def test_rx_history_records_before_opening_and_preserves_pause(self):
         state = self.act("tune", hz=128_125_000, mode="AM")
@@ -161,6 +236,29 @@ class ProgrammingTests(unittest.TestCase):
         self.assertEqual(state["v10"]["memories"][0]["name"], "Harbour")
         self.assertFalse(valid_action({"v10": "restore", "backup": {**backup, "pin": "0000"}}))
 
+    def test_favourite_bank_names_persist_and_restore_independently_of_channels(self):
+        self.write(4, 162_000_000, "FM", name="Harbour")
+        self.act("bank_name", group=0, name=" Coastguard ")
+        state = self.act("bank_name", group=99, name="Airband")
+        self.assertEqual(state["v10"]["bank_names"], {"0": "Coastguard", "99": "Airband"})
+        self.assertEqual(state["v10"]["memories"][0]["name"], "Harbour")
+
+        reloaded = ScannerRuntime(self.path)
+        self.addCleanup(reloaded.close)
+        backup = reloaded.v10.backup()
+        self.assertEqual(backup["bank_names"], state["v10"]["bank_names"])
+        self.assertTrue(valid_action({"v10": "restore", "backup": backup}))
+        self.assertFalse(valid_action({"v10": "restore", "backup": {**backup, "bank_names": {"100": "Invalid"}}}))
+        self.assertFalse(valid_action({"v10": "bank_name", "group": 0, "name": "A" * 25}))
+        self.assertFalse(valid_action({"v10": "bank_name", "group": 0, "name": "Control\u0000Character"}))
+
+        state = self.act("bank_name", group=0, name="")
+        self.assertEqual(state["v10"]["bank_names"], {"99": "Airband"})
+        self.assertEqual(self.act("reset", scope="all")["v10"]["bank_names"], {})
+        self.assertEqual(self.act("restore", backup=backup)["v10"]["bank_names"], backup["bank_names"])
+        del backup["bank_names"]
+        self.assertEqual(self.act("restore", backup=backup)["v10"]["bank_names"], {})
+
     def test_fine_delta_and_recall(self):
         self.act("tune", hz=446_050_000, mode="FM")
         state = self.act("scan", kind="DELTA", enabled=True, span_hz=100_000)
@@ -251,23 +349,21 @@ class ProgrammingTests(unittest.TestCase):
         self.assertEqual((state["tune_hz"], state["modulation"]), (446_006_250, "FM"))
         self.assertEqual(state["v10"]["scan_zones"], ["CUSTOM1"])
 
-    def test_full_range_scan_uses_segment_grids_without_changing_programmed_channel_ids(self):
+    def test_factory_range_scan_uses_segment_grids_without_changing_programmed_channel_ids(self):
         panel = self.runtime.v10
-        for zone, key in (("HAM", "ham_full_range"), ("BUS", "bus_full_range")):
+        cases = {
+            "HAM": (14_149_000, [(14_149_500, "USB"), (14_150_000, "USB"), (14_151_000, "USB")]),
+            "BUS": (166_893_750, [(166_900_000, "FM"), (166_906_250, "FM"), (166_912_500, "FM")]),
+        }
+        for zone, (start, expected) in cases.items():
             with self.subTest(zone=zone):
                 original = panel.zone_entries(zone)
                 self.act("scan", kind="ZONE", zone=zone, enabled=True)
-                self.assertEqual(len(panel.scan["points"]), len(original))
-                self.act("setting", key=key, value=True)
+                self.assertEqual(len(panel.scan["points"]), 1)
                 self.assertEqual(panel.zone_entries(zone), original)
-                points = [panel.zone_entry(*point) for point in panel.scan["points"]]
-                self.assertEqual(points[0]["hz"], original[0]["hz"])
-                self.assertGreater(len(points), len(original))
-                frequencies = {entry["hz"] for entry in points}
-                if zone == "HAM":
-                    self.assertTrue({14_150_000, 14_151_000, 14_152_000} <= frequencies)
-                else:
-                    self.assertTrue({166_900_000, 166_906_250, 166_912_500} <= frequencies)
+                panel.scan["range_freqs"][zone] = start
+                seen = [self.act("step", direction=1) for _ in expected]
+                self.assertEqual([(state["tune_hz"], state["modulation"]) for state in seen], expected)
                 self.act("scan", kind="ZONE", enabled=False)
 
     def test_custom_configuration_is_bounded_saved_and_backup_compatible(self):
@@ -593,8 +689,181 @@ class ProgrammingTests(unittest.TestCase):
         self.assertTrue(state["v10"]["auto_mode"])
         self.assertEqual((state["tune_hz"], state["modulation"]), (117_980_000, "AM"))
 
+    def test_scope_follow_changes_simple_scan_dwell_without_changing_its_step(self):
+        radio, panel = self.runtime, self.runtime.v10
+        self.act("tune", hz=144_510_123, mode="FM")
+        self.act("setting", key="scan_speed", value=4)
+        with patch("app.time.monotonic", return_value=100.0):
+            state = self.act("scan", kind="SIMPLE", enabled=True, step=12_500, scope_span_hz=100_000)
+        self.assertFalse(state["v10"]["settings"]["scan_follow_scope"])
+        self.assertEqual(panel.next_scan_at, 100.25)
+        state = self.act("setting", key="scan_follow_scope", value=True, scope_span_hz=1_800_000)
+        self.assertEqual(state["v10"]["scan_scope_span_hz"], 1_800_000)
+        with radio.lock:
+            radio._v10_advance(100.25, False)
+        self.assertEqual(radio.state()["tune_hz"], 144_522_623)
+        self.assertEqual(panel.next_scan_at, 100.375)
+        self.act("scan_control", operation="scope_span", scope_span_hz=950_000)
+        with radio.lock:
+            radio._v10_advance(100.375, False)
+        self.assertEqual(radio.state()["tune_hz"], 144_535_123)
+        self.assertAlmostEqual(panel.next_scan_at, 100.375 + 1 / 6)
+        self.act("setting", key="scan_follow_scope", value=False)
+        previous_deadline = panel.next_scan_at
+        with radio.lock:
+            radio._v10_advance(previous_deadline, False)
+        self.assertEqual(radio.state()["tune_hz"], 144_547_623)
+        self.assertEqual(panel.next_scan_at, previous_deadline + .25)
+        self.act("setting", key="scan_follow_scope", value=True)
+        self.act("scan", kind="SIMPLE", enabled=False)
+        with patch("app.time.monotonic", return_value=200.0):
+            state = self.act("scan", kind="SIMPLE", enabled=True)
+        self.assertTrue(state["v10"]["settings"]["scan_follow_scope"])
+        self.assertIsNone(state["v10"]["scan_scope_span_hz"])
+        self.assertEqual(panel.next_scan_at, 200.25)
+        self.assertTrue(panel.backup()["settings"]["scan_follow_scope"])
+
+    def test_scope_follow_scans_programmed_and_saved_channels_consecutively(self):
+        self.act("setting", key="scan_follow_scope", value=True)
+        self.act("setting", key="scan_speed", value=20)
+        panel = self.runtime.v10
+        expected = (144_400_000, 144_412_500, 144_425_000)
+        self.act("edge", number=0, start_hz=expected[0], end_hz=expected[-1], mode="FM")
+        for slot, frequency in enumerate(expected):
+            self.write(slot, frequency, "FM")
+        for options in ({"kind": "PROG", "edge": 0}, {"kind": "MEMO", "group": 0}):
+            with self.subTest(kind=options["kind"]):
+                with patch("app.time.monotonic", return_value=100.0):
+                    state = self.act("scan", **options, enabled=True, scope_span_hz=1_800_000)
+                first = state["tune_hz"]
+                self.assertAlmostEqual(panel.next_scan_at, 100.0 + 1 / 30)
+                with self.runtime.lock:
+                    self.runtime._v10_advance(panel.next_scan_at, False)
+                self.assertEqual(self.runtime.state()["tune_hz"], expected[(expected.index(first) + 1) % 3])
+                self.act("scan", kind=options["kind"], enabled=False)
+
+    def test_scope_follow_preset_rate_preserves_settling_and_signal_hold(self):
+        radio, panel = self.runtime, self.runtime.v10
+        self.act("setting", key="scan_follow_scope", value=True)
+        self.act("setting", key="scan_speed", value=8)
+        self.act("setting", key="resume_time", value=2)
+        self.write(0, 101_800_000, "WFM")
+        self.write(1, 103_700_000, "WFM")
+        self.act("scan", kind="ZONE", zone="FAV", enabled=True, scope_span_hz=1_800_000)
+        with radio.lock:
+            measured = panel.next_scan_at + 3
+            radio._v10_advance(measured, False)
+            radio._v10_advance(measured + .08, False)
+        self.assertEqual(radio.state()["tune_hz"], 101_800_000)
+        with radio.lock:
+            radio._v10_advance(measured + .101, False)
+            radio._v10_advance(measured + .105, True)
+        self.write(2, 105_200_000, "WFM")
+        self.assertEqual(radio.state()["v10"]["scan_scope_span_hz"], 1_800_000)
+        with radio.lock:
+            radio._v10_advance(measured + 5, True)
+            radio._v10_advance(measured + 5.1, False)
+            radio._v10_advance(measured + 6.9, False)
+        self.assertEqual(radio.state()["tune_hz"], 103_700_000)
+        with radio.lock:
+            radio._v10_advance(measured + 7.2, False)
+        self.assertEqual(radio.state()["tune_hz"], 105_200_000)
+
+    def test_scan_scope_span_is_bounded_and_only_accepted_by_scan_actions(self):
+        scan = {"v10": "scan", "kind": "SIMPLE", "enabled": True}
+        update = {"v10": "scan_control", "operation": "scope_span"}
+        setting = {"v10": "setting", "key": "scan_follow_scope", "value": True}
+        for action in (scan, update, setting):
+            for value in (0, True, 1_800_001, 500_000.0, None):
+                self.assertFalse(valid_action({**action, "scope_span_hz": value}))
+            self.assertTrue(valid_action({**action, "scope_span_hz": 1_800_000}))
+        self.assertFalse(valid_action({**scan, "enabled": False, "scope_span_hz": 100_000}))
+        self.assertFalse(valid_action({**setting, "value": False, "scope_span_hz": 100_000}))
+        self.assertFalse(valid_action({"v10": "setting", "key": "scan_speed", "value": 5,
+                                       "scope_span_hz": 100_000}))
+
 
 class SignalTests(unittest.TestCase):
+    def test_nearby_ranks_eligible_channels_beyond_the_loudest_fft_peaks(self):
+        radio = Receiver()
+        band = Band("UHF", 446_000_000, 447_600_000)
+        center = 446_800_000
+        strongest = 447_250_000
+        other = 447_350_000
+        blocked = {446_050_000 + index * 25_000 for index in range(12)}
+        seconds = np.arange(IQ_SAMPLES) / IQ_RATE
+        signals = [(hz, .04) for hz in sorted(blocked)] + [(strongest, .025), (other, .015)]
+        iq = sum(level * np.exp(2j * np.pi * (hz - center) * seconds) for hz, level in signals)
+        hit = radio._nearby_channel(iq, center, band, band.lower, band.upper, (), blocked, -55)
+        self.assertEqual(hit, strongest)
+
+    def test_nearby_live_airband_uses_the_existing_iq_at_the_exact_air_spacing(self):
+        radio = Receiver()
+        band = Band("AIR", 117_975_000, 137_000_000, AIR_STEP, "AM")
+        radio._center = 128_425_000
+        carrier = 128_133_333
+        seconds = np.arange(IQ_SAMPLES) / IQ_RATE
+        radio._watch_iq = .08 * np.exp(2j * np.pi * (carrier - radio._center) * seconds)
+        with patch.object(radio, "_set_center") as tune, patch.object(radio, "_read_iq") as read:
+            hit = radio.nearby_live_peak(band, band.lower, band.upper, (), {128_125_000}, -45)
+            self.assertEqual(hit, carrier)
+            tune.assert_not_called()
+            read.assert_not_called()
+
+    def test_nearby_uses_a_fresh_center_for_a_strong_pmr_signal_in_the_dc_blind_spot(self):
+        radio = Receiver()
+        band = NEARBY_PMR
+        carrier = band.lower
+        radio._center = carrier + 12_000
+        radio._tuning = (445_950_000, "FM")
+        original = radio._center
+        probe_center = (band.lower + band.upper) // 2 + 180_000
+        seconds = np.arange(IQ_SAMPLES) / IQ_RATE
+        radio._watch_iq = .35 * np.exp(2j * np.pi * (carrier - original) * seconds)
+        self.assertIsNone(radio.nearby_live_peak(band, band.lower, band.upper, (carrier,), set(), -50))
+        iq = .35 * np.exp(2j * np.pi * (carrier - probe_center) * seconds)
+        raw = np.empty(2 * IQ_SAMPLES, np.uint8)
+        raw[::2] = np.rint(127.5 * (1 + iq.real))
+        raw[1::2] = np.rint(127.5 * (1 + iq.imag))
+        with patch.object(radio, "_set_center") as tune, patch.object(radio, "_read_iq", return_value=(1, raw.tobytes())):
+            hit = radio.nearby_peak(probe_center, band, band.lower, band.upper, (carrier,), set(), -50, preserve=True)
+            self.assertEqual(hit, carrier)
+            self.assertEqual(tune.call_args_list, [call(probe_center, False), call(original, False, restore_gain=None)])
+
+    def test_waterfall_exposes_adjacent_signals_across_the_live_iq_window(self):
+        radio = Receiver()
+        radio._center = 446_300_000
+        offsets = radio._probe_offsets
+        spectrum = np.full(offsets.shape, 1e-10)
+        for offset in (-750_000, 750_000):
+            spectrum[np.searchsorted(offsets, offset)] = 1e-4
+
+        radio._update_waterfall(spectrum, 1.0)
+
+        frame = radio._waterfall
+        self.assertEqual(frame["center_hz"], radio._center)
+        self.assertEqual(frame["span_hz"], WATERFALL_SPAN_HZ)
+        self.assertEqual(len(frame["levels"]), WATERFALL_BINS)
+        self.assertEqual(max(frame["levels"][:WATERFALL_BINS // 4]), -40)
+        self.assertEqual(max(frame["levels"][-WATERFALL_BINS // 4:]), -40)
+
+    def test_waterfall_clips_the_live_iq_window_at_receive_band_edges(self):
+        radio = Receiver()
+        spectrum = np.full(radio._probe_offsets.shape, 1e-10)
+        for direct, center, limit, edge in (
+            (True, 400_000, MANUAL_MIN_HZ, -1),
+            (True, DIRECT_LIMIT - 300_000, DIRECT_LIMIT, 1),
+            (False, DIRECT_LIMIT + 300_000, DIRECT_LIMIT, -1),
+            (False, TUNER_LIMIT - 300_000, TUNER_LIMIT, 1),
+        ):
+            with self.subTest(direct=direct, center=center):
+                radio._direct = direct
+                radio._center = center
+                radio._update_waterfall(spectrum, 1.0)
+                frame = radio._waterfall
+                self.assertEqual(frame["center_hz"] + edge * frame["span_hz"] / 2, limit)
+                self.assertEqual(len(frame["levels"]), WATERFALL_BINS)
+
     def test_auto_waits_for_strong_consistent_am_or_fm_evidence(self):
         time = np.arange(16 * IQ_SAMPLES) / IQ_RATE
         audio = .9 * np.sin(2 * np.pi * 910 * time) + .1 * np.sin(2 * np.pi * 1370 * time)

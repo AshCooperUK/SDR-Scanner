@@ -6,11 +6,12 @@ import os
 import re
 from bisect import bisect_left, bisect_right
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import monotonic
 
-from bandplan import AIR_STEP, PMR, V10_PRESETS, Band, band_search_frequencies, band_search_mode
+from bandplan import AIR_STEP, PMR, PRESET_SCAN_RANGES, V10_PRESETS, Band, band_search_mode
 from scanner import CHIRP_ZONE_LIMIT, MANUAL_MAX_HZ, MANUAL_MIN_HZ, normalize_favorite_name
 from tone_search import normalize_tone_filter
 
@@ -23,19 +24,25 @@ SCAN_KINDS = ("PROG", "DELTA", "AUTO", "MEMO", "SEL", "MODE", "ZONE", "SIMPLE")
 DIGITAL_SCAN_ACQUISITION_SECONDS = 1.05
 DIGITAL_SCAN_PROBE_SECONDS = .06  # One complete DMR frame, including both slots.
 WFM_SCAN_ACQUISITION_SECONDS = .10  # Six IQ blocks for a carrier offset, plus settling time.
+SCAN_SCOPE_BASE_HZ = 100_000
+SCAN_SCOPE_MAX_HZ = 1_800_000
+MAX_SCAN_SPEED = 30
 ZONE_BANKS = {"CB": ("CBAM", "CBFM"), **{bank: (bank,) for bank in
               ("PMR", "BUS", "HAM", "BCAST", "RAIL", "EVT", "UTIL", "AIR", "MRN")}}
 NEARBY_ZONE = "NEARBY"
-RANGE_SCAN_SETTINGS = {"HAM": "ham_full_range", "BUS": "bus_full_range"}
 CUSTOM_STEPS = (100, 500, 1_000, 2_500, 3_125, 5_000, 6_250, AIR_STEP, 10_000, 12_500, 25_000, 50_000, 100_000)
+PRESET_RANGE_LIMIT = 64
 NEARBY_LIMIT = 128
 NEARBY_MIN_SECONDS = .08
 NEARBY_MAX_GAP = .25
 NEARBY_RESUME_SECONDS = 7.0
 NEARBY_ACQUIRE_SECONDS = .55
-NEARBY_LISTENING_INTERVAL = .35
+NEARBY_LIVE_INTERVAL = .07
+NEARBY_IDLE_INTERVAL = .065
+NEARBY_LISTENING_INTERVAL = .18
+NEARBY_OFFSET_LIMITS = {"AM": 3_000, "FM": 4_200}
 NEARBY_MAX_INDEX = (MANUAL_MAX_HZ + 1) * len(MODES) - 1
-NEARBY_TILE_HZ = 1_000_000
+NEARBY_TILE_HZ = 1_600_000
 NEARBY_SWEEPS = (
     Band("VHF", 144_000_000, 174_000_000),
     Band("UHF", 430_000_000, 470_000_000),
@@ -59,16 +66,89 @@ def auto_band_mode(hz):
     return None
 
 
-def nearby_windows(origin):
-    """Interleave 1 MHz RF windows across voice allocations."""
+def next_band_frequency(band, previous, direction):
+    """Step within one band, wrapping at its inclusive endpoints."""
+    low, high, step = band.lower, band.upper, band.step
+    upwards = direction > 0
+    if previous is None or (not low <= previous < high if upwards else not low < previous <= high):
+        return low if upwards else high
+    offset = previous - low
+    index = (3 * offset + 1) // 25_000 if step == AIR_STEP else offset // step
+    if upwards:
+        return min(high, band.frequency(index + 1, step))
+    if band.frequency(index, step) >= previous:
+        index -= 1
+    return max(low, band.frequency(index, step))
+
+
+@dataclass(frozen=True)
+class PresetRangePlan:
+    """A union of compact receive grids and exact listed frequencies."""
+
+    bands: tuple[Band, ...]
+    listed: tuple[int, ...] = ()
+    excluded: frozenset[int] = frozenset()
+
+    def next(self, previous, direction):
+        if direction > 0:
+            candidates = [next_band_frequency(band, previous, direction)
+                          for band in self.bands if previous is None or previous < band.upper]
+            index = bisect_right(self.listed, previous) if previous is not None else 0
+            if index < len(self.listed):
+                candidates.append(self.listed[index])
+            return min(candidates) if candidates else min(band.lower for band in self.bands)
+
+        candidates = [next_band_frequency(band, previous, direction)
+                      for band in self.bands if previous is None or previous > band.lower]
+        index = bisect_left(self.listed, previous) if previous is not None else len(self.listed)
+        if index:
+            candidates.append(self.listed[index - 1])
+        return max(candidates) if candidates else max(band.upper for band in self.bands)
+
+    def next_unlocked(self, previous, direction, blocked):
+        blocked = blocked | self.excluded
+        first = None
+        for _ in range(len(blocked) + 1):
+            previous = self.next(previous, direction)
+            if previous not in blocked:
+                return previous
+            if previous == first:
+                break
+            if first is None:
+                first = previous
+        return None
+
+    def entry(self, zone, frequency):
+        if frequency is None or frequency in self.excluded:
+            return None
+        band = next((band for band in self.bands if band.lower <= frequency <= band.upper), None)
+        if band is None:
+            return None
+        if band.modulation != "AUTO":
+            return {"hz": frequency, "mode": band.modulation}
+        mode = auto_band_mode(frequency)
+        if mode is None and zone in ("HAM", "BUS"):
+            mode = band_search_mode(zone, frequency)
+        return {"hz": frequency, "mode": mode or "FM", "automatic": True}
+
+
+def nearby_origin_window(origin):
     frequency, mode = origin
-    windows = []
-    if mode in ("FM", "AM") and auto_band_mode(frequency) != "WFM":
-        lower = max(MANUAL_MIN_HZ, frequency - NEARBY_TILE_HZ // 2)
-        upper = min(MANUAL_MAX_HZ, frequency + NEARBY_TILE_HZ // 2)
-        if lower < 25_000_000 <= upper:
-            lower, upper = (lower, 24_999_999) if frequency < 25_000_000 else (25_000_000, upper)
-        windows.append((Band("Tuned", lower, upper, 6_250, mode), lower, upper, frequency))
+    band = next((band for band in NEARBY_SWEEPS if band.lower <= frequency <= band.upper), None)
+    if band is None and (mode not in ("FM", "AM") or auto_band_mode(frequency) == "WFM"):
+        return None
+    lower = max(band.lower if band else MANUAL_MIN_HZ, frequency - NEARBY_TILE_HZ // 2)
+    upper = min(band.upper if band else MANUAL_MAX_HZ, frequency + NEARBY_TILE_HZ // 2)
+    if lower < 25_000_000 <= upper:
+        lower, upper = (lower, 24_999_999) if frequency < 25_000_000 else (25_000_000, upper)
+    return band or Band("Tuned", lower, upper, 6_250, mode), lower, upper, frequency
+
+
+def nearby_windows(origin):
+    """Interleave wide RF windows across voice allocations."""
+    frequency, _ = origin
+    local = nearby_origin_window(origin)
+    windows = [local] if local else []
     for offset in range(0, max(band.upper - band.lower for band in NEARBY_SWEEPS), NEARBY_TILE_HZ):
         for band in NEARBY_SWEEPS:
             lower = band.lower + offset
@@ -81,7 +161,8 @@ SETTINGS = {
     "scan_resume": (True, (False, True)),
     "pause_time": (10, range(31)),
     "resume_time": (2, range(-1, 6)),
-    "scan_speed": (8, range(1, 31)),
+    "scan_speed": (8, range(1, MAX_SCAN_SPEED + 1)),
+    "scan_follow_scope": (False, (False, True)),
     "ham_full_range": (False, (False, True)),
     "bus_full_range": (False, (False, True)),
     "priority_interval": (5, range(1, 16)),
@@ -140,6 +221,10 @@ def hz(value):
     return integer(value, MANUAL_MIN_HZ, MANUAL_MAX_HZ)
 
 
+def valid_scan_scope_span(value):
+    return integer(value, 1, SCAN_SCOPE_MAX_HZ)
+
+
 def position(value):
     return integer(value, 0, 99)
 
@@ -147,6 +232,17 @@ def position(value):
 def memory_position(group, slot):
     return (position(group) and position(slot)) or (type(group) is int and group == AUTO_GROUP
                                                     and integer(slot, 0, 199))
+
+
+def valid_bank_name(name):
+    return normalize_favorite_name(name) is not None and len(name) <= 24
+
+
+def valid_bank_names(names):
+    return (isinstance(names, dict) and len(names) <= 100
+            and all(isinstance(group, str) and re.fullmatch(r"0|[1-9][0-9]?", group)
+                    and valid_bank_name(name) and name and name == name.strip()
+                    for group, name in names.items()))
 
 
 def select_tag(value):
@@ -268,6 +364,22 @@ def valid_custom_presets(presets):
             and all(valid_custom_range(preset) for preset in presets.values()))
 
 
+def valid_preset_ranges(ranges):
+    return (isinstance(ranges, list) and 1 <= len(ranges) <= PRESET_RANGE_LIMIT
+            and all(isinstance(preset, dict)
+                    and CUSTOM_RANGE_FIELDS <= preset.keys() <= CUSTOM_RANGE_FIELDS | {"step_hz", "mode"}
+                    and bool(normalize_favorite_name(preset["name"])) and len(preset["name"]) <= CUSTOM_NAME_LENGTH
+                    and hz(preset["start_hz"]) and hz(preset["end_hz"]) and preset["start_hz"] < preset["end_hz"]
+                    and valid_member(preset, "step_hz", lambda value: integer(value, 1, 1_000_000))
+                    and valid_member(preset, "mode", lambda value: value in VFO_MODES)
+                    for preset in ranges))
+
+
+def valid_preset_range_overrides(presets):
+    return (isinstance(presets, dict) and presets.keys() <= PRESET_SCAN_RANGES.keys()
+            and all(valid_preset_ranges(ranges) for ranges in presets.values()))
+
+
 def valid_zone_action(action):
     fields = {"v10", "zone", "operation"}
     zone, operation = action.get("zone"), action.get("operation")
@@ -279,6 +391,11 @@ def valid_zone_action(action):
     if zone == NEARBY_ZONE:
         return (operation == "recall" and action.keys() == fields | {"index"}
                 and integer(action.get("index"), 0, NEARBY_MAX_INDEX))
+    if zone in PRESET_SCAN_RANGES and operation in ("configure_ranges", "reset_ranges"):
+        required = fields | {"ranges"} if operation == "configure_ranges" else fields
+        return (required <= action.keys() <= required | {"expected_ranges"}
+                and (operation == "reset_ranges" or valid_preset_ranges(action["ranges"]))
+                and valid_member(action, "expected_ranges", valid_preset_ranges))
     max_index = 199 if zone == "FAV" else ZONE_MAX_INDEX
     if operation in ("recall", "delete"):
         return action.keys() == fields | {"index"} and integer(action.get("index"), 0, max_index)
@@ -300,10 +417,13 @@ def valid_timer(timer):
 
 def valid_backup(data):
     fields = {"version", "settings", "by_mode", "memories", "edges", "profile", "timer"}
-    if (not isinstance(data, dict) or not fields <= data.keys() <= fields | {"zones", "custom_presets"}
+    optional = {"zones", "custom_presets", "preset_ranges", "bank_names"}
+    if (not isinstance(data, dict) or not fields <= data.keys() <= fields | optional
             or type(data["version"]) is not int or data["version"] != 1
             or not valid_zone_overrides(data.get("zones", {}))
-            or not valid_custom_presets(data.get("custom_presets", {}))):
+            or not valid_custom_presets(data.get("custom_presets", {}))
+            or not valid_preset_range_overrides(data.get("preset_ranges", {}))
+            or not valid_bank_names(data.get("bank_names", {}))):
         return False
     settings, by_mode, memories, edges, profile, timer = (
         data[key] for key in ("settings", "by_mode", "memories", "edges", "profile", "timer")
@@ -341,12 +461,19 @@ def valid_action(action):
     if command == "step":
         return (action.keys() == {"v10", "direction"} and type(action["direction"]) is int
                 and action["direction"] in (-1, 1))
+    if command == "preset_step":
+        return (action.keys() == {"v10", "steps"} and integer(action["steps"], -80, 80)
+                and action["steps"] != 0)
     if command == "setting":
-        return ({"v10", "key", "value"} <= action.keys() <= {"v10", "key", "value", "mode"}
+        return ({"v10", "key", "value"} <= action.keys() <= {"v10", "key", "value", "mode", "scope_span_hz"}
                 and valid_setting(action["key"], action["value"])
-                and ("mode" not in action or action["key"] in RF_PER_MODE and action["mode"] in MODES))
+                and ("mode" not in action or action["key"] in RF_PER_MODE and action["mode"] in MODES)
+                and ("scope_span_hz" not in action or action["key"] == "scan_follow_scope"
+                     and action["value"] is True and valid_scan_scope_span(action["scope_span_hz"])))
     if command == "memory":
         return valid_memory(action)
+    if command == "bank_name":
+        return action.keys() == {"v10", "group", "name"} and position(action["group"]) and valid_bank_name(action["name"])
     if command == "zone":
         return valid_zone_action(action)
     if command == "lockout":
@@ -357,6 +484,8 @@ def valid_action(action):
     if command == "scan_control":
         fields = {"v10", "operation"}
         operation = action.get("operation")
+        if operation == "scope_span":
+            return action.keys() == fields | {"scope_span_hz"} and valid_scan_scope_span(action["scope_span_hz"])
         if operation in ("hold", "resume"):
             return action.keys() == fields
         if operation == "inspect":
@@ -365,11 +494,14 @@ def valid_action(action):
         return (action.keys() <= fields | {"enabled"} and operation in ("fine", "jump", "recall")
                 and valid_member(action, "enabled", lambda v: type(v) is bool))
     if command == "scan":
+        if "scope_span_hz" in action and (action.get("enabled") is not True
+                                          or not valid_scan_scope_span(action["scope_span_hz"])):
+            return False
         if action.get("kind") == "SIMPLE":
             fields = {"v10", "enabled", "kind"}
             if action.get("enabled") is False:
                 return action.keys() == fields
-            return (fields <= action.keys() <= fields | {"direction", "step"} and action.get("enabled") is True
+            return (fields <= action.keys() <= fields | {"direction", "step", "scope_span_hz"} and action.get("enabled") is True
                     and valid_member(action, "direction", lambda value: type(value) is int and value in (-1, 1))
                     and valid_member(action, "step", lambda value: integer(value, 1, 1_000_000)))
         if action.get("kind") == "ZONE":
@@ -378,6 +510,8 @@ def valid_action(action):
                 return action.keys() == fields
             if action.get("enabled") is not True:
                 return False
+            if "scope_span_hz" in action:
+                fields.add("scope_span_hz")
             if action.keys() == fields | {"zone"}:
                 return isinstance(action["zone"], str) and action["zone"] in ZONES
             zones = action.get("zones")
@@ -385,7 +519,7 @@ def valid_action(action):
                     and all(isinstance(zone, str) and zone in ZONES for zone in zones)
                     and len(set(zones)) == len(zones))
         return (action.keys() <= {"v10", "kind", "enabled", "start_hz", "end_hz", "center_hz", "span_hz", "mode",
-                                  "group", "edge", "select_tag", "start_slot", "end_slot", "auto_clear"}
+                                  "group", "edge", "select_tag", "start_slot", "end_slot", "auto_clear", "scope_span_hz"}
                 and action.get("kind") in SCAN_KINDS and type(action.get("enabled")) is bool
                 and all(valid_member(action, key, hz) for key in ("start_hz", "end_hz", "center_hz"))
                 and valid_member(action, "span_hz", lambda v: integer(v, 1, MANUAL_MAX_HZ))
@@ -446,6 +580,9 @@ class ReceiverPanel:
             self.zone_defaults[zone] = defaults
         self.zones = {}
         self.custom_presets = {}
+        self.preset_ranges = {}
+        self.bank_names = {}
+        self._preset_plans = {}
         self.nearby = None
         self._nearby = {}
         self._nearby_candidate = None
@@ -459,6 +596,7 @@ class ReceiverPanel:
         self.vfo = (98_400_000, "WFM")
         self.auto_tune = False
         self.scan = None
+        self.preset_point = None
         self.scan_direction = 1
         self.scan_origin = None
         self.paused_at = self.closed_at = self.next_scan_at = 0.0
@@ -514,6 +652,10 @@ class ReceiverPanel:
                 self.zones = data.get("zones", {})
             if valid_custom_presets(data.get("custom_presets", {})):
                 self.custom_presets = data.get("custom_presets", {})
+            if valid_preset_range_overrides(data.get("preset_ranges", {})):
+                self.preset_ranges = data.get("preset_ranges", {})
+            if valid_bank_names(data.get("bank_names", {})):
+                self.bank_names = data.get("bank_names", {})
             return
         except FileNotFoundError:
             pass
@@ -534,7 +676,7 @@ class ReceiverPanel:
             }
 
     def save(self, *, settings=None, by_mode=None, memories=None, edges=None, profile=..., timer=None, zones=None,
-             custom_presets=None):
+             custom_presets=None, preset_ranges=None, bank_names=None):
         settings = self.settings if settings is None else settings
         by_mode = self.by_mode if by_mode is None else by_mode
         memories = self.memories if memories is None else memories
@@ -543,6 +685,8 @@ class ReceiverPanel:
         timer = self.timer if timer is None else timer
         zones = self.zones if zones is None else zones
         custom_presets = self.custom_presets if custom_presets is None else custom_presets
+        preset_ranges = self.preset_ranges if preset_ranges is None else preset_ranges
+        bank_names = self.bank_names if bank_names is None else bank_names
         pending = None
         try:
             with NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent,
@@ -550,7 +694,7 @@ class ReceiverPanel:
                 pending = Path(stream.name)
                 json.dump({"version": 1, "settings": settings, "by_mode": by_mode, "memories": list(memories.values()),
                            "edges": list(edges.values()), "profile": profile, "timer": timer, "zones": zones,
-                           "custom_presets": custom_presets},
+                           "custom_presets": custom_presets, "preset_ranges": preset_ranges, "bank_names": bank_names},
                           stream, separators=(",", ":"), ensure_ascii=False)
                 stream.flush()
                 if stream.buffer.tell() > FILE_LIMIT:
@@ -560,15 +704,23 @@ class ReceiverPanel:
         finally:
             if pending is not None:
                 pending.unlink(missing_ok=True)
+        for zone in tuple(self._preset_plans):
+            if (zones.get(zone) != self.zones.get(zone)
+                    or preset_ranges.get(zone) != self.preset_ranges.get(zone)
+                    or custom_presets.get(zone) != self.custom_presets.get(zone)):
+                self._preset_plans.pop(zone)
         self.settings, self.by_mode, self.memories, self.edges = settings, by_mode, memories, edges
         self.profile, self.timer, self.zones = profile, timer, zones
         self.custom_presets = custom_presets
+        self.preset_ranges = preset_ranges
+        self.bank_names = bank_names
 
     def backup(self):
         return deepcopy({"version": 1, "settings": self.settings, "by_mode": self.by_mode,
                          "memories": list(self.memories.values()), "edges": list(self.edges.values()),
                          "profile": self.profile, "timer": self.timer, "zones": self.zones,
-                         "custom_presets": self.custom_presets})
+                         "custom_presets": self.custom_presets, "preset_ranges": self.preset_ranges,
+                         "bank_names": self.bank_names})
 
     def restore(self, data):
         settings = {key: default for key, (default, _) in SETTINGS.items()}
@@ -577,13 +729,26 @@ class ReceiverPanel:
         edges = {entry["number"]: entry for entry in data["edges"]}
         self.save(settings=settings, by_mode=data["by_mode"], memories=memories, edges=edges,
                   profile=data["profile"], timer=data["timer"], zones=data.get("zones", {}),
-                  custom_presets=data.get("custom_presets", {}))
+                  custom_presets=data.get("custom_presets", {}), preset_ranges=data.get("preset_ranges", {}),
+                  bank_names=data.get("bank_names", {}))
         self.power_off()
         self.timer_power_off = None
         self.group, self.slot = next(iter(sorted(self.memories)), (0, 0))
 
     def current_settings(self, mode):
         return {**self.settings, **self.by_mode.get(mode, {})}
+
+    def set_bank_name(self, group, name):
+        key = str(group)
+        name = normalize_favorite_name(name)
+        if name == self.bank_names.get(key, ""):
+            return
+        names = self.bank_names.copy()
+        if name:
+            names[key] = name
+        else:
+            names.pop(key, None)
+        self.save(bank_names=names)
 
     def set_value(self, key, value, mode):
         if value == self.current_settings(mode)[key]:
@@ -592,6 +757,47 @@ class ReceiverPanel:
             self.save(by_mode={**self.by_mode, mode: {**self.by_mode.get(mode, {}), key: value}})
         else:
             self.save(settings={**self.settings, key: value})
+
+    def zone_ranges(self, zone):
+        return list(self.preset_ranges.get(zone, PRESET_SCAN_RANGES.get(zone, ())))
+
+    def set_zone_ranges(self, zone, ranges, expected=None):
+        if expected is not None and expected != self.zone_ranges(zone):
+            raise ValueError("These ranges changed. Reopen the preset and try again.")
+        overrides = self.preset_ranges.copy()
+        if ranges is None:
+            overrides.pop(zone, None)
+        else:
+            overrides[zone] = [{**preset, "name": normalize_favorite_name(preset["name"])} for preset in ranges]
+        if overrides == self.preset_ranges:
+            return False
+        self.save(preset_ranges=overrides)
+        return True
+
+    def _range_plan(self, zone):
+        plan = self._preset_plans.get(zone)
+        if plan is not None:
+            return plan
+        if zone in CUSTOM_ZONES:
+            preset = self.custom_presets.get(zone)
+            if not preset:
+                return None
+            plan = PresetRangePlan((self._custom_band(zone, preset),))
+        else:
+            ranges = self.zone_ranges(zone)
+            if not ranges:
+                return None
+            bands = tuple(self._custom_band(zone, preset) for preset in ranges)
+            if zone in self.preset_ranges:
+                plan = PresetRangePlan(bands)
+            else:
+                listed = {entry["hz"] for entry in self.zone_entries(zone)
+                          if any(band.lower <= entry["hz"] <= band.upper for band in bands)}
+                changes = self.zones.get(zone, {}).get("changes", {})
+                removed = {entry["hz"] for index in changes if (entry := self.zone_defaults[zone].get(int(index)))}
+                plan = PresetRangePlan(bands, tuple(sorted(listed)), frozenset(removed - listed))
+        self._preset_plans[zone] = plan
+        return plan
 
     def zone_indices(self, zone):
         if zone in CUSTOM_ZONES:
@@ -610,15 +816,12 @@ class ReceiverPanel:
 
     def zone_entry(self, zone, index):
         if zone in CUSTOM_ZONES:
-            preset = self.custom_presets.get(zone)
-            if preset and index is not None and preset["start_hz"] <= index <= preset["end_hz"]:
-                return {"hz": index, "mode": auto_band_mode(index) or "FM", "automatic": True}
-            return None
+            plan = self._range_plan(zone)
+            return plan.entry(zone, index) if plan else None
         if zone == NEARBY_ZONE:
             return self._nearby.get(index)
-        if zone in RANGE_SCAN_SETTINGS and index is not None and index < 0:
-            frequency = -index - 1
-            return {"hz": frequency, "mode": band_search_mode(zone, frequency), "name": ""}
+        if zone in PRESET_SCAN_RANGES and index is not None and index < 0:
+            return self._range_plan(zone).entry(zone, -index - 1)
         if zone == "FAV":
             return self.memories.get(divmod(index, 100))
         changes = self.zones.get(zone, {}).get("changes", {})
@@ -684,11 +887,13 @@ class ReceiverPanel:
             "settings": self.current_settings(mode),
             "settings_by_mode": deepcopy(self.by_mode),
             "memories": [self.memories[key].copy() for key in sorted(self.memories)],
+            "bank_names": self.bank_names.copy(),
             "frequency_mode": self.frequency_mode,
             "group": self.group, "slot": self.slot,
             "vfo": {"hz": self.vfo[0], "mode": self.vfo[1]},
             "auto_mode": power and self.active and self.automatic_mode,
             "scan_kind": self.scan["kind"] if power and self.scan else None,
+            "scan_scope_span_hz": self.scan.get("scope_span_hz") if power and self.scan else None,
             "scan_zone": zone_point[0] if zone_point else zone_scan["zones"][0] if zone_scan else None,
             "scan_zones": zone_scan["zones"].copy() if zone_scan else [],
             "custom_presets": deepcopy(self.custom_presets),
@@ -714,15 +919,18 @@ class ReceiverPanel:
         }
 
     def stop_scan(self):
+        if self.scan:
+            self.preset_point = self.preset_position()
         self.scan = None
         self.paused_at = self.closed_at = 0.0
 
     def start_scan(self, action, current, now):
         kind = action["kind"]
         direction = action.get("direction", self.scan_direction)
+        scope_span_hz = action.get("scope_span_hz")
         if kind == "ZONE":
             zones = action["zones"] if "zones" in action else [action["zone"]]
-            return self._start_zone_scan(zones, current, now)
+            return self._start_zone_scan(zones, current, now, scope_span_hz=scope_span_hz)
         if kind in ("MEMO", "SEL", "MODE"):
             group = action.get("group")
             mode = action.get("mode", current[1])
@@ -777,6 +985,7 @@ class ReceiverPanel:
             self.save(memories={key: entry for key, entry in self.memories.items() if key[0] != AUTO_GROUP})
         self.stop_scan()
         self.scan = scan
+        self.set_scan_scope_span(scope_span_hz)
         self.scan_direction = direction
         self.scan_origin = current
         self.next_scan_at = now
@@ -787,24 +996,18 @@ class ReceiverPanel:
         points = [(zone, index) for index in indices]
         if zone == "BCAST":
             return sorted(points, key=lambda point: self.zone_entry(*point)["hz"])
-        if zone in RANGE_SCAN_SETTINGS and self.settings[RANGE_SCAN_SETTINGS[zone]]:
-            listed = {(entry["hz"], entry["mode"]) for entry in self.zone_defaults[zone].values()}
-            listed.update((entry["hz"], entry["mode"]) for index in indices
-                          if (entry := self.zone_entry(zone, index)) is not None)
-            points.extend((zone, -frequency - 1) for frequency in band_search_frequencies(zone, f"{zone} ALL")
-                          if (frequency, band_search_mode(zone, frequency)) not in listed)
         return points
 
-    def _start_zone_scan(self, zones, current, now, *, refreshing=False):
+    def _start_zone_scan(self, zones, current, now, *, refreshing=False, scope_span_hz=None):
         if any(zone in CUSTOM_ZONES and zone not in self.custom_presets for zone in zones):
             raise ValueError("Set the frequency range for the custom preset first")
-        dynamic = [zone for zone in zones if zone in CUSTOM_ZONES]
-        points = [point for zone in zones if zone not in dynamic for point in self._zone_scan_points(zone)]
-        if dynamic:
+        plans = {zone: plan for zone in zones if (plan := self._range_plan(zone)) is not None}
+        points = [point for zone in zones if zone not in plans for point in self._zone_scan_points(zone)]
+        if plans:
             fixed_points = points
             points = []
             for offset in range(0, max(len(fixed_points), 1), 8):
-                points.extend((zone, -1 - offset) for zone in dynamic)
+                points.extend((zone, -1 - offset) for zone in plans)
                 points.extend(fixed_points[offset:offset + 8])
         elif not refreshing and not any((entry := self.zone_entry(*point)) and not entry.get("skip") for point in points):
             raise ValueError("The selected zones have no eligible presets")
@@ -814,10 +1017,12 @@ class ReceiverPanel:
         favorite_memories = self.memories if "FAV" in zones else None
         if self.scan and self.scan["kind"] == "ZONE":
             scan = self.scan
+            self.set_scan_scope_span(scope_span_hz)
             current_point = scan.get("current_point")
             previous_points, previous_index = scan["points"], scan["index"]
-            scan.update(points=points, zones=zones.copy(), favorite_memories=favorite_memories)
-            scan["custom_freqs"] = {zone: frequency for zone, frequency in scan["custom_freqs"].items() if zone in zones}
+            previous_plans = scan["range_plans"]
+            scan.update(points=points, zones=zones.copy(), favorite_memories=favorite_memories, range_plans=plans)
+            scan["range_freqs"] = {zone: frequency for zone, frequency in scan["range_freqs"].items() if zone in plans}
             if current_point in points:
                 scan["index"] = points.index(current_point)
                 zone = current_point[0]
@@ -831,8 +1036,14 @@ class ReceiverPanel:
                                 return favorite
                             self.active_memory = favorite.copy()
                         return None
-                elif zone not in CUSTOM_ZONES or self.zone_entry(zone, scan["custom_freqs"].get(zone)):
+                elif zone not in plans:
                     return None
+                elif (entry := plans[zone].entry(zone, scan["range_freqs"].get(zone))) and not self.frequency_locked(
+                        entry["hz"], now):
+                    if previous_plans.get(zone) is plans[zone]:
+                        return None
+                    self._measure_zone_entry(entry, now)
+                    return entry
                 scan["index"] -= self.scan_direction
             else:
                 # Continue with the next preset that survived the change of zones.
@@ -848,12 +1059,11 @@ class ReceiverPanel:
         else:
             self.stop_scan()
             index = -1 if self.scan_direction > 0 else 0
-            if zones == ["BCAST"] and auto_band_mode(current[0]) == "WFM":
-                frequencies = [self.zone_entry(*point)["hz"] for point in points]
-                index = (bisect_right(frequencies, current[0]) - 1 if self.scan_direction > 0
-                         else bisect_left(frequencies, current[0]))
+            frequencies = {"BCAST": current[0]} if zones == ["BCAST"] and auto_band_mode(current[0]) == "WFM" else {}
             self.scan = {"kind": "ZONE", "zones": zones.copy(), "points": points, "held": False,
-                         "index": index, "custom_freqs": {}, "favorite_memories": favorite_memories}
+                         "index": index, "range_freqs": frequencies, "range_plans": plans,
+                         "favorite_memories": favorite_memories}
+            self.set_scan_scope_span(scope_span_hz)
             self.scan_origin = current
         return self.next_scan(now)
 
@@ -868,9 +1078,83 @@ class ReceiverPanel:
     def hold_zone_scan(self):
         self.scan["held"] = True
 
+    def preset_position(self):
+        """Identify the preset in use by the current scan or manual recall."""
+        if self.scan is None:
+            return self.preset_point
+        if self.scan["kind"] != "ZONE" or not (point := self.scan.get("current_point")):
+            return None
+        zone = point[0]
+        if zone in self.scan["range_plans"]:
+            frequency = self.scan["range_freqs"].get(zone)
+            if frequency is None:
+                return None
+            return zone, frequency if zone in CUSTOM_ZONES else -frequency - 1
+        return point
+
+    def step_preset(self, steps, now):
+        """Move within one zone in its programmed order and hold an active scan."""
+        position = self.preset_position()
+        if position is None:
+            return None
+        zone, channel = position
+        scan = self.scan
+        if zone in CUSTOM_ZONES or zone in PRESET_SCAN_RANGES and channel < 0:
+            plan = self._range_plan(zone)
+            if plan is None:
+                return None
+            direction = 1 if steps > 0 else -1
+            frequency = channel if zone in CUSTOM_ZONES else -channel - 1
+            blocked = self.temporary_locks | {hz for hz, expires in self.skipped.items() if now < expires}
+            for _ in range(abs(steps)):
+                frequency = plan.next_unlocked(frequency, direction, blocked)
+                if frequency is None:
+                    return None
+            entry = plan.entry(zone, frequency)
+            if scan:
+                scan["range_freqs"][zone] = frequency
+            else:
+                self.preset_point = zone, frequency if zone in CUSTOM_ZONES else -frequency - 1
+        else:
+            manual_favorites = zone == "FAV" and scan is None
+            if manual_favorites and (group := channel // 100) >= 2:
+                points = [(zone, group * 100 + slot) for bank, slot in sorted(self.memories) if bank == group]
+            else:
+                points = scan["points"] if scan else self._zone_scan_points(zone)
+            eligible = []
+            anchor = -1
+            for rank, point in enumerate(points):
+                if point[0] != zone:
+                    continue
+                if point == position:
+                    anchor = rank
+                entry = self.zone_entry(*point)
+                if not entry:
+                    continue
+                if not manual_favorites and (entry.get("skip") or self.frequency_locked(entry["hz"], now)):
+                    continue
+                eligible.append((rank, entry))
+            if not eligible:
+                return None
+            ranks = [rank for rank, _ in eligible]
+            if steps > 0:
+                offset = bisect_right(ranks, anchor) + steps - 1
+            else:
+                offset = bisect_left(ranks, anchor) + steps
+            rank, entry = eligible[offset % len(eligible)]
+            if scan:
+                scan["index"] = rank
+                scan["current_point"] = points[rank]
+            else:
+                self.preset_point = points[rank]
+        if scan:
+            self._measure_zone_entry(entry, now)
+            self.hold_zone_scan()
+        return entry
+
     def enable_nearby(self, current, now):
         if self.nearby is None:
-            self.nearby = {"windows": nearby_windows(current), "step": 0, "ready_at": now}
+            self.nearby = {"windows": nearby_windows(current), "step": 0, "ready_at": now, "live_ready_at": now}
 
     def nearby_status(self, power):
         enabled = bool(power and self.nearby)
@@ -903,6 +1187,17 @@ class ReceiverPanel:
     def invalidate_nearby_probe(self):
         if self.nearby:
             self.nearby.pop("job", None)
+            self.nearby.pop("live_job", None)
+
+    def next_nearby_live_probe(self, now, current):
+        if not self.nearby_sweeping or self.nearby.get("live_job") or now < self.nearby["live_ready_at"]:
+            return None
+        local = nearby_origin_window(current)
+        if local is None:
+            return None
+        band, _, _, exclude = local
+        job, blocked = self._begin_nearby_probe("live_job", now, current, band, exclude)
+        return job, None, band, band.lower, band.upper, (), blocked
 
     def next_nearby_probe(self, now, current):
         if not self.nearby_sweeping or self.nearby.get("job") or now < self.nearby["ready_at"]:
@@ -925,21 +1220,36 @@ class ReceiverPanel:
                 center = (lower + upper) // 2 + 60_000
             center = max(MANUAL_MIN_HZ, min(center, MANUAL_MAX_HZ))
             exact = ()
+        job, blocked = self._begin_nearby_probe("job", now, current, band, exclude)
+        return job, center, band, lower, upper, exact, blocked
+
+    def _begin_nearby_probe(self, job_key, now, current, band, exclude):
         job = object()
-        watch["job"] = job
+        self.nearby[job_key] = job
         blocked = self.temporary_locks | {hz for hz, expires in self.skipped.items() if expires > now}
+        blocked |= {band.nearest(hz, band.step) for hz in blocked if band.lower <= hz <= band.upper}
+        guard = NEARBY_OFFSET_LIMITS[band.modulation]
         for frequency in (current[0], exclude):
             if frequency is not None and band.lower <= frequency <= band.upper:
                 blocked.add(band.nearest(frequency, band.step))
-        return job, center, band, lower, upper, exact, blocked
+                # An off-grid foreground can appear in two adjacent FFT candidates.
+                for edge in (frequency - guard, frequency + guard):
+                    neighbor = band.nearest(edge, band.step)
+                    if abs(neighbor - frequency) < guard:
+                        blocked.add(neighbor)
+        return job, blocked
 
-    def finish_nearby_probe(self, job, frequency, mode, now, *, listening):
+    def finish_nearby_probe(self, job, frequency, mode, now, *, listening, live=False):
         watch = self.nearby
-        if not watch or watch.get("job") is not job:
+        job_key = "live_job" if live else "job"
+        if not watch or watch.get(job_key) is not job:
             return None
-        watch.pop("job")
-        interval = max(NEARBY_LISTENING_INTERVAL if listening else 0, 1 / self.settings["scan_speed"])
-        watch["ready_at"] = now + interval
+        watch.pop(job_key)
+        if live:
+            watch["live_ready_at"] = now + NEARBY_LIVE_INTERVAL
+        else:
+            interval = NEARBY_LISTENING_INTERVAL if listening else NEARBY_IDLE_INTERVAL
+            watch["ready_at"] = now + interval
         if (not self.nearby_sweeping or frequency is None or auto_band_mode(frequency) == "WFM"
                 or self.frequency_locked(frequency, now)):
             return None
@@ -953,8 +1263,8 @@ class ReceiverPanel:
         scan = self.scan
         scan["held"] = False
         point = scan.get("current_point")
-        if point and point[0] in CUSTOM_ZONES:
-            entry = self.zone_entry(point[0], scan["custom_freqs"].get(point[0]))
+        if point and (plan := scan["range_plans"].get(point[0])):
+            entry = plan.entry(point[0], scan["range_freqs"].get(point[0]))
         else:
             entry = self.zone_entry(*point) if point else None
         if not entry or entry.get("skip") or self.frequency_locked(entry["hz"], now):
@@ -968,14 +1278,31 @@ class ReceiverPanel:
         self.next_scan_at = now
         self.paused_at = self.closed_at = 0.0
 
-    def _scan_hold_time(self, entry):
-        return DIGITAL_SCAN_ACQUISITION_SECONDS if entry["mode"] in VOICE_MODES else 1 / self.settings["scan_speed"]
+    def set_scan_scope_span(self, scope_span_hz):
+        if self.scan is not None and scope_span_hz is not None:
+            self.scan["scope_span_hz"] = scope_span_hz
 
-    def _next_custom_entry(self, zone):
-        preset = self.custom_presets[zone]
+    def _quiet_scan_dwell(self):
+        speed = self.settings["scan_speed"]
+        span = self.scan.get("scope_span_hz", 0)
+        if self.settings["scan_follow_scope"] and span > SCAN_SCOPE_BASE_HZ:
+            fraction = (span - SCAN_SCOPE_BASE_HZ) / (SCAN_SCOPE_MAX_HZ - SCAN_SCOPE_BASE_HZ)
+            speed = min(MAX_SCAN_SPEED, speed * (1 + fraction))
+        return 1 / speed
+
+    def _scan_hold_time(self, entry):
+        mode = entry["mode"]
+        if mode in VOICE_MODES:
+            return DIGITAL_SCAN_ACQUISITION_SECONDS
+        dwell = self._quiet_scan_dwell()
+        if mode == "WFM":
+            # Preserve the manual rate if it is already faster than WFM acquisition.
+            return max(dwell, min(WFM_SCAN_ACQUISITION_SECONDS, 1 / self.settings["scan_speed"]))
+        return dwell
+
+    @staticmethod
+    def _custom_band(zone, preset):
         low, high = preset["start_hz"], preset["end_hz"]
-        frequencies = self.scan["custom_freqs"]
-        previous = frequencies.get(zone)
         step = preset.get("step_hz")
         if step is None:
             if 117_975_000 <= low <= high < 137_000_000:
@@ -984,21 +1311,15 @@ class ReceiverPanel:
                 step = 100_000
             else:
                 step = 1_000 if high < 30_000_000 else 6_250
-        band = Band(zone, low, high, step)
-        upwards = self.scan_direction > 0
-        if previous is None or (not low <= previous < high if upwards else not low < previous <= high):
-            frequency = low if upwards else high
-        else:
-            offset = previous - low
-            index = (3 * offset + 1) // 25_000 if step == AIR_STEP else offset // step
-            if upwards:
-                frequency = min(high, band.frequency(index + 1, step))
-            else:
-                if band.frequency(index, step) >= previous:
-                    index -= 1
-                frequency = max(low, band.frequency(index, step))
+        return Band(zone, low, high, step, preset.get("mode", "AUTO"))
+
+    def _next_range_entry(self, zone, plan, blocked):
+        frequencies = self.scan["range_freqs"]
+        frequency = plan.next_unlocked(frequencies.get(zone), self.scan_direction, blocked)
+        if frequency is None:
+            return None
         frequencies[zone] = frequency
-        return self.zone_entry(zone, frequency)
+        return plan.entry(zone, frequency)
 
     def next_scan(self, now):
         scan = self.scan
@@ -1013,7 +1334,8 @@ class ReceiverPanel:
             scan["index"] = (scan["index"] + self.scan_direction) % len(points)
             point = points[scan["index"]]
             if zone_scan:
-                entry = self._next_custom_entry(point[0]) if point[0] in CUSTOM_ZONES else self.zone_entry(*point)
+                plan = scan["range_plans"].get(point[0])
+                entry = self._next_range_entry(point[0], plan, blocked) if plan else self.zone_entry(*point)
             elif isinstance(point, tuple):
                 entry = self.memories.get(point)
             elif scan.get("automatic"):
@@ -1136,11 +1458,11 @@ class ReceiverPanel:
             resume = self.settings["resume_time"]
             if now < self.closed_at + resume:
                 return None
-        if len(scan["points"]) == 1 and self.zone_entry(*scan["current_point"]) is not None:
+        if len(scan["points"]) == 1 and scan["current_point"][0] not in scan["range_plans"]:
             self.paused_at = self.closed_at = 0.0
             return None
         start = scan["sample_at"]
-        dwell = 1 / self.settings["scan_speed"]
+        dwell = self._quiet_scan_dwell()
         if scan["mode"] == "WFM":
             dwell = max(dwell, WFM_SCAN_ACQUISITION_SECONDS)
         elif scan["mode"] in VOICE_MODES:
@@ -1158,6 +1480,7 @@ class ReceiverPanel:
         if profile is None:
             raise ValueError("Save a Tier III site and its channel map first")
         self.stop_scan()
+        self.preset_point = None
         self.priority = self.priority_return = None
         self.trunk_profile = profile
         self.trunk_frequency = profile["control_hz"]
@@ -1179,6 +1502,7 @@ class ReceiverPanel:
     def power_off(self):
         self.nearby = None
         self.stop_scan()
+        self.preset_point = None
         self.stop_trunk()
         self.priority = self.priority_return = None
         self.monitor = False

@@ -1,6 +1,6 @@
 const NUMBER_FORMAT = new Intl.NumberFormat();
 const TIME_FORMAT = new Intl.DateTimeFormat(undefined, {timeStyle: "medium"});
-const NO_LCD_NAVIGATION = new Set(["dial-a", "dial-b"]);
+const NO_LCD_NAVIGATION = new Set(["dial-b"]);
 const LCD_RETURN_ONLY = new Set(["dial-c", "filter", "scan-start", "tune-step", "vfo-memory", "choose-value"]);
 const CUSTOM_PRESET_NAMES = Object.fromEntries(Array.from({length: 12}, (_, index) => {
   const slot = index + 1;
@@ -11,7 +11,6 @@ export const ZONE_NAMES = {FAV: "Favourite", CB: "CB", PMR: "PMR446", BUS: "Busi
   BCAST: "FM Radio", RAIL: "Rail", EVT: "Events", UTIL: "Utilities", AIR: "Air", MRN: "Marine",
   NEARBY: "Nearby Signals", ...CUSTOM_PRESET_NAMES};
 const ZONE_PAGE_SIZE = 50;
-const FULL_RANGE_SETTINGS = {HAM: "ham_full_range", BUS: "bus_full_range"};
 const PROJECT_LINKS = [
   {kind: "link", label: "GitHub", href: "https://github.com/AshCooperUK", title: "Open the maintainer’s GitHub profile."},
   {kind: "link", label: "User Manual", href: "https://github.com/AshCooperUK/SDR-Scanner/blob/main/docs/V10.md",
@@ -69,6 +68,7 @@ const SCAN_SETTING = [
   choice("pause_time", "Pause Timer", 10, timeChoices(1, 30, 0)),
   choice("resume_time", "Resume Timer", 2, timeChoices(0, 5, -1)),
   SCAN_SPEED,
+  flag("scan_follow_scope", "Scan Follows Scope"),
   number("priority_interval", "Priority Interval", 5, 1, 15, 1, "s"),
   choice("skip_timer", "Temporary Skip Timer", 5, [[5, "5 min"], [10, "10 min"], [15, "15 min"]]),
   flag("skip_function", "SKIP Function", true),
@@ -81,7 +81,12 @@ const displaySettings = ctx => [
   number("lcd_backlight", "LCD Backlight", 100, 0, 100, 1, "%", "client"),
   flag("mute_button_dim", "Mute Button Dim", true, "client"),
   number("led_bright", "LED Bright", 100, 0, 100, 1, "%", "client"),
-  choice("lcd_type", "Display Type", "A", [["A", "A · Black"], ["B", "B · Blue"]], "client"),
+  choice("lcd_type", "Display Type", "A", [
+    ["A", "A · Black"], ["B", "B · Blue"], ["C", "C · Green"], ["D", "D · Amber"], ["E", "E · Violet"],
+  ], "client"),
+  choice("waterfall_colours", "Waterfall Colours", "spectrum", [
+    ["spectrum", "Spectrum"], ["blue", "Blue"], ["amber", "Amber"], ["greyscale", "Greyscale"],
+  ], "client"),
   flag("display_memory", "Memory Name", true, "client"),
   flag("display_rds", "RDS", true, "client"),
   ...(modeAvailable(ctx, "P25") ? [
@@ -252,6 +257,7 @@ const SET_PAGES = [
   page("dials", "Dials", dialAssignmentItems),
   page("presets", "Presets", ctx => Object.entries(ZONE_NAMES).map(([zone, name]) =>
     run(name, async next => next.push(await getZonePage(next, zone)), ctx.v10.custom_presets?.[zone]?.name))),
+  page("favorite-banks", "Favourite Banks", favoriteBankItems),
   page("quick-menu-settings", "Quick Menu", quickMenuSettingItems),
   page("settings-backup", "Settings Backup", [
     run("Load Setting", next => next.push(restorePage())),
@@ -300,6 +306,7 @@ const groupOptions = [["", "All Groups"], ...range(100).map(n => [n, channel(n)]
 const tagOptions = [[0, "OFF"], ...range(9, 1).map(n => [n, "★" + n])];
 const supports = (ctx, key) => ctx.v10.capabilities?.rf?.includes(key);
 const groupLabel = group => group === 100 ? "A" : channel(group);
+export const favoriteBankLabel = (side, group) => "FAV " + side.toUpperCase() + " · BANK " + group;
 
 function formatTone(tone) {
   if (tone?.kind === "CTCSS" && Number.isFinite(tone.hz)) return tone.hz.toFixed(1);
@@ -441,11 +448,39 @@ function writeItems(ctx, group = ctx.v10.group ?? 0) {
   ];
 }
 
+function editBankName(ctx, group, label) {
+  return formPage("bank-name", label, [
+    field("Bank Name", "name", {value: ctx.v10.bank_names?.[group] ?? "", maxLength: 24, placeholder: "Bank " + channel(group)}),
+  ], async (next, form) => {
+    await next.change({v10: "bank_name", group, name: getFormValue(form, "name")});
+    next.back();
+  }, "SET");
+}
+
+function favoriteBankItems(ctx) {
+  const shortcuts = ["a", "b"].map(side => {
+    const group = ctx.getFavoriteBank(side);
+    const label = favoriteBankLabel(side, group);
+    return run(label, next => next.push(editBankName(next, group, label)), ctx.v10.bank_names?.[group]);
+  });
+  const sections = range(10).map(section => {
+    const start = section * 10;
+    const title = `Banks ${channel(start)}–${channel(start + 9)}`;
+    return page("favorite-bank-range", title, current => range(10, start).map(group => {
+      const label = "BANK " + channel(group);
+      return run(label, next => next.push(editBankName(next, group, label)), current.v10.bank_names?.[group]);
+    }));
+  });
+  return [...shortcuts, ...sections];
+}
+
 function memoryGroupPage(ctx, group = ctx.v10.group ?? 0) {
   return page("memory-group", "MEMORY · GROUP " + groupLabel(group), next => [
     run("GROUP", active => active.push(makeGroupPage(active)), groupLabel(group)),
     run("CH-INP", active => active.push(channelInput(group))),
     run("MW", active => active.push(page("write", "MEMORY WRITE", next => writeItems(next, group)))),
+    group < 100 ? run("Edit Bank Name", active => active.push(editBankName(active, group, "BANK " + group)),
+      next.v10.bank_names?.[group]) : null,
     ...memoryList(next).filter(entry => entry.group === group).map(entry =>
       run(memLabel(entry), active => active.push(memoryDetails(entry)),
         frequency(entry.hz) + "  " + displayMode(entry.mode) + (entry.skip ? "  SKIP" : "") + (entry.selected ? "  ★" + Number(entry.selected) : ""))),
@@ -456,7 +491,7 @@ function makeGroupPage(ctx) {
   const counts = new Map();
   for (const entry of memoryList(ctx)) counts.set(entry.group, (counts.get(entry.group) ?? 0) + 1);
   const rows = range(101).map(group => run(groupLabel(group), next => next.push(memoryGroupPage(next, group)),
-    counts.has(group) ? String(counts.get(group)) + " ch" : ""));
+    [ctx.v10.bank_names?.[group], counts.has(group) ? counts.get(group) + " ch" : ""].filter(Boolean).join(" · ")));
   const special = [
     rows.pop(),
     run("P", next => next.push(scanForm(next, "PROG", true)), "Programmed Scan Edge Pairs"),
@@ -470,8 +505,77 @@ function getZone(ctx, zone) {
 
 async function getZonePage(ctx, zone) {
   const snapshot = await getZone(ctx, zone);
-  return isCustomPreset(zone) ? customPresetEditor(zone, snapshot.range)
-    : zoneListPage(zone, snapshot.entries, zone !== "NEARBY");
+  if (isCustomPreset(zone)) return customPresetEditor(zone, snapshot.range);
+  if (Array.isArray(snapshot.ranges)) return presetRangesPage(zone, snapshot);
+  return zoneListPage(zone, snapshot.entries, zone !== "NEARBY");
+}
+
+function presetRangesPage(zone, snapshot) {
+  const {ranges, entries} = snapshot;
+  return page("preset-ranges", ZONE_NAMES[zone] + " Presets", [
+    run("Add Range", next => next.push(presetRangeEditor(next, zone, ranges))),
+    ...(snapshot.ranges_customized ? [run("Restore Default Ranges", next => next.push(confirmPage(
+      "reset-preset-ranges", "Restore Default Ranges?", ZONE_NAMES[zone] + " scan ranges",
+      async active => {
+        await active.change({v10: "zone", zone, operation: "reset_ranges", expected_ranges: ranges});
+        await refreshPresetRanges(active, zone);
+      },
+    )))] : []),
+    run("Stored Channels", next => next.push(zoneListPage(zone, entries, true)), String(entries.length)),
+    ...ranges.map((item, index) => run(item.name, next => next.push(presetRangePage(zone, ranges, index)),
+      `${asMHz(item.start_hz)}–${asMHz(item.end_hz)} MHz · ${item.mode ?? "AUTO"}`)),
+  ]);
+}
+
+async function refreshPresetRanges(ctx, zone, detail = false) {
+  const updated = await getZone(ctx, zone);
+  ctx.back();
+  if (detail) ctx.back();
+  ctx.replace(presetRangesPage(zone, updated));
+}
+
+function presetRangePage(zone, ranges, index) {
+  const item = ranges[index];
+  return page("preset-range", item.name, [
+    readout("Start", frequency(item.start_hz)),
+    readout("End", frequency(item.end_hz)),
+    readout("Mode", item.mode ?? "AUTO"),
+    readout("Scan Step", item.step_hz ? fmtStep(item.step_hz) : "Auto"),
+    run("Edit Range", next => next.push(presetRangeEditor(next, zone, ranges, index))),
+    ...(ranges.length > 1 ? [run("Delete Range", next => next.push(confirmPage(
+      "delete-preset-range", "Delete Range?", item.name, async active => {
+        await active.change({v10: "zone", zone, operation: "configure_ranges", expected_ranges: ranges,
+          ranges: ranges.filter((_, offset) => offset !== index)});
+        await refreshPresetRanges(active, zone, true);
+      },
+    )))] : []),
+  ]);
+}
+
+function presetRangeEditor(ctx, zone, ranges, index) {
+  const item = ranges[index];
+  const step = item?.step_hz ?? 0;
+  const steps = CUSTOM_STEPS.some(([value]) => value === step) ? CUSTOM_STEPS
+    : [...CUSTOM_STEPS, [step, fmtStep(step)]].sort(([left], [right]) => left - right);
+  return formPage("preset-range-editor", item ? "Edit Range" : "Add Range", [
+    field("Name", "name", {value: item?.name ?? "Range " + (ranges.length + 1), maxLength: 24, required: true}),
+    field("Start · MHz", "start_hz", {value: asMHz(item?.start_hz), inputMode: "decimal", required: true}),
+    field("End · MHz", "end_hz", {value: asMHz(item?.end_hz), inputMode: "decimal", required: true}),
+    field("Scan Step", "step_hz", {options: steps, value: step}),
+    field("Mode", "mode", {options: [["AUTO", "AUTO"], ...radioModes(ctx)], value: item?.mode ?? "AUTO"}),
+  ], async (next, form) => {
+    const name = getFormValue(form, "name");
+    const start_hz = frequencyValue(getFormValue(form, "start_hz"), "Start frequency");
+    const end_hz = frequencyValue(getFormValue(form, "end_hz"), "End frequency");
+    if (!name) throw new Error("Enter a name for this range.");
+    if (start_hz >= end_hz) throw new Error("End frequency must be higher than the start frequency.");
+    const step_hz = Number(getFormValue(form, "step_hz"));
+    const mode = getFormValue(form, "mode");
+    const range = {name, start_hz, end_hz, mode, ...(step_hz ? {step_hz} : {})};
+    const updated = item ? ranges.map((previous, offset) => offset === index ? range : previous) : [...ranges, range];
+    await next.change({v10: "zone", zone, operation: "configure_ranges", ranges: updated, expected_ranges: ranges});
+    await refreshPresetRanges(next, zone, Boolean(item));
+  }, "SET");
 }
 
 function customPresetEditor(zone, preset) {
@@ -505,9 +609,6 @@ function zoneListPage(zone, entries, editing, pageNumber = 0) {
   const items = [];
   if (editing) {
     items.push(run("Add Preset", next => next.push(zoneEditor(next, zone, activePage))));
-    if (FULL_RANGE_SETTINGS[zone]) {
-      items.push(choice(FULL_RANGE_SETTINGS[zone], "Full Range Scan", false, [[false, "Off"], [true, "On"]]));
-    }
   } else if (zone === "NEARBY") items.push(run("Watch Nearby Signals", async next => {
     await next.change({v10: "nearby", enabled: true});
     next.close();
@@ -882,23 +983,97 @@ const DIAL_B_VOLUME = number("volume", "AF Volume", 32, 0, 100, 0.5, "%", "clien
 const SQUELCH = {...number("squelch", "SQL", 0, 0, 100, 1, "%", "knob"), knob: "squelch"};
 const AUDIO_BOOST = number("audio_boost", "AUDIO BOOST", 0, 0, 24, 1, "dB", "client");
 const DIAL_LABELS = {"dial-a": "Dial A", "dial-b": "Dial B", "dial-c": "Dial C", "dial-d": "Dial D", "dial-e": "Dial E",
-  frequency: "Main Dial"};
+  "dial-f": "Dial F", "dial-g": "Dial G", "dial-h": "Dial H", "dial-i": "Dial I", "dial-j": "Dial J", frequency: "Main Dial"};
 const DIAL_PREFERENCES = {"dial-a": "dial_a_function", "dial-b": "dial_b_function", "dial-c": "dial_c_function",
-  "dial-d": "dial_d_function", "dial-e": "dial_e_function", frequency: "main_dial_function"};
+  "dial-d": "dial_d_function", "dial-e": "dial_e_function", "dial-f": "dial_f_function",
+  "dial-g": "dial_g_function", "dial-h": "dial_h_function", "dial-i": "dial_i_function", "dial-j": "dial_j_function",
+  frequency: "main_dial_function"};
 const DIAL_SENSITIVITIES = [[0.25, "Very Low"], [0.5, "Low"], [1, "Normal"], [2, "High"], [4, "Very High"]];
 const dialSensitivityKey = dial => DIAL_PREFERENCES[dial].replace(/_function$/, "_sensitivity");
+const dialPressKey = dial => DIAL_PREFERENCES[dial].replace(/_function$/, "_press");
+const dialAction = (key, label) => ({key, label});
+const UNASSIGNED = dialAction("unassigned", "None");
 const DIAL_DEFAULTS = {"dial-a": "pause_time", "dial-b": "volume", "dial-c": "memory-channel",
-  "dial-d": "squelch", "dial-e": "fine-tuning", frequency: "tuning"};
+  "dial-d": "squelch", "dial-e": "fine-tuning", "dial-f": "scope-pan",
+  "dial-g": UNASSIGNED.key, "dial-h": UNASSIGNED.key, "dial-i": UNASSIGNED.key, "dial-j": UNASSIGNED.key,
+  frequency: "tuning"};
 const SCAN_PAUSE = number("pause_time", "Scan Pause Time", 10, 0, 30, 1, "s");
 const PRIORITY_INTERVAL = number("priority_interval", "PRIO INTVL", 5, 1, 15, 1, "s");
 const SCAN_RESUME = choice("resume_time", "RESUME TIME", 2, timeChoices(0, 5, -1));
-const dialAction = (key, label) => ({key, label});
 const FINE_TUNING = dialAction("fine-tuning", "Fine Tuning · 10 Hz");
 const TUNING_STEP = dialAction("tuning-step", "Tuning Step");
 const SCAN_DIRECTION = dialAction("scan-direction", "Scan Direction");
 const MEMORY_CHANNEL = dialAction("memory-channel", "Memory Channel");
+const PRESET_CHANNEL = dialAction("preset-channel", "Preset Channel");
+const FAVORITE_BANK_A = dialAction("favorite-bank-a", "FAV BANK A (Left)");
+const FAVORITE_BANK_B = dialAction("favorite-bank-b", "FAV BANK B (Right)");
 const SCOPE_SPAN = dialAction("scope-span", "Scope Span");
+const SCOPE_PAN = dialAction("scope-pan", "Scope Pan");
 const SCOPE_REFERENCE = number("scope_reference", "Scope Reference", 0, -20, 20, 0.5, "dB", "client");
+
+const PRESS_LABELS = {
+  "frequency-entry": "Frequency Entry",
+  "tuning-step": "Tuning Step",
+  "tuning-lock": "Toggle Tuning Lock",
+  "vfo-memory": "Toggle VFO / Memory",
+  "memory-channels": "Memory Channels",
+  "memory-groups": "Memory Groups",
+  "favorite-bank": "Favourite Bank Channels",
+  "preset-settings": "Preset Settings",
+  "adjust": "Adjust Assigned Setting",
+  "reset": "Reset Assigned Setting",
+  "mute": "Toggle Mute",
+  "monitor": "Toggle Monitor",
+  "audio-controls": "Audio / RF Settings",
+  "scope-span": "Scope Span",
+  "recenter-scope": "Recenter Scope",
+  "center-fixed": "Toggle Center / Fixed",
+  "full-capture": "Full Capture",
+  "scope-hold": "Hold / Resume Scope",
+  "scope-marker": "Toggle Scope Marker",
+  "scope-settings": "Scope Settings",
+  "scan": "Start / Stop Scan",
+  "reverse-scan": "Reverse Scan Direction",
+  "preset-hold": "Hold / Resume Preset Scan",
+  "scan-settings": "Scan Settings",
+  "priority": "Priority Watch",
+  "dial-settings": "Dial Settings",
+  "quick": "Quick Menu",
+  "function": "Receive Functions",
+  "receive-adjustments": "Receive Adjustments",
+  "none": "None",
+};
+
+const TUNING_PRESS = ["frequency-entry", "tuning-step", "tuning-lock", "vfo-memory"];
+const FAVORITE_PRESS = ["favorite-bank", "memory-groups"];
+const AUDIO_PRESS = ["adjust", "reset", "audio-controls"];
+const SCAN_PRESS = ["adjust", "scan-settings", "scan", "preset-hold"];
+const COMMON_PRESS = ["dial-settings", "quick", "function", "receive-adjustments", "none"];
+const DIAL_PRESS_ACTIONS = {
+  tuning: TUNING_PRESS,
+  "fine-tuning": TUNING_PRESS,
+  "coarse-tuning": TUNING_PRESS,
+  "tuning-step": ["tuning-step", "frequency-entry", "tuning-lock"],
+  "memory-channel": ["memory-channels", "memory-groups", "vfo-memory"],
+  "preset-channel": ["preset-settings", "preset-hold", "scan"],
+  "favorite-bank-a": FAVORITE_PRESS,
+  "favorite-bank-b": FAVORITE_PRESS,
+  volume: ["mute", "adjust", "audio-controls"],
+  squelch: ["monitor", "adjust", "audio-controls"],
+  rf_gain: ["adjust", "audio-controls"],
+  audio_boost: AUDIO_PRESS,
+  tone_treble: AUDIO_PRESS,
+  tone_bass: AUDIO_PRESS,
+  beep_level: AUDIO_PRESS,
+  "scope-span": ["scope-span", "full-capture", "scope-hold", "recenter-scope"],
+  "scope-pan": ["recenter-scope", "center-fixed", "scope-hold", "full-capture"],
+  scope_reference: ["adjust", "reset", "scope-marker", "scope-settings"],
+  "scan-direction": ["reverse-scan", "scan", "preset-hold"],
+  scan_speed: SCAN_PRESS,
+  pause_time: SCAN_PRESS,
+  resume_time: SCAN_PRESS,
+  priority_interval: ["adjust", "priority", "scan-settings"],
+};
 
 function dialBOptions(ctx) {
   return [
@@ -913,9 +1088,11 @@ function dialBOptions(ctx) {
 }
 
 function dialOptions(ctx) {
-  return [dialAction("tuning", "Frequency Tuning"), FINE_TUNING,
-    dialAction("coarse-tuning", "Coarse Tuning · 10 kHz"), TUNING_STEP, MEMORY_CHANNEL,
-    ...dialBOptions(ctx), SCOPE_SPAN, SCOPE_REFERENCE, SCAN_DIRECTION, SCAN_SPEED, SCAN_PAUSE,
+  return [UNASSIGNED,
+    dialAction("tuning", "Frequency Tuning"), FINE_TUNING,
+    dialAction("coarse-tuning", "Coarse Tuning · 10 kHz"), TUNING_STEP, MEMORY_CHANNEL, PRESET_CHANNEL,
+    FAVORITE_BANK_A, FAVORITE_BANK_B,
+    ...dialBOptions(ctx), SCOPE_SPAN, SCOPE_PAN, SCOPE_REFERENCE, SCAN_DIRECTION, SCAN_SPEED, SCAN_PAUSE,
     SCAN_RESUME, PRIORITY_INTERVAL];
 }
 
@@ -925,6 +1102,28 @@ function assignedDial(ctx, dial, options = dialOptions(ctx)) {
   return options.find(option => option.key === key) ?? options.find(option => option.key === defaultKey);
 }
 
+function dialPressChoice(ctx, dial) {
+  const role = assignedDial(ctx, dial).key;
+  const choices = [...(DIAL_PRESS_ACTIONS[role] ?? []), ...COMMON_PRESS];
+  const saved = ctx.getPreference(dialPressKey(dial), "auto");
+  const selected = choices.includes(saved) ? saved : "auto";
+  const automatic = "Automatic · " + PRESS_LABELS[choices[0]];
+  const action = selected === "auto" ? choices[0] : selected;
+  return {
+    action, label: PRESS_LABELS[action], selected,
+    display: selected === "auto" ? automatic : PRESS_LABELS[action],
+    choices: [["auto", automatic], ...choices.map(key => [key, PRESS_LABELS[key]])],
+  };
+}
+
+function dialPressPage(ctx, dial) {
+  const {choices, selected} = dialPressChoice(ctx, dial);
+  return choicesPage("dial-press", "Press Action", choices, selected, (active, key) => {
+    active.setPreference(dialPressKey(dial), key);
+    active.back();
+  });
+}
+
 function dialAssignmentPage(ctx, dial) {
   const options = dialOptions(ctx);
   const assignment = choicesPage("dial-assignment", DIAL_LABELS[dial], options.map(({key, label}) => [key, label]),
@@ -932,8 +1131,21 @@ function dialAssignmentPage(ctx, dial) {
       active.setPreference(DIAL_PREFERENCES[dial], key);
       active.back();
     });
+  const assignments = Object.keys(DIAL_LABELS).filter(other => other !== dial).map(other => [
+    assignedDial(ctx, other).key, other === "frequency" ? "MAIN" : other.at(-1).toUpperCase(),
+  ]);
+  assignments.push(["volume", "VOLUME"]);
+  const rows = assignment.items.map((item, index) => {
+    const key = options[index].key;
+    if (key === UNASSIGNED.key) return item;
+    const otherDials = assignments.filter(([role]) => role === key).map(([, label]) => label);
+    return {...item, value: [...otherDials, item.value].filter(Boolean).join(" · ")};
+  });
   const sensitivity = choice(dialSensitivityKey(dial), "Sensitivity", 1, DIAL_SENSITIVITIES, "client");
-  return {...assignment, dial, items: [sensitivity, ...assignment.items], selected: assignment.selected + 1};
+  return {...assignment, dial, items: next => [
+    run("Press Action", active => active.push(dialPressPage(active, dial)), dialPressChoice(next, dial).display),
+    sensitivity, ...rows,
+  ], selected: 0};
 }
 
 function dialAssignmentItems(ctx) {
@@ -942,7 +1154,6 @@ function dialAssignmentItems(ctx) {
 }
 
 function dialPage(ctx, id) {
-  if (id === "dial-a") return page(id, "DIAL A", [SCAN_SPEED, PRIORITY_INTERVAL, SCAN_RESUME]);
   if (id === "dial-b") {
     const options = dialBOptions(ctx);
     const monitor = run("Monitor", async next => {
@@ -950,7 +1161,7 @@ function dialPage(ctx, id) {
       next.replace(dialPage(next, id));
     }, ctx.getV10().monitor ? "ON" : "OFF");
     const selected = options.findIndex(option => option.key === assignedDial(ctx, id).key);
-    return {...page(id, "DIAL B", [...options, monitor]), selected: Math.max(0, selected)};
+    return {...page(id, "AUDIO / RF SETTINGS", [...options, monitor]), selected: Math.max(0, selected)};
   }
   const items = [];
   if (["AM", "LSB", "USB", "FSK", "FSK-R", "CW", "CW-R"].includes(ctx.mode) || ctx.mode.startsWith("S-AM")) items.push(
@@ -963,7 +1174,7 @@ function dialPage(ctx, id) {
   );
   if (ctx.mode.startsWith("FSK")) items.push(flag("fsk_tpf", "TPF"));
   items.push(number("lcd_backlight", "BACKLIGHT", 100, 0, 100, 1, "%", "client"));
-  return page(id, "DIAL C", items);
+  return page(id, "RECEIVE ADJUSTMENTS", items);
 }
 
 function recorderPage(ctx) {
@@ -1384,16 +1595,21 @@ function menuRoute(id, ctx) {
     case "prio": return priorityPage(ctx);
     case "memory": return memoryGroupPage(ctx);
     case "group": return makeGroupPage(ctx);
+    case "presets": return {...SET_PAGES.find(item => item.id === id)};
     case "vfo-memory": return vfoMemoryPage(ctx);
     case "program":
     case "write": return ctx.mode === "DMR" && id === "program" ? dmrMemoryPage(ctx) : page(id, "MEMORY WRITE", writeItems);
     case "function": return functionPage(ctx);
     case "filter": return filterPage(ctx);
-    case "dial-a":
     case "dial-b":
     case "dial-c": return dialPage(ctx, id);
     case "dial-d":
-    case "dial-e": return dialAssignmentPage(ctx, id);
+    case "dial-e":
+    case "dial-f":
+    case "dial-g":
+    case "dial-h":
+    case "dial-i":
+    case "dial-j": return dialAssignmentPage(ctx, id);
     case "timer": return timerPage(ctx);
     case "tune-step":
     case "ts": return tuningStepPage(ctx);
@@ -1586,6 +1802,7 @@ const settingHelp = {
   if_shape: "Choose how sharply the receive filter cuts off beyond its passband.",
   lcd_backlight: "Adjust the brightness of the receiver display in this browser.",
   lcd_type: "Choose the LCD colour scheme.",
+  waterfall_colours: "Choose how weak and strong signals are coloured in the waterfall.",
   led_bright: "Adjust the brightness of the front-panel indicator lamps.",
   meter_type: "Choose between a signal-strength scale and the dBFS reading.",
   mute_button_dim: "Dim this browser’s receiver LCD to 10% brightness while the VOLUME knob is muted.",
@@ -1605,6 +1822,7 @@ const settingHelp = {
   scan_resume: "Choose whether scanning resumes automatically after it pauses.",
   scan_screen: "Show the scan controls automatically when a scan starts.",
   scan_speed: "Set how quickly the receiver checks quiet frequencies during a scan.",
+  scan_follow_scope: "Use wider selected scope spans to check quiet frequencies faster while keeping the same tuning steps.",
   scope_averaging: "Average successive spectrum traces for a steadier display.",
   scope_max_hold: "Set how long the scope keeps peak levels visible.",
   scope_reference: "Shift the signal level range shown by the spectrum and waterfall.",
@@ -1756,6 +1974,7 @@ const menuPageHelp = {
   "dsp-noise-blanker": "Configure impulse-noise suppression.",
   "dsp-noise-reduction": "Configure reduction of steady background noise.",
   "function-settings": "Set confirmation sounds, speech, panel lock and power-key behaviour.",
+  "favorite-banks": "Name any bank from 00 to 99 or edit the banks shown on FAV A and FAV B.",
   "quick-menu-settings": "Choose which shortcuts appear under QUICK.",
   reset: "Choose which settings or memories to restore or clear.",
   set: "Open receiver settings for display, sound, dials and shortcuts.",
@@ -1788,8 +2007,19 @@ function menuHelp(item, route) {
     return `Show or hide ${label} under QUICK.`;
   }
   if (route.id === "dials") return `Choose what ${label} does when menus are closed.`;
-  if (route.id === "dial-assignment") return label === "Sensitivity"
-    ? `Choose how much ${route.label} changes its assigned setting when turned.` : `Assign ${label} to ${route.label}.`;
+  if (["favorite-banks", "favorite-bank-range"].includes(route.id) || label === "Edit Bank Name") {
+    return "Edit the bank name, or leave it blank to show only the bank number.";
+  }
+  if (route.id === "dial-assignment") {
+    if (label === "Press Action") return "Choose what a short press does during reception.";
+    if (label === "Sensitivity") return `Choose how much ${route.label} changes its assigned setting when turned.`;
+    if (label === UNASSIGNED.label) return `Clear the assignment for ${route.label}.`;
+    if (label === PRESET_CHANNEL.label) return `Step through the current preset zone with ${route.label}.`;
+    if (label === FAVORITE_BANK_A.label) return "Change the memory group shown on the left favourite bank.";
+    if (label === FAVORITE_BANK_B.label) return "Change the memory group shown on the right favourite bank.";
+    if (label === SCOPE_PAN.label) return `Pan the spectrum and waterfall with ${route.label} while keeping the receiver tuned.`;
+    return `Assign ${label} to ${route.label}.`;
+  }
   if (route.id === "tune-step" && route.isChoice) return `Use a tuning step of ${label}.`;
   if (route.isChoice) return `Choose ${label} for ${route.label}.`;
   if (route.id === "scan-start" || route.id === "scan") {
@@ -1818,7 +2048,7 @@ export function createReceiverMenus({
   root, getState, act, onMirror, onScope, onMode, onClose, onOpen, onScopeSettings,
   getAccess, onPinSetup, onDialAction,
   request = requestJson, onPlay, onReplay, onStopPlayback, onRender,
-  getPreference, setPreference, getTuningStep,
+  getPreference, setPreference, getTuningStep, getFavoriteBank = side => side === "a" ? 0 : 1,
 }) {
   if (!root) throw new Error("The receiver LCD menu mount is missing.");
   // Persist client-only changes in this page when a host panel does not supply storage.
@@ -1852,7 +2082,7 @@ export function createReceiverMenus({
       radio, v10, mode, access: getAccess?.() ?? {}, setupPin: onPinSetup,
       hz: v10.hz ?? radio.tune_hz ?? (mode === "DMR" ? radio.dmr?.hz : v10.vfo?.hz),
       tuningStep: getTuningStep?.() ?? v10.settings?.tune_step ?? 12500,
-      getState, getV10, change, close, push, replace, back, notice,
+      getState, getV10, getFavoriteBank, change, close, push, replace, back, notice,
       getPreference: read, setPreference: write, set,
       request,
       fskHeld,
@@ -1983,6 +2213,26 @@ export function createReceiverMenus({
     else push(assignment);
   }
 
+  function openMemoryBank(group) {
+    close();
+    push(memoryGroupPage(isoContext(), group));
+  }
+
+  function openDialSetting(dial) {
+    const ctx = isoContext();
+    const option = assignedDial(ctx, dial);
+    if (option.kind === "setting") {
+      close();
+      push({...settingPage(ctx, option), adjustedBy: dial});
+    }
+  }
+
+  function resetDialSetting(dial) {
+    const ctx = isoContext();
+    const option = assignedDial(ctx, dial);
+    if (option.kind === "setting") return ctx.set(option, option.initial);
+  }
+
   async function openZone(zone) {
     if (!Object.hasOwn(ZONE_NAMES, zone)) return;
     close();
@@ -2078,10 +2328,7 @@ export function createReceiverMenus({
     if (item.kind === "link") return rowNodes[selected].click();
     const ctx = isoContext();
     if (item.kind === "page") return push({...item});
-    if (item.kind === "setting") {
-      if (current().id === "dial-b") write("dial_b_function", item.key);
-      return push(settingPage(ctx, item));
-    }
+    if (item.kind === "setting") return push(settingPage(ctx, item));
     return perform(item.action, ctx);
   }
 
@@ -2134,7 +2381,9 @@ export function createReceiverMenus({
     section.append(
       node("h3", "menu-project-title", document.title),
       node("p", "menu-project-description",
-        "A receive-only RTL-SDR scanner for analogue and digital radio, with UK presets, a live spectrum and waterfall, and audio recording."),
+        "SDr Scanner turns a USB RTL-SDR device into a receive-only radio scanner for Ubuntu and Debian. "
+        + "The browser panel is inspired by the Icom IC-R8600 and combines analogue and digital reception, "
+        + "UK scan presets, a live spectrum and waterfall, and audio recording. Use it from a desktop, tablet or phone."),
     );
     const links = node("div", "menu-project-links");
     for (const item of PROJECT_LINKS) {
@@ -2353,6 +2602,7 @@ export function createReceiverMenus({
   function adjustAssignedDial(dial, delta) {
     const ctx = isoContext();
     const option = assignedDial(ctx, dial);
+    if (option?.key === UNASSIGNED.key) return;
     return option.kind === "setting" ? adjustSetting(ctx, option, delta) : onDialAction?.(option.key, delta, dial);
   }
 
@@ -2368,7 +2618,7 @@ export function createReceiverMenus({
   }
 
   function editingWithDial(dial) {
-    return current()?.option?.kind === "setting" && stack.at(-2)?.id === dial
+    return current()?.option?.kind === "setting" && (current().adjustedBy === dial || stack.at(-2)?.id === dial)
       && formCursor?.type === "number";
   }
 
@@ -2410,6 +2660,7 @@ export function createReceiverMenus({
 
   return {open, openChoices, openZone, openDialAssignment, close, back, handleDial, dialFunction, handleKey, select, submit,
     assignment: dial => assignedDial(isoContext(), dial), adjustAssignedDial, dialSettingFraction,
+    pressAction: dial => dialPressChoice(isoContext(), dial), openMemoryBank, openDialSetting, resetDialSetting,
     dialSensitivity: dial => {
       const saved = read(dialSensitivityKey(dial), 1);
       return DIAL_SENSITIVITIES.some(([factor]) => factor === saved) ? saved : 1;

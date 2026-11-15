@@ -1,20 +1,75 @@
-#sdr-v10-panel{container-type:inline-size;color-scheme:dark;--left-key-height:clamp(26px,3.8cqw,36px);--dial-bank-gap:clamp(7px,1cqw,14px);--dial-diameter:clamp(44px,8.5cqw,104px);color:#c8d0d5;font:500 13px/1.2 "Instrument Sans",Arial,sans-serif}
+#sdr-v10-panel{container-type:inline-size;color-scheme:dark;--dial-bank-gap:clamp(7px,1cqw,14px);--dial-diameter:clamp(44px,8.5cqw,104px);color:#c8d0d5;font:500 13px/1.2 "Instrument Sans",Arial,sans-serif}
     #sdr-v10-panel *{box-sizing:border-box}
     #sdr-v10-panel [hidden]{display:none!important}
-    #sdr-v10-panel .radio{position:relative;display:grid;grid-template-columns:minmax(94px,22fr) minmax(0,55fr) minmax(88px,23fr);grid-template-areas:"left lcd right" ". keys right";gap:10px 11px;align-items:stretch;padding:14px 13px 12px;border:1px solid #51565b;border-top-color:#767d82;border-bottom-color:#111517;background:linear-gradient(161deg,#343a3f,#22272b 48%,#24292d);border-radius:8px;box-shadow:inset 0 0 0 3px #191d21}
-    #sdr-v10-panel .controls-left{grid-area:left;display:grid;grid-template-columns:minmax(0,5fr) minmax(0,6fr);grid-template-rows:auto auto minmax(12px,1fr) auto;gap:var(--dial-bank-gap) 7px;padding-top:7px;min-width:0}
-    #sdr-v10-panel .left-stack{grid-column:1;grid-row:1;align-self:start;display:grid;gap:7px;min-width:0}
+    #sdr-v10-panel .radio{--bottom-dial-diameter:min(clamp(68px,4.65cqw,88px),calc(6.6cqw - 7px));position:relative;display:grid;grid-template-columns:minmax(94px,22fr) minmax(0,55fr) minmax(88px,23fr);grid-template-areas:"left lcd right" "left keys right";gap:10px 11px;align-items:stretch;padding:14px 13px 12px;border:1px solid #51565b;border-top-color:#767d82;border-bottom-color:#111517;background:linear-gradient(161deg,#343a3f,#22272b 48%,#24292d);border-radius:8px;box-shadow:inset 0 0 0 3px #191d21}
+    #sdr-v10-panel .controls-left{grid-area:left;display:flex;flex-direction:column;gap:var(--dial-bank-gap);padding-top:7px;min-width:0}
     #sdr-v10-panel :is(.preset-bank,.favorite-bank){display:grid;gap:4px;min-width:0;padding:5px 3px 3px}
     #sdr-v10-panel .bank-label{grid-column:1 / -1;text-align:center;font-size:clamp(7px,1.06cqw,10px);letter-spacing:.06em;color:#d2d9dd}
-    #sdr-v10-panel .preset-bank{grid-column:1 / -1;grid-row:2;grid-template-columns:repeat(3,minmax(0,1fr))}
+    #sdr-v10-panel .bank-custom-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;font-size:1.1em;letter-spacing:.02em;color:#e7f7ff}
+    #sdr-v10-panel .preset-bank{grid-template-columns:repeat(3,minmax(0,1fr));margin-block-start:clamp(10px,calc(12dvh - 48px),52px)}
     #sdr-v10-panel .favorite-bank{grid-template-columns:repeat(2,minmax(0,1fr))}
-    #sdr-v10-panel .controls-left .mode-key{color:#fff;font-weight:700;letter-spacing:.09em}
-    #sdr-v10-panel .controls-left .mode-key[aria-expanded="true"]{border-color:#51889d}
-    #sdr-v10-panel .controls-left .dial-a{grid-column:2;grid-row:1;align-self:start}
-    #sdr-v10-panel .dial-b-bank{grid-column:1 / -1;grid-row:4;align-self:end;display:grid;gap:var(--dial-bank-gap);min-width:0}
-    #sdr-v10-panel .aux-dials{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
+    #sdr-v10-panel .aux-dials{grid-template-columns:repeat(3,minmax(0,1fr));margin-top:auto}
     #sdr-v10-panel .recess{border:1px solid #14191d;border-top-color:#0e1317;border-bottom-color:#596167;border-radius:4px;background:#1a2024;box-shadow:inset 0 1px 3px #111518}
-    #sdr-v10-panel .controls-left .switch,#sdr-v10-panel .scan-bank .hardware{height:var(--left-key-height);font-size:clamp(8px,1.17cqw,11px)}
+    #sdr-v10-panel .power-controls{display:flex;align-items:center;gap:clamp(9px,1cqw,16px);min-width:0}
+    #sdr-v10-panel .power-label{color:#cbd5db;font-size:clamp(9px,.8cqw,12px);font-weight:600;letter-spacing:.1em}
+    #sdr-v10-panel .power-button{
+      position:relative;
+      flex:none;
+      inline-size:clamp(42px,min(3.4cqw,8dvh),60px);
+      aspect-ratio:1;
+      padding:0;
+      border:1px solid #4b565c;
+      border-top-color:#161d21;
+      border-radius:50%;
+      background:linear-gradient(160deg,#12181b,#333c41);
+      color:#77868c;
+      box-shadow:0 2px 4px #15191d,inset 0 0 0 3px #141a1d;
+      cursor:pointer;
+      touch-action:manipulation;
+    }
+    #sdr-v10-panel .power-button::before{
+      content:"";
+      position:absolute;
+      inset:17%;
+      border:1px solid #3b474d;
+      border-radius:50%;
+      background:linear-gradient(#20292d,#161d21);
+      box-shadow:inset 0 1px 4px #0b1114;
+    }
+    #sdr-v10-panel .power-button:hover{border-color:#77868c}
+    #sdr-v10-panel .power-button:active::before{background:#151d21}
+    #sdr-v10-panel .power-button[aria-pressed=true]{color:#5fdfd6}
+    #sdr-v10-panel .power-symbol{position:absolute;inset:30%;pointer-events:none}
+    #sdr-v10-panel .power-symbol::before,#sdr-v10-panel .power-symbol::after{content:"";position:absolute}
+    #sdr-v10-panel .power-symbol::before{inset:11% 0 0;border:2px solid currentColor;border-top-color:transparent;border-radius:50%}
+    #sdr-v10-panel .power-symbol::after{inset:0 calc(50% - 1px) 47%;border-radius:1px;background:currentColor}
+    #sdr-v10-panel .power-led-ring{position:absolute;inset:0;opacity:var(--led-opacity,1);pointer-events:none}
+    #sdr-v10-panel .power-led-ring > i{position:absolute;inset:0;transform:rotate(calc(195deg + 15deg * var(--led-index)))}
+    #sdr-v10-panel .power-led-ring > i::after{
+      content:"";
+      position:absolute;
+      top:9%;
+      left:50%;
+      inline-size:8%;
+      block-size:4%;
+      transform:translateX(-50%);
+      border-radius:2px;
+      background:#354249;
+    }
+    #sdr-v10-panel .power-button[aria-pressed=true] .power-led-ring > i::after{
+      color:hsl(calc(152 + var(--led-index) * 2.6) 79% 63%);
+      background:currentColor;
+      opacity:.26;
+    }
+    #sdr-v10-panel .power-button[aria-pressed=true] .power-led-ring.is-pulsing{
+      animation:power-led-pulse 940ms ease-in-out infinite;
+    }
+    #sdr-v10-panel .power-button[aria-pressed=true] .power-led-ring.is-pulsing > i::after{opacity:.75}
+    #sdr-v10-panel .power-button[aria-pressed=true] .power-led-ring > i.lit::after{opacity:1;box-shadow:0 0 4px currentColor}
+    @keyframes power-led-pulse{
+      0%,100%{opacity:calc(var(--led-opacity,1) * .38)}
+      50%{opacity:var(--led-opacity,1)}
+    }
     #sdr-v10-panel .hardware,#sdr-v10-panel .key{color:inherit;cursor:pointer;font:inherit}
     #sdr-v10-panel .hardware{padding:5px 3px;border:1px solid #111518;border-top-color:#555c62;border-left-color:#383f44;border-radius:4px;background:linear-gradient(#363e43,#252b2f 55%,#1e2428);box-shadow:0 2px 1px #16191c,inset 0 -1px #4d5255;min-height:26px;font-size:10px;letter-spacing:.03em;white-space:nowrap}
     #sdr-v10-panel .hardware:hover,#sdr-v10-panel .hardware[aria-pressed=true]{color:#e7f7ff;border-color:#51889d}
@@ -28,17 +83,16 @@
     #sdr-v10-panel .lamp.green{background:#8bd07d;box-shadow:0 0 4px #8bd07d}
     #sdr-v10-panel .lamp.amber{background:#ffbf70;box-shadow:0 0 4px #ffbf70}
     #sdr-v10-panel .lamp.red{background:#ff6b58;box-shadow:0 0 4px #ff543d}
-    #sdr-v10-panel .dial-unit{display:grid;justify-items:center;min-width:0;gap:4px}
+    #sdr-v10-panel .dial-unit{display:grid;grid-template-columns:minmax(0,1fr);justify-items:center;min-width:0;gap:4px}
     #sdr-v10-panel .dial-label,#sdr-v10-panel .engrave{white-space:nowrap;font-size:9px;letter-spacing:.08em;color:#c3cbd1;text-align:center}
-    #sdr-v10-panel .dial-label{max-width:100%;white-space:normal;overflow-wrap:anywhere;letter-spacing:.035em;font-size:clamp(8px,1.05cqw,11px)}
+    #sdr-v10-panel .dial-label{max-width:100%;overflow:hidden;text-overflow:ellipsis;letter-spacing:.035em;font-size:clamp(8px,1.05cqw,11px)}
     #sdr-v10-panel .knob{width:min(100%,var(--dial-diameter));aspect-ratio:1;align-self:center;position:relative;display:block;padding:0;border-radius:50%;border:2px solid #111719;background:conic-gradient(from -17deg,#414c53,#23292d 48deg,#4c565c 113deg,#252c31 152deg,#11171c 220deg,#4b5359 325deg,#414c53);box-shadow:0 2px 3px #0d1114,inset 0 0 0 3px #3c464b,inset 0 0 0 5px #20282c;cursor:pointer}
     #sdr-v10-panel .knob::after{content:"";position:absolute;inset:18%;border-radius:50%;border:1px solid #56646c;background:repeating-radial-gradient(circle at 52% 46%,#30393f 0 3px,#2b3439 4px 5px)}
     #sdr-v10-panel .knob::before{content:"";z-index:1;position:absolute;left:calc(50% - 1px);top:10%;width:3px;height:14%;background:#d4dde2;border-radius:1px;transform-origin:50% 287%;transform:rotate(var(--angle,-28deg))}
-    #sdr-v10-panel .scan-bank{display:grid;grid-template-columns:minmax(0,1.24fr) repeat(3,minmax(0,1fr));gap:4px;padding:3px;width:min(100%,292px);justify-self:center}
-    #sdr-v10-panel .scan-bank .hardware{min-width:0;padding-inline:1px;white-space:normal}
-    #sdr-v10-panel .scan-bank [data-action="lockout"]{padding-inline:clamp(2px,.45cqw,7px)}
-    #sdr-v10-panel .function-keys{grid-area:keys;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:4px}
-    #sdr-v10-panel .function-keys .hardware{font-size:clamp(8px,1.34cqw,12px)}
+    #sdr-v10-panel .function-keys{grid-area:keys;display:grid;grid-auto-rows:1fr;gap:5px}
+    #sdr-v10-panel .hardware-row{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:4px}
+    #sdr-v10-panel .hardware-row .hardware{min-width:0;min-height:clamp(33px,4.8dvh,45px);padding-inline:2px;font-size:clamp(8px,1.34cqw,12px);white-space:normal}
+    #sdr-v10-panel .hardware-row .hardware[aria-expanded=true]{color:#e7f7ff;border-color:#51889d}
     #sdr-v10-panel .secondary-label{display:table;margin:1px auto 0;padding:0 3px;border-radius:1px;background:#eef1f3;color:#161c21;font-size:.75em;font-weight:700;letter-spacing:.05em}
     #sdr-v10-panel .right{grid-area:right;display:flex;flex-direction:column;align-items:center;justify-content:space-between;gap:9px;min-width:0;padding:6px 0 0}
     #sdr-v10-panel .right-top{display:grid;gap:var(--dial-bank-gap);width:100%;min-width:0}
@@ -52,17 +106,31 @@
     #sdr-v10-panel .right .readouts .lamp{width:4px;height:4px}
     #sdr-v10-panel .right-bottom{display:grid;gap:var(--dial-bank-gap);width:100%;min-width:0}
     #sdr-v10-panel .main-tune{display:grid;justify-items:center;gap:var(--dial-bank-gap);width:100%}
-    #sdr-v10-panel .main-tune .knob{width:96%;max-width:260px;min-width:53px;border-width:3px;box-shadow:0 3px 7px #0d1114,inset 0 0 0 4px #414b50,inset 0 0 0 8px #232c30}
-    #sdr-v10-panel .main-tune .knob::before{display:none}
-    #sdr-v10-panel .main-tune .knob::after{inset:15%;background:radial-gradient(circle at 49% 23%,#10171c 0 15%,#4f5b62 17% 18%,transparent 19%),repeating-radial-gradient(circle at 54% 42%,#3c464c 0 3px,#333d43 4px 5px);transform:rotate(var(--angle,0deg))}
-    #sdr-v10-panel .volume-unit{
-      --volume-diameter:clamp(52px,5.6cqw,80px);
-      --volume-inset:clamp(4px,.65cqw,12px);
-      justify-self:end;
-      width:min(calc(100% - var(--volume-inset)),var(--volume-diameter));
-      margin-inline-end:var(--volume-inset);
+    #sdr-v10-panel .tuning-controls{
+      display:grid;
+      grid-template-columns:minmax(0,1fr) minmax(0,2.9fr) minmax(0,1fr);
+      align-items:center;
+      gap:clamp(6px,.75cqw,14px);
+      width:100%;
     }
-    #sdr-v10-panel .volume-knob{width:100%}
+    #sdr-v10-panel .tuning-dial{gap:var(--dial-bank-gap)}
+    #sdr-v10-panel .main-tune .main-knob{width:100%;max-width:260px;border-width:3px;box-shadow:0 3px 7px #0d1114,inset 0 0 0 4px #414b50,inset 0 0 0 8px #232c30}
+    #sdr-v10-panel .main-knob::before{display:none}
+    #sdr-v10-panel .main-knob::after{inset:15%;background:radial-gradient(circle at 49% 23%,#10171c 0 15%,#4f5b62 17% 18%,transparent 19%),repeating-radial-gradient(circle at 54% 42%,#3c464c 0 3px,#333d43 4px 5px);transform:rotate(var(--angle,0deg))}
+    #sdr-v10-panel .side-dials{display:grid;gap:var(--dial-bank-gap);min-width:0}
+    #sdr-v10-panel .side-dials .knob{width:min(100%,clamp(46px,3.25cqw,62px))}
+    #sdr-v10-panel .side-dials .dial-label{
+      font-size:clamp(8px,1cqw,10px);
+      letter-spacing:0;
+    }
+    #sdr-v10-panel :is(.aux-dials,.corner-dials){
+      display:grid;
+      align-items:end;
+      gap:4px;
+      padding-block-end:clamp(6px,.6cqw,12px);
+    }
+    #sdr-v10-panel .corner-dials{grid-template-columns:repeat(3,minmax(0,1fr));padding-inline:clamp(6px,1.4cqw,28px)}
+    #sdr-v10-panel :is(.aux-dials,.corner-dials) .knob{width:min(100%,var(--bottom-dial-diameter))}
     #sdr-v10-panel .volume-knob[aria-pressed=true]::before{background:#ffbf70;box-shadow:0 0 4px #ffbf70}
     #sdr-v10-panel .lcd{grid-area:lcd;min-width:0;position:relative;min-height:294px;display:flex;flex-direction:column;padding:9px 8px 7px;border:1px solid #06090b;border-top-color:#080d10;border-bottom-color:#62686c;border-radius:5px;background:#071017;color:#e3eced;box-shadow:inset 0 0 0 3px #0e181e;font-variant-numeric:tabular-nums}
     #sdr-v10-panel.volume-muted:not(.thin) .lcd{filter:brightness(.1)}
@@ -113,17 +181,29 @@
       #sdr-v10-panel .function-keys .hardware{font-size:8px}
     }
     @container (max-width:660px){
-      #sdr-v10-panel .radio{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-areas:"lcd lcd" "keys keys" "left right";gap:8px 8px}
+      #sdr-v10-panel .radio{
+        --bottom-dial-diameter:min(14cqw,64px);
+        grid-template-columns:repeat(10,minmax(0,1fr));
+        grid-template-areas:
+          "lcd lcd lcd lcd lcd lcd lcd lcd lcd lcd"
+          "keys keys keys keys keys keys keys keys keys keys"
+          "power power power power power right right right right right"
+          "presets presets presets presets presets right right right right right"
+          "main main main main main main main main main main"
+          "aux aux aux aux aux corners corners corners corners corners";
+        gap:8px;
+      }
       #sdr-v10-panel .lcd{min-height:260px}
       #sdr-v10-panel .frequency-button{font-size:34px}
-      #sdr-v10-panel .controls-left{padding:4px 1px 0;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:5px}
-      #sdr-v10-panel .right{gap:7px;padding-top:4px}
-      #sdr-v10-panel .right-bottom{grid-template-columns:minmax(0,1.65fr) minmax(0,1fr);column-gap:4px}
-      #sdr-v10-panel .main-tune{display:contents}
-      #sdr-v10-panel .main-tune .readouts{grid-column:1 / -1}
-      #sdr-v10-panel .main-tune > .dial-label{grid-area:2 / 1;justify-self:center;align-self:end}
-      #sdr-v10-panel .right .main-knob{grid-area:3 / 1;width:min(100%,120px);justify-self:center}
-      #sdr-v10-panel .volume-unit{grid-area:2 / 2 / 4;align-self:center}
+      #sdr-v10-panel :is(.controls-left,.right,.right-bottom){display:contents}
+      #sdr-v10-panel .power-controls{grid-area:power}
+      #sdr-v10-panel .preset-bank{grid-area:presets;align-self:start;margin-block-start:14px}
+      #sdr-v10-panel .right-top{grid-area:right;align-self:start}
+      #sdr-v10-panel .main-tune{grid-area:main}
+      #sdr-v10-panel .aux-dials{grid-area:aux;margin-top:0}
+      #sdr-v10-panel .corner-dials{grid-area:corners;padding-inline:0}
+      #sdr-v10-panel .main-tune .main-knob{width:min(100%,144px)}
+      #sdr-v10-panel .side-dials .knob{width:min(100%,52px)}
       #sdr-v10-panel .right .readouts .engrave{gap:1px}
       #sdr-v10-panel .right .readouts .hardware{min-height:25px}
       #sdr-v10-panel .status-line{font-size:10px}
@@ -140,7 +220,7 @@ html::-webkit-scrollbar, #sdr-v10-panel ::-webkit-scrollbar { display: none; }
   grid-template-rows: minmax(auto, 1fr) auto;
 }
 @container (max-width: 660px) {
-  #sdr-v10-panel:not(.thin) .radio { grid-template-rows: minmax(auto, 1fr) auto auto; }
+  #sdr-v10-panel:not(.thin) .radio { grid-template-rows: minmax(auto, 1fr) repeat(5, auto); }
 }
 #sdr-v10-panel .knob { touch-action: none; }
 #sdr-v10-panel .meter-body i { width: 0; }
@@ -193,6 +273,13 @@ html::-webkit-scrollbar, #sdr-v10-panel ::-webkit-scrollbar { display: none; }
   #sdr-v10-panel #v10-menus[data-route="menu"] .tile-grid .key { height: 30px; }
   #sdr-v10-panel .menu-project { gap: 4px; margin-top: 4px; padding-top: 6px; }
   #sdr-v10-panel .menu-project-description { font-size: 11px; }
+}
+@container (max-width: 360px) {
+  #sdr-v10-panel #v10-menus[data-route="menu"] .menu-scroll { gap: 4px; }
+  #sdr-v10-panel .menu-project { grid-template-columns: auto 1fr; margin-top: 0; padding-top: 3px; }
+  #sdr-v10-panel .menu-project-title { align-self: center; }
+  #sdr-v10-panel .menu-project-description { grid-column: 1 / -1; grid-row: 2; }
+  #sdr-v10-panel .menu-project-links { grid-area: 1 / 2; justify-self: end; }
 }
 #sdr-v10-panel #v10-menus[data-route="tune-step"] .overlay-title {
   position: sticky;
@@ -308,9 +395,9 @@ html::-webkit-scrollbar, #sdr-v10-panel ::-webkit-scrollbar { display: none; }
 #sdr-v10-panel .lcd[data-expansion="true"] { height: var(--normal-lcd-height); }
 #sdr-v10-panel .lcd[data-expansion="true"] .lcd-content { position: absolute; inset: 9px 8px 7px; }
 #sdr-v10-panel .lcd[data-expansion="true"] .lcd-content > :not(.scope-plot) { flex-shrink: 0; }
-#sdr-v10-panel .lcd[data-expansion="true"] .tune-readout .frequency-button { font-size: clamp(18px, 3cqw, 28px); }
-#sdr-v10-panel .lcd[data-expansion="true"] .memory-indicator strong { font-size: 12px; }
-#sdr-v10-panel .lcd[data-expansion="true"] .lcd-name-line { display: none; }
+#sdr-v10-panel .lcd[data-expansion="true"] .lcd-content > :is(.screen-top, .lcd-name-line, .tune-readout, .rx-status, .lcd-presets, .rds-text, .meter) {
+  display: none;
+}
 #sdr-v10-panel .screen-top { justify-content: flex-start; flex: 0 0 auto; gap: clamp(2px,.45cqw,5px); }
 #sdr-v10-panel .mode-indicator { background: linear-gradient(#477ca2,#19436a); border-color: #64839e; min-width: 42px; justify-content: center; }
 #sdr-v10-panel .lcd-indicator, #sdr-v10-panel .memory-indicator {
@@ -334,7 +421,6 @@ html::-webkit-scrollbar, #sdr-v10-panel ::-webkit-scrollbar { display: none; }
   outline: 2px solid #7ed8f0;
   outline-offset: 1px;
 }
-#sdr-v10-panel .lcd[data-expansion="true"] .frequency-readout .nearby-marquee { font-size: clamp(18px, 3cqw, 28px); }
 #sdr-v10-panel .frequency-button [data-step-hz] { cursor: ns-resize; }
 #sdr-v10-panel .frequency-button [data-step-hz]:hover { color: #bcecf8; }
 #sdr-v10-panel .memory-indicator { display: flex; flex-direction: column; justify-content: end; text-align: right; white-space: nowrap; }
@@ -348,10 +434,10 @@ html::-webkit-scrollbar, #sdr-v10-panel ::-webkit-scrollbar { display: none; }
 #sdr-v10-panel .lcd-presets span { min-width: 0; overflow-wrap: anywhere; }
 #sdr-v10-panel [data-el="nearby-watch"] { margin-inline-start: auto; white-space: nowrap; color: #b5f0ff; }
 #sdr-v10-panel .rds-text { flex: 0 0 2.4em; min-width: 0; overflow: hidden; overflow-wrap: anywhere; padding-inline: 3px; color: #b2d3e0; font: 500 clamp(8px,1.05cqw,11px)/1.2 ui-monospace,monospace; }
-#sdr-v10-panel .meter { grid-template-columns: minmax(16px,auto) minmax(0,1fr) auto auto; margin: 1px 3px 4px; }
+#sdr-v10-panel .meter { grid-template-columns: minmax(0,1fr) auto auto; gap: 2px 4px; margin: 1px 0 4px; }
+#sdr-v10-panel .meter-reading { grid-column: 1 / -1; grid-row: 2; min-width: 0; }
 #sdr-v10-panel .meter-tick { white-space: nowrap; font-size: 8px; }
-#sdr-v10-panel .meter-scale { white-space: nowrap; overflow: hidden; color: #dce9f0; font: 7px/1 ui-monospace,monospace; }
-#sdr-v10-panel .meter-scale span { color: #f37975; }
+#sdr-v10-panel .meter-scale { display: flex; justify-content: space-between; gap: 2px; white-space: nowrap; overflow: hidden; color: #dce9f0; font: 7px/1 ui-monospace,monospace; }
 #sdr-v10-panel .meter-body { height: 6px; }
 #sdr-v10-panel .meter-body i { background: repeating-linear-gradient(to right,#55a7e3 0 2px,transparent 2px 3px); }
 #sdr-v10-panel .step-indicator { border: 1px solid #55616a; background: linear-gradient(#394854,#202b33); white-space: nowrap; }
@@ -369,6 +455,9 @@ html::-webkit-scrollbar, #sdr-v10-panel ::-webkit-scrollbar { display: none; }
 #sdr-v10-panel.thin .tune-readout { justify-content: start; }
 #sdr-v10-panel .lcd[data-scope="hidden"] :is(.scope-plot,.scope-title,.softkeys,.axes) { display: none; }
 #sdr-v10-panel .lcd[data-display-type="b"] { background: #102639; }
+#sdr-v10-panel .lcd[data-display-type="c"] { background: #102a23; }
+#sdr-v10-panel .lcd[data-display-type="d"] { background: #322311; }
+#sdr-v10-panel .lcd[data-display-type="e"] { background: #241d35; }
 @container (max-width: 800px) {
   #sdr-v10-panel .favorite-bank .hardware { flex-direction: column; gap: 1px; padding: 2px 0; letter-spacing: 0; }
   #sdr-v10-panel .favorite-bank .lamp { width: 3px; height: 3px; }
@@ -380,60 +469,41 @@ html::-webkit-scrollbar, #sdr-v10-panel ::-webkit-scrollbar { display: none; }
   #sdr-v10-panel:not(.thin) .lcd { min-height: 318px; }
 }
 
-@container (min-width: 1280px) {
-  #sdr-v10-panel .aux-dials .dial-unit { align-self: end; grid-template-columns: minmax(0,1fr); }
-}
-@container (min-width: 1280px) and (max-width: 1550px) {
-  #sdr-v10-panel .aux-dials .dial-unit:first-child .dial-label {
-    width: max-content;
-    max-width: calc(100% + 22px);
-  }
-  #sdr-v10-panel .aux-dials .dial-unit:nth-child(2) .dial-label {
-    margin-inline-start: 9px;
-    max-width: calc(100% - 9px);
-  }
-}
-
-@container (max-width: 360px) {
-  #sdr-v10-panel .scan-bank {
-    grid-template-columns: minmax(0,1.24fr) minmax(0,1fr) minmax(36px,1fr) minmax(0,1fr);
-    column-gap: 3px;
-  }
-}
-
 @media (max-height: 720px) {
   @container (min-width: 661px) {
     #sdr-v10-panel:not(.thin) .radio {
-      --left-key-height: clamp(24px, 4.6dvh, 34px);
       --dial-bank-gap: clamp(5px, 1.4dvh, 12px);
       --dial-diameter: clamp(44px, min(8.5cqw, 13.8dvh), 104px);
       row-gap: 7px;
       padding-block: 9px;
     }
-    #sdr-v10-panel .controls-left { grid-template-rows: auto auto minmax(4px, 1fr) auto; }
     #sdr-v10-panel .preset-bank { row-gap: 3px; }
     #sdr-v10-panel .preset-bank .hardware {
       min-height: clamp(20px, 3.8dvh, 26px);
       padding-block: min(4px, .45dvh);
     }
-    #sdr-v10-panel .main-tune .knob { max-width: min(260px, 27dvh); }
+    #sdr-v10-panel .main-tune .main-knob { max-width: min(260px, 27dvh); }
     #sdr-v10-panel .right-bottom { row-gap: calc(var(--dial-bank-gap) - 3px); }
-    #sdr-v10-panel .volume-unit { --volume-diameter: clamp(43px, 8.5dvh, 64px); }
+  }
+  @container (min-width: 661px) and (max-width: 1150px) {
+    #sdr-v10-panel .main-tune .main-knob { max-width: 24dvh; }
   }
 }
 
 @media (max-height: 900px) {
   @container (max-width: 660px) {
     #sdr-v10-panel:not(.thin) .radio { --dial-bank-gap: 7px; }
-    #sdr-v10-panel .controls-left { grid-template-rows: auto auto minmax(4px, 1fr) auto; }
     #sdr-v10-panel .preset-bank { row-gap: 3px; }
     #sdr-v10-panel:not(.thin) .scope-plot { height: clamp(54px, 9dvh, 88px); }
-    #sdr-v10-panel .main-tune .knob { max-width: 20dvh; }
+    #sdr-v10-panel .main-tune .main-knob { max-width: 20dvh; }
+  }
+  @container (max-width: 360px) {
+    #sdr-v10-panel .main-tune .main-knob { max-width: min(100px, 20dvh); }
   }
 }
 
 @media (max-height: 580px) {
   @container (min-width: 661px) {
-    #sdr-v10-panel .main-tune .knob { max-width: 21dvh; }
+    #sdr-v10-panel .main-tune .main-knob { max-width: 19dvh; }
   }
 }
