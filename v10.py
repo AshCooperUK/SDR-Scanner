@@ -37,6 +37,8 @@ NEARBY_MIN_SECONDS = .08
 NEARBY_MAX_GAP = .25
 NEARBY_RESUME_SECONDS = 7.0
 NEARBY_ACQUIRE_SECONDS = .55
+NEARBY_COMPARE_SECONDS = .20
+NEARBY_RETRY_SECONDS = 1.0
 NEARBY_LIVE_INTERVAL = .07
 NEARBY_IDLE_INTERVAL = .065
 NEARBY_LISTENING_INTERVAL = .18
@@ -155,6 +157,19 @@ def nearby_windows(origin):
             if lower < band.upper:
                 windows.append((band, lower, min(lower + NEARBY_TILE_HZ, band.upper), frequency))
     return windows
+
+
+@dataclass(frozen=True)
+class NearbyProbe:
+    window: tuple
+
+
+@dataclass(frozen=True)
+class PendingNearbyHit:
+    window: tuple
+    deadline: float
+    strength_db: float
+    entry: dict
 
 
 SETTINGS = {
@@ -1188,6 +1203,11 @@ class ReceiverPanel:
         if self.nearby:
             self.nearby.pop("job", None)
             self.nearby.pop("live_job", None)
+            self.nearby.pop("candidate", None)
+
+    def reject_nearby_candidate(self, frequency, now):
+        if self.nearby:
+            self.nearby.setdefault("unconfirmed", {})[frequency] = now + NEARBY_RETRY_SECONDS
 
     def next_nearby_live_probe(self, now, current):
         if not self.nearby_sweeping or self.nearby.get("live_job") or now < self.nearby["live_ready_at"]:
@@ -1196,7 +1216,7 @@ class ReceiverPanel:
         if local is None:
             return None
         band, _, _, exclude = local
-        job, blocked = self._begin_nearby_probe("live_job", now, current, band, exclude)
+        job, blocked = self._begin_nearby_probe("live_job", ("live", current[0]), now, current, band, exclude)
         return job, None, band, band.lower, band.upper, (), blocked
 
     def next_nearby_probe(self, now, current):
@@ -1220,14 +1240,17 @@ class ReceiverPanel:
                 center = (lower + upper) // 2 + 60_000
             center = max(MANUAL_MIN_HZ, min(center, MANUAL_MAX_HZ))
             exact = ()
-        job, blocked = self._begin_nearby_probe("job", now, current, band, exclude)
+        job, blocked = self._begin_nearby_probe("job", (center, lower, upper), now, current, band, exclude)
         return job, center, band, lower, upper, exact, blocked
 
-    def _begin_nearby_probe(self, job_key, now, current, band, exclude):
-        job = object()
+    def _begin_nearby_probe(self, job_key, window, now, current, band, exclude):
+        job = NearbyProbe(window)
         self.nearby[job_key] = job
         blocked = self.temporary_locks | {hz for hz, expires in self.skipped.items() if expires > now}
         blocked |= {band.nearest(hz, band.step) for hz in blocked if band.lower <= hz <= band.upper}
+        if unconfirmed := self.nearby.get("unconfirmed"):
+            self.nearby["unconfirmed"] = {hz: until for hz, until in unconfirmed.items() if until > now}
+            blocked.update(self.nearby["unconfirmed"])
         guard = NEARBY_OFFSET_LIMITS[band.modulation]
         for frequency in (current[0], exclude):
             if frequency is not None and band.lower <= frequency <= band.upper:
@@ -1239,7 +1262,28 @@ class ReceiverPanel:
                         blocked.add(neighbor)
         return job, blocked
 
-    def finish_nearby_probe(self, job, frequency, mode, now, *, listening, live=False):
+    def _nearby_hit_eligible(self, frequency, current, now):
+        return (frequency != current[0] and auto_band_mode(frequency) != "WFM"
+                and not self.frequency_locked(frequency, now)
+                and self.nearby.get("unconfirmed", {}).get(frequency, 0) <= now)
+
+    def _pending_nearby_hit(self, now, current):
+        if not self.nearby_sweeping:
+            return None
+        candidate = self.nearby.get("candidate")
+        if candidate and not self._nearby_hit_eligible(candidate.entry["hz"], current, now):
+            self.nearby.pop("candidate")
+            return None
+        return candidate
+
+    def take_nearby_candidate(self, now, current):
+        """Take a ranked hit when its short comparison period expires."""
+        candidate = self._pending_nearby_hit(now, current)
+        if candidate and now >= candidate.deadline:
+            return self.nearby.pop("candidate").entry
+        return None
+
+    def finish_nearby_probe(self, job, peak, mode, now, *, current, listening, live=False):
         watch = self.nearby
         job_key = "live_job" if live else "job"
         if not watch or watch.get(job_key) is not job:
@@ -1250,9 +1294,25 @@ class ReceiverPanel:
         else:
             interval = NEARBY_LISTENING_INTERVAL if listening else NEARBY_IDLE_INTERVAL
             watch["ready_at"] = now + interval
-        if (not self.nearby_sweeping or frequency is None or auto_band_mode(frequency) == "WFM"
-                or self.frequency_locked(frequency, now)):
+        if not self.nearby_sweeping:
             return None
+        if peak is None or not self._nearby_hit_eligible(peak.hz, current, now):
+            return self.take_nearby_candidate(now, current)
+        frequency = peak.hz
+        candidate = self._pending_nearby_hit(now, current)
+        compared = candidate and candidate.window != job.window and candidate.entry["hz"] != frequency
+        if candidate is None or peak.strength_db > candidate.strength_db:
+            entry = self._nearby_entry(frequency, mode)
+            if candidate is None:
+                watch["candidate"] = PendingNearbyHit(job.window, now + NEARBY_COMPARE_SECONDS, peak.strength_db, entry)
+            else:
+                watch["candidate"] = PendingNearbyHit(candidate.window, candidate.deadline, peak.strength_db, entry)
+        if compared:
+            return watch.pop("candidate").entry
+        return self.take_nearby_candidate(now, current)
+
+    @staticmethod
+    def _nearby_entry(frequency, mode):
         pmr = NEARBY_PMR.lower - 6_250 <= frequency <= NEARBY_PMR.upper + 6_250
         known_mode = "FM" if pmr else auto_band_mode(frequency)
         mode = known_mode or mode

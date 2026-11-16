@@ -1804,7 +1804,7 @@ class Scanner:
             self._drop_capture()
             self._advance_scan()
 
-    def tick(self, level=None, detected_tone=None):
+    def tick(self, level=None, detected_tone=None, *, carrier=True):
         """Apply a fresh current-channel dBFS measurement, or refresh only the timers."""
         now = monotonic()
         if self.menu == "clock" and now >= self.menu_until:
@@ -1823,7 +1823,7 @@ class Scanner:
             self.audio_open = False
             return
         if self.tuned and level is not None and math.isfinite(level):
-            self._measure(level, now, detected_tone)
+            self._measure(level, now, detected_tone, carrier)
         if (self.selected_scan_slots is not None or self.close_mode == "off"
                 or (self.tone_filter and self.signal_open)
                 or self.capture or now < self.next_probe):
@@ -1833,8 +1833,8 @@ class Scanner:
             self.probe_request = [(lower, upper) for enabled, (_, lower, upper)
                                   in zip(self.close_groups, CLOSE_GROUPS) if enabled]
 
-    def _measure(self, level, now, detected_tone):
-        self.signal_open = self.v10_monitor or self.squelch == 0 or level >= self.squelch_db
+    def _measure(self, level, now, detected_tone, carrier):
+        self.signal_open = self.v10_monitor or self.squelch == 0 or (carrier and level >= self.squelch_db)
         self.audio_open = self.signal_open
         tone_filter = self.tone_filter
         if tone_filter and self.signal_open:

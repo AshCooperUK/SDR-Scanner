@@ -8,9 +8,9 @@ import numpy as np
 
 from app import ScannerRuntime, valid_action
 from bandplan import AIR_STEP, PRESET_SCAN_RANGES, factory_banks
-from receiver import IQ_RATE, IQ_SAMPLES, Receiver, ReceiverError
+from receiver import IQ_RATE, IQ_SAMPLES, NearbyPeak, Receiver, ReceiverError
 from scanner import CHIRP_ZONE_LIMIT
-from v10 import (NEARBY_IDLE_INTERVAL, NEARBY_LIMIT, NEARBY_LISTENING_INTERVAL, NEARBY_LIVE_INTERVAL,
+from v10 import (NEARBY_COMPARE_SECONDS, NEARBY_IDLE_INTERVAL, NEARBY_LIMIT, NEARBY_LISTENING_INTERVAL, NEARBY_LIVE_INTERVAL,
                  NEARBY_MIN_SECONDS, NEARBY_PMR, NEARBY_RESUME_SECONDS, NEARBY_SWEEPS, nearby_windows)
 
 
@@ -40,10 +40,16 @@ class NearbyTests(unittest.TestCase):
     def sweep(self, now, find):
         class Probe:
             def nearby_peak(self, *settings, **options):
-                return find(*settings, **options)
+                frequency = find(*settings, **options)
+                return None if frequency is None else NearbyPeak(frequency, -30, -58)
 
+        probe = Probe()
+        with patch("app.time.monotonic", return_value=now - NEARBY_COMPARE_SECONDS):
+            accepted = self.runtime._v10_sweep_nearby(probe)
+        if accepted or not (self.panel.nearby and self.panel.nearby.get("candidate")):
+            return accepted
         with patch("app.time.monotonic", return_value=now):
-            return self.runtime._v10_sweep_nearby(Probe())
+            return self.runtime._v10_sweep_nearby(probe)
 
     def test_observations_need_stable_reception(self):
         channel = (102_400_000, "WFM")
@@ -278,7 +284,7 @@ class NearbyTests(unittest.TestCase):
         self.assertEqual(radio.state()["tune_hz"], 145_500_000)
         self.assertEqual(controls, ["retune", "disarm"])
 
-    def test_primary_live_capture_can_interrupt_an_in_flight_distant_probe(self):
+    def test_primary_live_capture_can_win_when_a_distant_probe_has_not_finished(self):
         radio = self.runtime
         radio.act({"knob": "volume", "value": .5, "panel": "v10"})
         current = 445_950_000, "FM"
@@ -293,16 +299,19 @@ class NearbyTests(unittest.TestCase):
         class Probe:
             def nearby_live_peak(self, *args):
                 probes.append(args)
-                return hit
+                return NearbyPeak(hit, -25, -53)
 
         with patch("app.time.monotonic", return_value=start):
             self.assertFalse(radio._v10_sweep_nearby(Probe(), live_for=(445_600_000, "FM")))
+            self.assertFalse(radio._v10_sweep_nearby(Probe(), live_for=current))
+        with patch("app.time.monotonic", return_value=start + NEARBY_COMPARE_SECONDS):
             self.assertTrue(radio._v10_sweep_nearby(Probe(), live_for=current))
         self.assertEqual(len(probes), 1)
         band, lower, upper, exact, blocked, _ = probes[0]
         self.assertEqual((band.label, lower, upper, exact), ("UHF", 430_000_000, 470_000_000, ()))
         self.assertIn(current[0], blocked)
-        self.assertIsNone(self.panel.finish_nearby_probe(pending[0], hit + 12_500, "FM", start, listening=False))
+        self.assertIsNone(self.panel.finish_nearby_probe(pending[0], NearbyPeak(hit + 12_500, -30, -58),
+                                                        "FM", start, current=current, listening=False))
         self.assertEqual(radio.state()["tune_hz"], hit)
         self.advance(start + 1, False)
         self.assertEqual(radio.state()["tune_hz"], current[0])
@@ -319,15 +328,15 @@ class NearbyTests(unittest.TestCase):
         distant = self.panel.next_nearby_probe(start, current)
         self.assertIsNotNone(live)
         self.assertIsNotNone(distant)
-        self.panel.finish_nearby_probe(live[0], None, "FM", start, listening=True, live=True)
-        self.panel.finish_nearby_probe(distant[0], None, "FM", start, listening=True)
+        self.panel.finish_nearby_probe(live[0], None, "FM", start, current=current, listening=True, live=True)
+        self.panel.finish_nearby_probe(distant[0], None, "FM", start, current=current, listening=True)
         self.assertIsNone(self.panel.next_nearby_live_probe(start + NEARBY_LIVE_INTERVAL - .001, current))
         self.assertIsNotNone(self.panel.next_nearby_live_probe(start + NEARBY_LIVE_INTERVAL, current))
         self.assertIsNone(self.panel.next_nearby_probe(start + NEARBY_LISTENING_INTERVAL - .001, current))
         distant = self.panel.next_nearby_probe(start + NEARBY_LISTENING_INTERVAL, current)
         self.assertIsNotNone(distant)
         done = start + NEARBY_LISTENING_INTERVAL
-        self.panel.finish_nearby_probe(distant[0], None, "FM", done, listening=False)
+        self.panel.finish_nearby_probe(distant[0], None, "FM", done, current=current, listening=False)
         self.assertIsNone(self.panel.next_nearby_probe(done + NEARBY_IDLE_INTERVAL - .001, current))
         self.assertIsNotNone(self.panel.next_nearby_probe(done + NEARBY_IDLE_INTERVAL, current))
 
@@ -366,7 +375,7 @@ class NearbyTests(unittest.TestCase):
         adjacent = .06 * np.exp(2j * np.pi * (adjacent_hz - center) * seconds)
         self.assertIsNone(receiver._nearby_channel(foreground, center, band, lower, upper, exact, blocked, -45))
         self.assertEqual(receiver._nearby_channel(foreground + adjacent, center, band, lower, upper,
-                                                 exact, blocked, -45), adjacent_hz)
+                                                 exact, blocked, -45).hz, adjacent_hz)
 
     def test_fft_detects_the_exact_pmr_channel_and_obeys_squelch(self):
         band = NEARBY_PMR
@@ -377,7 +386,7 @@ class NearbyTests(unittest.TestCase):
         exact = tuple(range(band.lower, band.upper + 1, band.step))
         def seek(squelch):
             return receiver._nearby_channel(iq, center, band, band.lower, band.upper, exact, set(), squelch)
-        self.assertEqual(seek(-48), 446_006_250)
+        self.assertEqual(seek(-48).hz, 446_006_250)
         self.assertIsNone(seek(-20))
 
     def test_primary_sdr_restores_the_listener_after_an_out_of_band_probe(self):
@@ -414,7 +423,7 @@ class NearbyTests(unittest.TestCase):
         with patch.object(receiver, "_set_center") as tune, patch.object(receiver, "_read_iq") as read:
             hit = receiver.nearby_peak(band.lower + 400_000, band, band.lower, band.upper,
                                        (band.lower,), set(), -48, preserve=True)
-            self.assertEqual(hit, band.lower)
+            self.assertEqual(hit.hz, band.lower)
             tune.assert_not_called()
             read.assert_not_called()
 

@@ -1,6 +1,6 @@
 # SDr Scanner V10
 
-SDr Scanner V10.1.3 turns a USB RTL-SDR dongle into a receive-only radio scanner for Ubuntu and Debian. The browser panel is inspired by the Icom IC-R8600 and combines analogue and digital reception, UK scan presets, a live spectrum and waterfall, and audio recording. Use it from a desktop, tablet or phone.
+SDr Scanner V10.1.4 turns a USB RTL-SDR dongle into a receive-only radio scanner for Ubuntu and Debian. The browser panel is inspired by the Icom IC-R8600 and combines analogue and digital reception, UK scan presets, a live spectrum and waterfall, and audio recording. Use it from a desktop, tablet or phone.
 
 [Install](#install-on-ubuntu-or-debian) · [User manual](docs/V10.md) · [Upgrade](#upgrade-an-existing-installation) · [Network access](#access-from-another-computer) · [Troubleshooting](#troubleshooting)
 

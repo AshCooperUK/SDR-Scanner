@@ -1233,6 +1233,7 @@ class ScannerRuntime:
                     if now >= watch["closed_at"] + NEARBY_RESUME_SECONDS:
                         self._v10_nearby_end(now)
                 elif now >= watch["acquire_until"]:
+                    panel.reject_nearby_candidate(watch["hit"]["hz"], now)
                     self._v10_nearby_end(now)
             return
         if panel.scan and panel.scan.get("held"):
@@ -1298,10 +1299,15 @@ class ScannerRuntime:
         with self.lock:
             panel = self.v10
             if (not self.scanner.power or self._receiver_reopen or panel.priority_return is not None
-                    or self.stopped.is_set() or (not live and not secondary and self._nearby_secondary_ready)):
+                    or self.stopped.is_set()):
                 return False
             current = self._v10_current()
             started = time.monotonic()
+            if entry := panel.take_nearby_candidate(started, current):
+                self._v10_start_nearby_hit(entry, current, started)
+                return True
+            if not live and not secondary and self._nearby_secondary_ready:
+                return False
             if live:
                 if live_for[0] != current[0]:
                     return False
@@ -1315,10 +1321,10 @@ class ScannerRuntime:
         job, center, band, lower, upper, exact, blocked = request
         try:
             if live:
-                frequency = receiver.nearby_live_peak(band, lower, upper, exact, blocked, squelch)
+                peak = receiver.nearby_live_peak(band, lower, upper, exact, blocked, squelch)
             else:
-                frequency = receiver.nearby_peak(center, band, lower, upper, exact, blocked, squelch,
-                                                 preserve=not secondary)
+                peak = receiver.nearby_peak(center, band, lower, upper, exact, blocked, squelch,
+                                            preserve=not secondary)
         except ReceiverError:
             with self.lock:
                 if panel.nearby and panel.nearby.get(job_key) is job:
@@ -1332,21 +1338,28 @@ class ScannerRuntime:
                 return False
             now = time.monotonic()
             latest = self._v10_current()
-            if panel.priority_return is not None or frequency == latest[0] or (live and latest != current):
-                frequency = None
-            entry = panel.finish_nearby_probe(job, frequency, band.modulation, now,
+            if panel.priority_return is not None:
+                panel.invalidate_nearby_probe()
+                return False
+            if live and latest != current:
+                peak = None
+            entry = panel.finish_nearby_probe(job, peak, band.modulation, now, current=latest,
                                               listening=audible and not secondary, live=live)
             if entry:
-                panel.invalidate_nearby_probe()
-                foreground = panel.active_memory or {"hz": latest[0], "mode": latest[1],
-                                                     "tone": self.scanner.v10_tone}
-                panel.nearby.update(hit=entry, acquire_until=now + NEARBY_ACQUIRE_SECONDS)
-                panel.nearby["return"] = foreground
-                self._v10_receive(entry, update_position=False)
+                self._v10_start_nearby_hit(entry, latest, now)
                 return True
             if audible and not live and not secondary and now - started >= .02:
                 self._pad_watch_gap(latest, now - started)
         return False
+
+    def _v10_start_nearby_hit(self, entry, foreground, now):
+        panel = self.v10
+        panel.invalidate_nearby_probe()
+        watch = panel.nearby
+        watch["return"] = panel.active_memory or {"hz": foreground[0], "mode": foreground[1],
+                                                 "tone": self.scanner.v10_tone}
+        watch.update(hit=entry, acquire_until=now + NEARBY_ACQUIRE_SECONDS)
+        self._v10_receive(entry, update_position=False)
 
     def _v10_autowrite(self, current):
         panel = self.v10
@@ -1530,6 +1543,8 @@ class ScannerRuntime:
                 return None
             if "v10" in action:
                 return self._act_v10(action, parked=parked, parked_backlight=parked_backlight)
+            if action.get("knob") == "squelch" and action["value"] != self.scanner.squelch:
+                self.v10.invalidate_nearby_probe()
             if (action.get("knob") == "volume" and not action["value"]):
                 self.v10.power_off()
                 self.scanner.v10_monitor = False
@@ -2734,7 +2749,10 @@ class ScannerRuntime:
                                 and not wfm_scan_channel(offset, rf_excess)):
                             self.scanner._clear_signal()
                         else:
-                            self.scanner.tick(usable_level if wanted[1] == "WFM" else level, tone)
+                            # Broadband noise can exceed the absolute threshold at high RF gain.
+                            # Narrow FM also needs a measurable signal above the receiver noise floor.
+                            carrier = wanted[1] != "FM" or rf_excess is None or rf_excess >= METER_MIN_EXCESS_DB
+                            self.scanner.tick(usable_level if wanted[1] == "WFM" else level, tone, carrier=carrier)
                         was_open = current["audio_open"]
                         current = self.scanner.snapshot()
                         self.rds = rds if self._rds_enabled(current) and target(current) == wanted else None

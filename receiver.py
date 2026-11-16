@@ -11,10 +11,12 @@ from collections import deque
 from ctypes.util import find_library
 from threading import Condition, Event, Thread
 from time import monotonic
+from typing import NamedTuple
 
 import numpy as np
 from scipy import signal
 
+from bandplan import BANDS, PMR
 from fsk import RttyDecoder
 from rds import RdsDecoder
 from tone_search import ToneSearch
@@ -34,6 +36,9 @@ PROBE_HALF_WIDTH = 900_000
 PROBE_STRIDE = 1_600_000
 NEARBY_MIN_EXCESS_DB = 10
 NEARBY_DC_GUARD_HZ = 20_000
+NEARBY_PMR_STEP = PMR[1] - PMR[0]
+NEARBY_BROADCAST_FM = next(band for band in BANDS if band.modulation == "WFM")
+NEARBY_MIN_PEAK_FRACTION = 10 ** (-18 / 10)
 WATERFALL_BINS = 320
 WATERFALL_SPAN_HZ = 2 * PROBE_HALF_WIDTH
 WATERFALL_INTERVAL = 1 / 7
@@ -77,6 +82,14 @@ IQ_CALLBACK = c.CFUNCTYPE(None, c.POINTER(c.c_ubyte), c.c_uint32, c.c_void_p)
 
 class ReceiverError(RuntimeError):
     """The local radio could not complete a hardware operation."""
+
+
+class NearbyPeak(NamedTuple):
+    """Channel power at the ADC and adjusted for tuner gain."""
+
+    hz: int
+    level_dbfs: float
+    strength_db: float
 
 
 def _rtl_library():
@@ -656,18 +669,16 @@ class Receiver:
         self._call("set_tuner_gain", gain)
         self._gain = gain
         self._headroom_blocks = 0
+        self._watch_iq = None
 
     def _gain_for_block(self, raw):
         if self._direct or not self._gains:
             return self._gain
         samples = np.frombuffer(raw, dtype=np.uint8)
-        clipped = np.count_nonzero((samples <= 1) | (samples >= 254))
-        if clipped > samples.size // 200:
+        clipped_gain = self._gain_after_clipping(samples)
+        if clipped_gain is not None:
             self._headroom_blocks = 0
-            # Leave enough headroom for a close transmitter. Move through
-            # the tuner gain table instead of assuming a continuous gain.
-            return max((gain for gain in self._gains if gain <= self._gain - 60),
-                       default=self._gains[0])
+            return clipped_gain
 
         if self._gain < self._nominal_gain and samples.min() >= 96 and samples.max() <= 159:
             self._headroom_blocks += 1
@@ -678,6 +689,13 @@ class Receiver:
         else:
             self._headroom_blocks = 0
         return self._gain
+
+    def _gain_after_clipping(self, samples):
+        clipped = np.count_nonzero((samples <= 1) | (samples >= 254))
+        if clipped <= samples.size // 200:
+            return None
+        # Leave enough headroom for a close transmitter using supported gain steps.
+        return max((gain for gain in self._gains if gain <= self._gain - 60), default=self._gains[0])
 
     def device_count(self):
         """Return the number of RTL-SDR devices currently enumerated by libusb."""
@@ -796,7 +814,8 @@ class Receiver:
         return self._stream.read()
 
     def _set_center(self, center, direct, *, restore_gain=None):
-        if self._stream is not None and (center, direct) == (self._center, self._direct):
+        gain_unchanged = direct or restore_gain not in self._gains or restore_gain == self._gain
+        if self._stream is not None and (center, direct) == (self._center, self._direct) and gain_unchanged:
             return
         self._watch_iq = None
         self._stop_stream()
@@ -805,8 +824,8 @@ class Receiver:
             self._direct = direct
             if not direct:
                 self._set_gain()
-                if restore_gain in self._gains and restore_gain != self._gain:
-                    self._apply_gain(restore_gain)
+        if not direct and restore_gain in self._gains and restore_gain != self._gain:
+            self._apply_gain(restore_gain)
         self._call("set_center_freq", center)
         self._start_stream()
         self._center = center
@@ -1069,14 +1088,25 @@ class Receiver:
         if preserve and (center, direct) == previous and self._watch_iq is not None:
             return self._nearby_channel(self._watch_iq, center, band, lower, upper, exact, blocked, squelch)
 
-        restore = preserve and self._tuning is not None and previous[0] is not None and (center, direct) != previous
+        restore = preserve and self._tuning is not None and previous[0] is not None
         previous_gain = self._gain
         try:
-            self._set_center(center, direct)
+            if not preserve and self._nominal_gain is not None:
+                # A gain reduction for one window should not desensitize the next window.
+                self._set_center(center, direct, restore_gain=self._nominal_gain)
+            else:
+                self._set_center(center, direct)
             _, raw = self._read_iq()
+            if not direct and self._gains:
+                clipped_gain = self._gain_after_clipping(np.frombuffer(raw, dtype=np.uint8))
+                if clipped_gain is not None and clipped_gain < self._gain:
+                    self._stop_stream()
+                    self._apply_gain(clipped_gain)
+                    self._start_stream()
+                    _, raw = self._read_iq()
             return self._nearby_channel(_decode_iq(raw), center, band, lower, upper, exact, blocked, squelch)
         finally:
-            if restore:
+            if restore and ((center, direct) != previous or self._gain != previous_gain):
                 self._set_center(*previous, restore_gain=previous_gain)
             elif not preserve:
                 self._tuning = self._prepared = self._watch_iq = None
@@ -1091,23 +1121,42 @@ class Receiver:
         floor = np.median(power[usable]) * (METER_NOISE_BANDWIDTH[mode] * PROBE_FFT / IQ_RATE)
         threshold = max(squelch, 10 * np.log10(max(floor, 1e-15)) + NEARBY_MIN_EXCESS_DB)
         if exact:
-            candidates = exact
+            candidates = dict.fromkeys(exact)
         else:
             in_window = usable & (frequencies >= lower) & (frequencies <= upper)
-            peaks = signal.find_peaks(power, distance=8)[0]
-            candidates = dict.fromkeys(
-                band.nearest(round(float(frequencies[index])), band.step) for index in peaks[in_window[peaks]]
-            )
+            peaks = signal.find_peaks(power)[0]
+            candidates = {}
+            for index in peaks[in_window[peaks]]:
+                hz = self._nearby_channel_hz(round(float(frequencies[index])), band)
+                candidates[hz] = max(candidates.get(hz, 0), power[index])
         best_hz, best_level = None, threshold
-        for hz in candidates:
+        min_aligned_peak = NEARBY_MIN_PEAK_FRACTION * 10 ** (threshold / 10)
+        for hz, aligned_peak in candidates.items():
             offset = abs(hz - center)
             if (hz in blocked or not lower <= hz <= upper
-                    or not NEARBY_DC_GUARD_HZ <= offset <= PROBE_HALF_WIDTH - half_width):
+                    or NEARBY_BROADCAST_FM.lower <= hz <= NEARBY_BROADCAST_FM.upper
+                    or not NEARBY_DC_GUARD_HZ <= offset <= PROBE_HALF_WIDTH - half_width
+                    or aligned_peak is not None and aligned_peak < min_aligned_peak):
                 continue
             level = self._watch_level(power, hz - center, mode)
-            if level >= best_level:
-                best_hz, best_level = hz, level
-        return best_hz
+            if level < best_level:
+                continue
+            # Reject a weak spectral sidelobe whose audio filter mostly sees the adjacent carrier.
+            candidate_min = NEARBY_MIN_PEAK_FRACTION * 10 ** (level / 10)
+            if aligned_peak is not None and aligned_peak < candidate_min:
+                continue
+            best_hz, best_level, min_aligned_peak = hz, level, candidate_min
+        if best_hz is None:
+            return None
+        gain_db = (self._gain or 0) / 10 if center >= DIRECT_LIMIT else 0
+        return NearbyPeak(best_hz, best_level, best_level - gain_db)
+
+    @staticmethod
+    def _nearby_channel_hz(hz, band):
+        # The broad UHF grid includes interstitial frequencies. Score PMR446
+        # on its own channel centers so voice sidebands cannot win as another channel.
+        slot = (hz - PMR[0] + NEARBY_PMR_STEP // 2) // NEARBY_PMR_STEP
+        return PMR[slot] if 0 <= slot < len(PMR) else band.nearest(hz, band.step)
 
     def _probe_peak(self, iq, center, low, high):
         windows = iq[:3 * PROBE_FFT].reshape(3, PROBE_FFT)

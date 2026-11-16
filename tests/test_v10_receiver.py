@@ -786,6 +786,7 @@ class ProgrammingTests(unittest.TestCase):
 class SignalTests(unittest.TestCase):
     def test_nearby_ranks_eligible_channels_beyond_the_loudest_fft_peaks(self):
         radio = Receiver()
+        radio._gain = 280
         band = Band("UHF", 446_000_000, 447_600_000)
         center = 446_800_000
         strongest = 447_250_000
@@ -795,7 +796,35 @@ class SignalTests(unittest.TestCase):
         signals = [(hz, .04) for hz in sorted(blocked)] + [(strongest, .025), (other, .015)]
         iq = sum(level * np.exp(2j * np.pi * (hz - center) * seconds) for hz, level in signals)
         hit = radio._nearby_channel(iq, center, band, band.lower, band.upper, (), blocked, -55)
-        self.assertEqual(hit, strongest)
+        self.assertEqual(hit.hz, strongest)
+        self.assertAlmostEqual(hit.level_dbfs, 20 * np.log10(.025), delta=.1)
+        self.assertAlmostEqual(hit.strength_db, hit.level_dbfs - 28)
+
+    def test_nearby_rejects_broadcast_fm_before_ranking_eligible_audio_channels(self):
+        radio = Receiver()
+        band = Band("Tuned", 107_430_000, 109_030_000, modulation="AM")
+        center = 108_330_000
+        carrier = 108_398_750
+        seconds = np.arange(IQ_SAMPLES) / IQ_RATE
+        iq = (.6 * np.exp(2j * np.pi * (107_900_000 - center) * seconds)
+              + .03 * np.exp(2j * np.pi * (carrier - center) * seconds))
+        hit = radio._nearby_channel(iq, center, band, band.lower, band.upper, (), set(), -45)
+        self.assertEqual(hit.hz, carrier)
+
+    def test_nearby_ignores_a_blocked_pmr_carriers_sidebands_but_finds_its_neighbor(self):
+        radio = Receiver()
+        band = Band("UHF", 430_000_000, 470_000_000)
+        foreground = 446_006_250
+        adjacent = 446_018_750
+        center = foreground + 300_000
+        seconds = np.arange(IQ_SAMPLES) / IQ_RATE
+        modulation = np.cumsum(np.cos(2 * np.pi * 1_600 * seconds)) * 2_500 / IQ_RATE
+        iq = .1 * np.exp(2j * np.pi * ((foreground - center) * seconds + modulation))
+        blocked = {foreground}
+        self.assertIsNone(radio._nearby_channel(iq, center, band, band.lower, band.upper, (), blocked, -50))
+        iq += .012 * np.exp(2j * np.pi * (adjacent - center) * seconds)
+        hit = radio._nearby_channel(iq, center, band, band.lower, band.upper, (), blocked, -50)
+        self.assertEqual(hit.hz, adjacent)
 
     def test_nearby_live_airband_uses_the_existing_iq_at_the_exact_air_spacing(self):
         radio = Receiver()
@@ -806,7 +835,7 @@ class SignalTests(unittest.TestCase):
         radio._watch_iq = .08 * np.exp(2j * np.pi * (carrier - radio._center) * seconds)
         with patch.object(radio, "_set_center") as tune, patch.object(radio, "_read_iq") as read:
             hit = radio.nearby_live_peak(band, band.lower, band.upper, (), {128_125_000}, -45)
-            self.assertEqual(hit, carrier)
+            self.assertEqual(hit.hz, carrier)
             tune.assert_not_called()
             read.assert_not_called()
 
@@ -827,8 +856,57 @@ class SignalTests(unittest.TestCase):
         raw[1::2] = np.rint(127.5 * (1 + iq.imag))
         with patch.object(radio, "_set_center") as tune, patch.object(radio, "_read_iq", return_value=(1, raw.tobytes())):
             hit = radio.nearby_peak(probe_center, band, band.lower, band.upper, (carrier,), set(), -50, preserve=True)
-            self.assertEqual(hit, carrier)
+            self.assertEqual(hit.hz, carrier)
             self.assertEqual(tune.call_args_list, [call(probe_center, False), call(original, False, restore_gain=None)])
+
+    def test_nearby_rechecks_a_clipped_probe_and_restores_foreground_gain(self):
+        radio = Receiver()
+        radio._gains = (0, 220, 280)
+        radio._gain = 280
+        radio._center = foreground_center = 98_640_000
+        radio._tuning = (98_400_000, "WFM")
+        band = NEARBY_PMR
+        carrier = band.lower
+        center = (band.lower + band.upper) // 2 + 180_000
+        seconds = np.arange(IQ_SAMPLES) / IQ_RATE
+        iq = np.exp(2j * np.pi * (carrier - center) * seconds).astype(np.complex64)
+        def raw_at(amplitude):
+            return np.rint(127.5 * (1 + np.clip(iq.view(np.float32) * amplitude, -1, 1))).astype(np.uint8).tobytes()
+
+        with (patch.object(radio, "_stop_stream"), patch.object(radio, "_start_stream"),
+              patch.object(radio, "_call") as commands,
+              patch.object(radio, "_read_iq", side_effect=((1, raw_at(1.1)), (1, raw_at(.55)))) as read):
+            hit = radio.nearby_peak(center, band, band.lower, band.upper, (carrier,), set(), -50, preserve=True)
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(hit.hz, carrier)
+        self.assertAlmostEqual(hit.level_dbfs, 20 * np.log10(.55), delta=.2)
+        self.assertAlmostEqual(hit.strength_db, hit.level_dbfs - 22)
+        self.assertEqual(radio._gain, 280)
+        self.assertEqual(radio._center, foreground_center)
+        self.assertEqual(commands.call_args_list, [
+            call("set_center_freq", center), call("set_tuner_gain", 220),
+            call("set_tuner_gain", 280), call("set_center_freq", foreground_center),
+        ])
+
+    def test_nearby_restores_gain_after_clipping_at_the_foreground_center(self):
+        radio = Receiver()
+        band = NEARBY_PMR
+        center = band.lower + 300_000
+        radio._gains = (0, 220, 280)
+        radio._gain = 280
+        radio._center = center
+        radio._tuning = (band.lower + 25_000, "FM")
+        radio._stream = object()
+        clipped = bytes((255, 0)) * IQ_SAMPLES
+        quiet = bytes((127, 128)) * IQ_SAMPLES
+        with (patch.object(radio, "_stop_stream"), patch.object(radio, "_start_stream"),
+              patch.object(radio, "_call") as commands,
+              patch.object(radio, "_read_iq", side_effect=((1, clipped), (1, quiet)))):
+            radio.nearby_peak(center, band, band.lower, band.upper, (band.lower,), set(), -50, preserve=True)
+        self.assertEqual(radio._gain, 280)
+        self.assertEqual(radio._center, center)
+        self.assertEqual([request for request in commands.call_args_list if request.args[0] == "set_tuner_gain"],
+                         [call("set_tuner_gain", 220), call("set_tuner_gain", 280)])
 
     def test_waterfall_exposes_adjacent_signals_across_the_live_iq_window(self):
         radio = Receiver()
