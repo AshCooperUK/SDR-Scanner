@@ -924,23 +924,26 @@ function scopeAnchor() {
   return (ui.freeze ? ui.heldCenter : null) ?? receiverHz();
 }
 
+function scopeMode() {
+  if (ui.fixed) return "FIX";
+  if (ui.scopePan) return "PAN";
+  return ui.span === "full" ? "CAPTURE" : "CENTER";
+}
+
 function scopeRange() {
+  if (ui.fixed && ui.edges) return ui.edges;
   const capture = fullScopeRange();
-  if (ui.fixed && ui.edges) {
-    if (!capture) return ui.edges;
-    const low = Math.max(ui.edges[0], capture[0]);
-    const high = Math.min(ui.edges[1], capture[1]);
-    return high > low ? [low, high] : capture;
-  }
   if (ui.span === "full" && capture) return capture;
   const anchor = scopeAnchor();
   const {min_hz = minimumHz, max_hz = maximumHz} = receiver().capabilities ?? {};
   const [availableLow, availableHigh] = capture ?? [min_hz, max_hz];
-  let span = Math.min(spanHz(), availableHigh - availableLow);
+  const span = Math.min(spanHz(), availableHigh - availableLow);
   if (!ui.scopePan) {
     const centeredSpan = 2 * Math.min(anchor - availableLow, availableHigh - anchor);
-    // Leave the selected span intact so it can widen again as the capture moves.
-    if (centeredSpan >= Math.min(span, spans[0])) span = Math.min(span, centeredSpan);
+    // Fit symmetrically when there is data on both sides. A stale or clipped capture
+    // may leave gaps, but must never move the midpoint away from the tuned frequency.
+    const width = centeredSpan >= Math.min(span, spans[0]) ? Math.min(span, centeredSpan) : span;
+    return [anchor - width / 2, anchor + width / 2];
   }
   const desired = Math.round(anchor + ui.scopePan - span / 2);
   const low = clamp(desired, availableLow, availableHigh - span);
@@ -1095,7 +1098,7 @@ function drawScope(frame, history, range, options, average, maxTrace) {
     }
   }
   const x = (options.hz - range[0]) / (range[1] - range[0]) * width;
-  if (frame && x >= 0 && x <= width) {
+  if (finite(options.hz) && x >= 0 && x <= width) {
     context.strokeStyle = "#7ab491";
     context.setLineDash([4, 4]);
     context.beginPath(); context.moveTo(x, 0); context.lineTo(x, height); context.stroke();
@@ -1195,14 +1198,19 @@ function updateScope() {
     : zoneScanning() && receiver().scan_held ? "SCAN HOLD" : ui.freeze ? "HOLD" : "";
   const capture = fullScopeRange();
   const full = capture && range[0] === capture[0] && range[1] === capture[1];
-  const fittedEdges = ui.fixed && ui.edges && range.some((edge, index) => edge !== ui.edges[index]);
-  const centered = Math.abs(midpoint - scopeAnchor()) <= 0.5;
-  view["scope-reference-mode"].textContent = ui.fixed ? (fittedEdges ? "FIX FIT" : "FIX")
-    : ui.scopePan ? "PAN" : centered ? "CENTER" : "CAPTURE";
+  const mode = scopeMode();
+  const tuned = state.power && finite(state.tune_hz) ? state.tune_hz : null;
+  let modeLabel = mode;
+  if (mode === "FIX" && tuned !== null) {
+    if (tuned < range[0]) modeLabel = "FIX <<";
+    if (tuned > range[1]) modeLabel = "FIX >>";
+  }
+  view["scope-reference-mode"].textContent = modeLabel;
   view["scope-grid"].textContent = validFrame
     ? (full ? "FULL " : "SPAN ") + scopeSpanLabel(range[1] - range[0]) : "";
   const channelDb = state.modulation === "WFM" ? state.signal_meter_dbfs ?? state.signal_dbfs : state.signal_dbfs;
-  const scopeOptions = { marker: ui.marker, hz: receiverHz(), reference: getPreference("scope_reference", 0),
+  const scopeOptions = { marker: ui.marker, hz: mode === "CENTER" && tuned !== null ? midpoint : tuned,
+    reference: getPreference("scope_reference", 0),
     waterfall: getPreference("scope_waterfall", true), palette: getPreference("waterfall_colours", "spectrum"),
     scopeHold: ui.freeze,
     maxHold: getPreference("scope_max_hold", "off"), nearbySweep: Boolean(state.power && receiver().nearby_sweeping),
@@ -1557,7 +1565,7 @@ function render() {
   control("speed").title = scanningPresets ? "Set the preset scan speed."
     : "Cycle through slow, medium and fast spectrum updates.";
   pressed(control("center"), ui.fixed);
-  control("center").title = ui.fixed || ui.scopePan ? "Recenter the scope on the tuned frequency."
+  control("center").title = scopeMode() !== "CENTER" ? "Recenter the scope on the tuned frequency."
     : "Keep the current scope frequency edges fixed while tuning.";
   pressed(control("peak"), ui.marker);
   pressed(control("expand"), ui.expanded);
@@ -2226,8 +2234,7 @@ function openDialAssignment(name) {
 }
 
 function recenterScope() {
-  // Full capture follows the SDR's hardware centre, which can differ from the tuned frequency.
-  if (ui.span === "full") setScopeSpan(captureSpan());
+  if (ui.span === "full") setScopeSpan(maximumScopeSpan);
   if (ui.freeze) ui.heldCenter = receiverHz();
   ui.scopePan = 0;
   ui.fixed = false;
@@ -2381,7 +2388,7 @@ const commands = {
   span: () => showScopeForm("span"),
   hold: long => receiver().nearby_receiving || zoneScanning() ? holdPresetScan() : holdScope(long),
   center: () => {
-    if (ui.fixed || ui.scopePan) recenterScope();
+    if (scopeMode() !== "CENTER") recenterScope();
     else {
       ui.edges = scopeRange();
       ui.fixed = true;

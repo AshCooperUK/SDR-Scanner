@@ -94,6 +94,44 @@
     #sdr-v10-panel .hardware-row .hardware{min-width:0;min-height:clamp(33px,4.8dvh,45px);padding-inline:2px;font-size:clamp(8px,1.34cqw,12px);white-space:normal}
     #sdr-v10-panel .hardware-row .hardware[aria-expanded=true]{color:#e7f7ff;border-color:#51889d}
     #sdr-v10-panel .secondary-label{display:table;margin:1px auto 0;padding:0 3px;border-radius:1px;background:#eef1f3;color:#161c21;font-size:.75em;font-weight:700;letter-spacing:.05em}
+    #sdr-v10-panel .hardware[data-action="lockout"] {
+      border-color: #86673c;
+      color: #f5c888;
+      font-weight: 750;
+      letter-spacing: .065em;
+      background: linear-gradient(#393830, #292b2a 53%, #202426);
+      box-shadow: 0 2px 1px #16191c, inset 0 1px #514a3a, inset 0 -1px #4a4334;
+    }
+    #sdr-v10-panel .hardware[data-action="lockout"]:hover { border-color: #b69055; }
+    #sdr-v10-panel .lockout-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: .42em;
+      white-space: nowrap;
+    }
+    #sdr-v10-panel .lockout-primary .lamp { background: #8a704e; }
+    #sdr-v10-panel .hardware[data-action="lockout"][aria-pressed="true"] {
+      border-color: #efb66a;
+      color: #ffe4ba;
+      background: linear-gradient(#5b472d, #453522 53%, #332a22);
+      box-shadow: 0 2px 1px #16191c, inset 0 1px #856943, inset 0 -1px #634825;
+    }
+    #sdr-v10-panel .hardware[data-action="lockout"][aria-pressed="true"] .lamp {
+      background: #ffc675;
+      box-shadow: 0 0 5px #ffc675;
+    }
+    @container (max-width: 390px) {
+      #sdr-v10-panel .hardware-row:has(> [data-action="lockout"]) {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) repeat(4, minmax(0, 1fr));
+      }
+    }
+    @container (min-width: 661px) and (max-width: 1024px) {
+      #sdr-v10-panel .hardware[data-action="lockout"] { font-size: clamp(8px, 1.1cqw, 12px); }
+    }
+    @container (max-width: 390px) or ((min-width: 661px) and (max-width: 1024px)) {
+      #sdr-v10-panel .lockout-primary { gap: 2px; letter-spacing: 0; }
+      #sdr-v10-panel .lockout-primary .lamp { width: 3px; height: 3px; }
+    }
     #sdr-v10-panel .right{grid-area:right;display:flex;flex-direction:column;align-items:center;justify-content:space-between;gap:9px;min-width:0;padding:6px 0 0}
     #sdr-v10-panel .right-top{display:grid;gap:var(--dial-bank-gap);width:100%;min-width:0}
     #sdr-v10-panel :is(.memory-keys,.favorite-banks){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px}

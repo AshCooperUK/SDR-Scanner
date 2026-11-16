@@ -260,7 +260,10 @@
       </div>
       <div class="hardware-row" role="group" aria-label="Receiver controls">
         <button type="button" class="hardware switch" data-action="record" aria-label="Record" aria-pressed="false" title="Arm recording. Audio is saved when a signal opens squelch."><i class="lamp" aria-hidden="true"></i>REC</button>
-        <button type="button" class="hardware" data-action="lockout" aria-label="Lock out and clear temporary lockouts" aria-pressed="false" title="Skip the current scan frequency or toggle a saved channel’s skip flag. Hold to clear temporary lockouts.">LOCK OUT<span class="secondary-label">CLEAR</span></button>
+        <button type="button" class="hardware" data-action="lockout" aria-label="Lock out and clear temporary lockouts" aria-pressed="false" title="Skip the current scan frequency or toggle a saved channel’s skip flag. Hold to clear temporary lockouts.">
+          <span class="lockout-primary"><i class="lamp" aria-hidden="true"></i>LOCK OUT</span>
+          <span class="secondary-label">CLEAR</span>
+        </button>
         <button type="button" class="hardware" data-action="scan" title="Choose a scan type or stop the running scan. Hold to repeat the last scan.">SCAN</button>
         <button type="button" class="hardware" data-action="simple-scan" aria-pressed="false" title="Simple Scan. Press to search upwards from the current frequency or stop. Hold to start downwards or reverse direction.">S.SCAN</button>
         <button type="button" class="hardware" data-action="prio" title="Check a priority memory periodically. Hold during priority watch to recall that channel.">PRIO</button>
