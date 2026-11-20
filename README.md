@@ -1,6 +1,6 @@
 # SDr Scanner V10
 
-SDr Scanner V10.1.4 turns a USB RTL-SDR dongle into a receive-only radio scanner for Ubuntu and Debian. The browser panel is inspired by the Icom IC-R8600 and combines analogue and digital reception, UK scan presets, a live spectrum and waterfall, and audio recording. Use it from a desktop, tablet or phone.
+SDr Scanner V10.1.5 turns a USB RTL-SDR dongle into a receive-only radio scanner for Ubuntu and Debian. The browser panel is inspired by the Icom IC-R8600 and combines analogue and digital reception, UK scan presets, a live spectrum and waterfall, and audio recording. Use it from a desktop, tablet or phone.
 
 [Install](#install-on-ubuntu-or-debian) · [User manual](docs/V10.md) · [Upgrade](#upgrade-an-existing-installation) · [Network access](#access-from-another-computer) · [Troubleshooting](#troubleshooting)
 
@@ -13,12 +13,12 @@ SDr Scanner V10.1.4 turns a USB RTL-SDR dongle into a receive-only radio scanner
 | Feature | What you can do |
 | --- | --- |
 | **Analogue reception** | Tune FM, WFM with RDS, AM, synchronous AM, USB, LSB and CW. Use AUTO for common analogue signals, or choose the receive mode directly. |
-| **Digital reception** | Receive supported clear DMR, D-STAR, P25 Phase I, dPMR and NXDN-VN signals with DSD-neo. Follow a configured DMR Tier III site, read received DMR SMS, and decode ITA2 RTTY in the browser. |
+| **Digital reception** | Receive supported clear DMR, D-STAR, P25 Phase I, dPMR and NXDN-VN signals with DSD-neo. AUTO can identify clear DMR, P25 Phase I and NXDN-VN voice. Follow a configured DMR Tier III site, read received DMR SMS, and decode ITA2 RTTY in the browser. |
 | **Presets and scanning** | Scan editable UK zones for airband, marine VHF, PMR446, CB, business, amateur radio and other services. Add your own ranges, scan tagged memories, link scan speed to the spectrum span, or check for nearby signals during reception. |
 | **Memories and controls** | Save frequencies, modes and filters in memory groups. Use the two front-panel favourite banks for quick recall. Assign functions and sensitivities to individual dials. |
 | **Spectrum and second display** | Tune from the spectrum or waterfall, adjust its span and reference level, and open an LCD-only view on a second screen. |
 | **Recordings and history** | Arm squelch-triggered MP3 recording, review received signals and available metadata, and play or save recent captured audio. |
-| **Network listening** | Keep the SDR on a Linux host and open the panel from other devices. Additional USB tuners can let listeners tune independently. Browser volume, mute and display preferences are local to each browser. |
+| **Network listening and sync** | Keep the SDR on a Linux host and open the panel from other devices. The default-on **SYNC** control beside Power saves dials, audio, display, scope, bookmarks and menu preferences for use in other browsers. Turn it off for an individual browser's setup. Additional USB tuners can let listeners tune independently. |
 
 ## Install on Ubuntu or Debian
 
@@ -83,7 +83,9 @@ journalctl --user -u local-sdr-scanner.service -n 50
 
 From the checkout, `/usr/bin/python3 launcher.py open` starts the service if needed and opens the panel on a desktop or prints its URL in a headless session. Use `/usr/bin/python3 launcher.py stop` to stop the service for the current boot.
 
-To save or restore receiver programming from the panel, use **MENU → SET → Settings Backup**. To make a complete host backup, stop the service with `systemctl --user stop local-sdr-scanner.service` and copy the scanner’s `.scanner-state*.json` files, its `.scanner-radios/` directory if present, and the recordings folder selected under **MENU → RECORD → Recorder Set**. Keep the access settings backup private. Use `systemctl --user start local-sdr-scanner.service` when finished. Volume, mute, display and dial preferences are saved by your browser.
+Use **MENU → SET → Settings Backup** from the scanner host or through an SSH tunnel to its loopback address. It saves and restores memories, audio, display, scope, bookmarks, menus, the recording folder and the PIN/access policy. Dial functions, press actions, sensitivities and Main Dial Auto TS have their own **MENU → SET → Dials Backup**. Store the settings backup privately because it includes the salted PIN hash. Restoring leaves the radio in standby. Older receiver-only backups remain supported.
+
+To make a complete host backup including media, stop the service with `systemctl --user stop local-sdr-scanner.service` and copy the scanner’s `.scanner-state*.json` files, its `.scanner-radios/` directory if present, and the recordings folder selected under **MENU → RECORD → Recorder Set**. Use `systemctl --user start local-sdr-scanner.service` when finished. JSON settings backups store the recording folder's path; copy recordings and RF captures separately.
 
 ## Access from another computer
 
@@ -101,13 +103,13 @@ On a client with an SSH connection to the receiver host, forward a local port an
 ssh -N -L 8766:127.0.0.1:8766 your-user@your-server
 ```
 
-Open [the local panel](http://127.0.0.1:8766/) on the client. If local port 8766 is in use, choose an available local port for the first number in the command and open that port in the browser.
+Open [the local panel](http://127.0.0.1:8766/) on the client. Host administration requires the same port on both ends of the tunnel. If the scanner listens on a different port, use that port for both numbers in the command.
 
 ### Use a domain or forwarded IP address
 
-Set a six-digit remote PIN from **MENU → SET → PIN** at the receiver host. The manual explains how to use a one-time setup code from another trusted LAN device. [Remote PIN setup](docs/V10.md#set-a-remote-pin)
+Set a numeric remote PIN of your chosen length from **MENU → SET → PIN** on the scanner host or over an SSH tunnel. Enter it twice to confirm. A trusted LAN or Tailscale browser can use a one-time setup code issued from the scanner host. [Remote PIN setup](docs/V10.md#set-a-remote-pin)
 
-Point the reverse proxy or tunnel at the scanner’s port. Preserve the browser’s `Host` header and pass the public scheme in `X-Forwarded-Proto`. Use HTTPS between the browser and the proxy. The read-only LCD at `/lcd` displays receiver activity without a PIN wherever that URL is reachable.
+Point the reverse proxy or tunnel at the scanner’s port. Preserve the browser’s `Host` header and pass the public scheme in `X-Forwarded-Proto`. Use HTTPS between the browser and the proxy. Direct trusted clients can open the read-only LCD at `/lcd`. To share the standalone display remotely, start the server with `--public-display`. That option shares receiver activity, including the tuned frequency and spectrum.
 
 ## Troubleshooting
 
@@ -125,3 +127,9 @@ For additional symptoms and settings, see the [user manual](docs/V10.md#troubles
 ## Development
 
 Run `python3 -m unittest discover -s tests` from the checkout. The [IC-R8600 coverage audit](reports/SDr%20Scanner%20V10%20parity.md) documents implementation and verification. The [dial and Quick Menu reference](reports/Receiver%20dial%20assignments.md) describes the control design.
+
+## Licence
+
+The original SDr Scanner code and documentation are available under the [MIT licence](LICENSE). Installed dependencies remain under their respective licences.
+
+The UK land-mobile presets contain Ofcom copyright data derived from the [Wireless Telegraphy Register](https://www.ofcom.org.uk/spectrum/frequencies/spectrum-information-portal). The source data retains Ofcom's copyright and is subject to [Ofcom's reuse terms](https://www.ofcom.org.uk/about-ofcom/our-website/copyright). The presets are a dated extract and do not confirm current assignments.

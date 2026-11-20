@@ -79,7 +79,7 @@ dmr_ready() {
 stage="installing Linux packages"
 printf '%s\n' 'Checking scanner dependencies…'
 packages=(git curl ca-certificates python3 python3-numpy python3-scipy rtl-sdr
-    libmp3lame0 libpam-systemd dbus-user-session iproute2)
+    libmp3lame0 libspeexdsp1 libpam-systemd dbus-user-session iproute2)
 if [[ $desktop == --desktop ]]; then
     packages+=(xdg-utils)
 fi

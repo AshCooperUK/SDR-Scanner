@@ -5,6 +5,8 @@ __pycache__/
 /.scanner-state.access.json.*
 /.scanner-state.dmr.json
 /.scanner-state.dmr.json.*
+/.scanner-state.profile.json
+/.scanner-state.profile.json.*
 /.scanner-radios/
 /recordings/
 /releases/

@@ -15,7 +15,7 @@ from chirp import chirp_common, directory, errors, memmap, settings
 _PORT = re.compile(r"socket://127\.0\.0\.1:([1-9][0-9]{0,4})")
 _REVISION = re.compile(r"[0-9a-f]{64}")
 _ACCESS_REVISION = re.compile(r"[0-9a-f]{32}")
-_PIN = re.compile(r"[0-9]{6}")
+_PIN = re.compile(r"[0-9]+")
 _REMOTE_URL_LIMIT = 270
 _HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _REMOTE_AUTHORITY = re.compile(
@@ -109,12 +109,12 @@ def _validate_access(access):
 
 class _NewPinValue(settings.RadioSettingValueString):
     def __init__(self, pending_pin, radio):
-        super().__init__(0, 6, pending_pin, autopad=False)
+        super().__init__(0, _MAX_PAYLOAD, pending_pin, autopad=False)
         self.radio = ref(radio)
 
     def set_value(self, value):
         if not isinstance(value, str) or value and not _PIN.fullmatch(value):
-            raise settings.InvalidValueError("Enter a six-digit PIN or leave the field blank")
+            raise settings.InvalidValueError("Enter a numeric PIN or leave the field blank")
         super().set_value(value)
 
     def __str__(self):
@@ -439,7 +439,7 @@ class SDrScannerRadio(chirp_common.CloneModeRadio):
         configured = settings.RadioSettingValueBoolean(access["pin_configured"])
         remote.append(settings.RadioSetting("pin_configured", "PIN already set", configured))
         configured.set_mutable(False)
-        pin = settings.RadioSetting(_NEW_PIN_SETTING, "New six-digit PIN", _NewPinValue(self._pending_pin, self))
+        pin = settings.RadioSetting(_NEW_PIN_SETTING, "New PIN", _NewPinValue(self._pending_pin, self))
         pin.__doc__ = "Leave blank to keep the current PIN. Upload applies a new PIN."
         remote.append(pin)
         return settings.RadioSettings(receiver, close, remote)
@@ -473,7 +473,7 @@ class SDrScannerRadio(chirp_common.CloneModeRadio):
                 if remote_url is not None:
                     remote_url = _validate_remote_url(remote_url)
                 if new_pin and not _PIN.fullmatch(new_pin):
-                    raise ValueError("Enter a six-digit PIN or leave the field blank")
+                    raise ValueError("Enter a numeric PIN or leave the field blank")
         except ValueError as error:
             raise errors.InvalidDataError(str(error)) from error
         self._working["settings"] = values

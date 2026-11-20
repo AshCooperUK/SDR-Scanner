@@ -1804,7 +1804,7 @@ class Scanner:
             self._drop_capture()
             self._advance_scan()
 
-    def tick(self, level=None, detected_tone=None, *, carrier=True):
+    def tick(self, level=None, detected_tone=None, *, carrier=True, listen_to_noise=False):
         """Apply a fresh current-channel dBFS measurement, or refresh only the timers."""
         now = monotonic()
         if self.menu == "clock" and now >= self.menu_until:
@@ -1823,7 +1823,7 @@ class Scanner:
             self.audio_open = False
             return
         if self.tuned and level is not None and math.isfinite(level):
-            self._measure(level, now, detected_tone, carrier)
+            self._measure(level, now, detected_tone, carrier, listen_to_noise)
         if (self.selected_scan_slots is not None or self.close_mode == "off"
                 or (self.tone_filter and self.signal_open)
                 or self.capture or now < self.next_probe):
@@ -1833,9 +1833,9 @@ class Scanner:
             self.probe_request = [(lower, upper) for enabled, (_, lower, upper)
                                   in zip(self.close_groups, CLOSE_GROUPS) if enabled]
 
-    def _measure(self, level, now, detected_tone, carrier):
+    def _measure(self, level, now, detected_tone, carrier, listen_to_noise):
         self.signal_open = self.v10_monitor or self.squelch == 0 or (carrier and level >= self.squelch_db)
-        self.audio_open = self.signal_open
+        self.audio_open = self.signal_open or (listen_to_noise and not self.tone_filter)
         tone_filter = self.tone_filter
         if tone_filter and self.signal_open:
             self.audio_open = tone_matches(tone_filter, detected_tone)
@@ -1849,8 +1849,9 @@ class Scanner:
             self.tone_deadline = None
             self.tone_matched = None
         if self.audio_open:
-            self.waiting_reply = None
-            self.received_signal = True
+            if self.signal_open:
+                self.waiting_reply = None
+                self.received_signal = True
             return
         if (self.capture_hold if self.capture else self.hold) or now < self.next_advance:
             return

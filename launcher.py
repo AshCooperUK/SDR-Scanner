@@ -163,11 +163,11 @@ def enable_boot_start():
 def panel_ready():
     try:
         with closing(HTTPConnection("127.0.0.1", PORT, timeout=0.5)) as connection:
-            connection.request("GET", "/api/state")
+            connection.request("GET", "/api/health")
             with connection.getresponse() as response:
                 if response.status == 200:
-                    state = json.loads(response.read(65536))
-                    return isinstance(state, dict) and {"display", "receiver", "power"} <= state.keys()
+                    health = json.loads(response.read(1024))
+                    return health == {"service": "sdr-scanner", "ready": True}
     except (OSError, HTTPException, ValueError):
         pass
     return False

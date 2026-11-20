@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import monotonic
+from uuid import uuid4
 
 from bandplan import AIR_STEP, PMR, PRESET_SCAN_RANGES, V10_PRESETS, Band, band_search_mode
 from scanner import CHIRP_ZONE_LIMIT, MANUAL_MAX_HZ, MANUAL_MIN_HZ, normalize_favorite_name
@@ -27,6 +28,7 @@ WFM_SCAN_ACQUISITION_SECONDS = .10  # Six IQ blocks for a carrier offset, plus s
 SCAN_SCOPE_BASE_HZ = 100_000
 SCAN_SCOPE_MAX_HZ = 1_800_000
 MAX_SCAN_SPEED = 30
+PRESET_SCAN_BATCH = 8
 ZONE_BANKS = {"CB": ("CBAM", "CBFM"), **{bank: (bank,) for bank in
               ("PMR", "BUS", "HAM", "BCAST", "RAIL", "EVT", "UTIL", "AIR", "MRN")}}
 NEARBY_ZONE = "NEARBY"
@@ -192,6 +194,7 @@ SETTINGS = {
     "p25_nac": (None, range(1, 0xFFF)),
     "nxdn_ran": (None, range(64)),
     "rf_gain": (None, range(0, 101)),
+    "rf_gain_tenths_db": (None, range(-1000, 1001)),
     "bandwidth_hz": (None, range(50, 241_001)),
     "agc": ("mid", ("off", "fast", "mid", "slow")),
     "audio_peak": (False, (False, True)),
@@ -467,10 +470,19 @@ def valid_backup(data):
             and len({edge["number"] for edge in edges}) == len(edges))
 
 
+def valid_scope_snap(snap):
+    return (isinstance(snap, dict) and snap.keys() == {"sequence", "time_ms", "radius_hz"}
+            and integer(snap["sequence"], 1, 2 ** 53 - 1)
+            and integer(snap["time_ms"], 0, 2 ** 53 - 1)
+            and integer(snap["radius_hz"], 1, 7_500))
+
+
 def valid_action(action):
     command = action.get("v10")
     if command == "tune":
-        return action.keys() == {"v10", "hz", "mode"} and hz(action["hz"]) and action["mode"] in VFO_MODES
+        fields = {"v10", "hz", "mode"}
+        return (fields <= action.keys() <= fields | {"snap"} and hz(action["hz"]) and action["mode"] in VFO_MODES
+                and valid_member(action, "snap", valid_scope_snap))
     if command == "nearby":
         return action.keys() == {"v10", "enabled"} and type(action["enabled"]) is bool
     if command == "step":
@@ -504,8 +516,9 @@ def valid_action(action):
         if operation in ("hold", "resume"):
             return action.keys() == fields
         if operation == "inspect":
-            return (fields | {"hz"} <= action.keys() <= fields | {"hz", "mode"} and hz(action["hz"])
-                    and valid_member(action, "mode", lambda value: value in VFO_MODES))
+            return (fields | {"hz"} <= action.keys() <= fields | {"hz", "mode", "snap"} and hz(action["hz"])
+                    and valid_member(action, "mode", lambda value: value in VFO_MODES)
+                    and valid_member(action, "snap", valid_scope_snap))
         return (action.keys() <= fields | {"enabled"} and operation in ("fine", "jump", "recall")
                 and valid_member(action, "enabled", lambda v: type(v) is bool))
     if command == "scan":
@@ -577,6 +590,7 @@ class ReceiverPanel:
         self.settings = {key: default for key, (default, _) in SETTINGS.items()}
         self.by_mode = {}
         self.memories = {}
+        self.memory_revision = uuid4().hex
         self.edges = {}
         self.zone_defaults = {}
         for zone, banks in ZONE_BANKS.items():
@@ -724,6 +738,8 @@ class ReceiverPanel:
                     or preset_ranges.get(zone) != self.preset_ranges.get(zone)
                     or custom_presets.get(zone) != self.custom_presets.get(zone)):
                 self._preset_plans.pop(zone)
+        if memories is not self.memories:
+            self.memory_revision = uuid4().hex
         self.settings, self.by_mode, self.memories, self.edges = settings, by_mode, memories, edges
         self.profile, self.timer, self.zones = profile, timer, zones
         self.custom_presets = custom_presets
@@ -766,6 +782,9 @@ class ReceiverPanel:
         self.save(bank_names=names)
 
     def set_value(self, key, value, mode):
+        if key == "rf_gain" and self.settings["rf_gain_tenths_db"] is not None:
+            self.save(settings={**self.settings, key: value, "rf_gain_tenths_db": None})
+            return
         if value == self.current_settings(mode)[key]:
             return
         if key in RF_PER_MODE:
@@ -889,7 +908,7 @@ class ReceiverPanel:
             raise ValueError("This preset zone has reached the editing limit")
         self.save(zones={**self.zones, zone: {"next_index": next_index, "changes": changes}})
 
-    def snapshot(self, power, mode, tuned_hz=None):
+    def snapshot(self, power, mode, tuned_hz=None, *, memory_revision=None):
         status = self.trunk_status
         now = monotonic()
         active = self.active_memory
@@ -901,7 +920,9 @@ class ReceiverPanel:
             "active": self.active,
             "settings": self.current_settings(mode),
             "settings_by_mode": deepcopy(self.by_mode),
-            "memories": [self.memories[key].copy() for key in sorted(self.memories)],
+            "memory_revision": self.memory_revision,
+            **({"memories": [self.memories[key].copy() for key in sorted(self.memories)]}
+               if memory_revision != self.memory_revision else {}),
             "bank_names": self.bank_names.copy(),
             "frequency_mode": self.frequency_mode,
             "group": self.group, "slot": self.slot,
@@ -930,7 +951,7 @@ class ReceiverPanel:
             "monitor": power and self.monitor, "error": self.error,
             "capabilities": {"modes": list(MODES), "min_hz": MANUAL_MIN_HZ,
                              "max_hz": MANUAL_MAX_HZ, "auto_mode": True,
-                             "rf": ["rf_gain", "cw_pitch", *sorted(RF_PER_MODE)]},
+                             "rf": ["rf_gain", "rf_gain_tenths_db", "cw_pitch", *sorted(RF_PER_MODE)]},
         }
 
     def stop_scan(self):
@@ -1017,14 +1038,16 @@ class ReceiverPanel:
         if any(zone in CUSTOM_ZONES and zone not in self.custom_presets for zone in zones):
             raise ValueError("Set the frequency range for the custom preset first")
         plans = {zone: plan for zone in zones if (plan := self._range_plan(zone)) is not None}
-        points = [point for zone in zones if zone not in plans for point in self._zone_scan_points(zone)]
-        if plans:
-            fixed_points = points
-            points = []
-            for offset in range(0, max(len(fixed_points), 1), 8):
-                points.extend((zone, -1 - offset) for zone in plans)
-                points.extend(fixed_points[offset:offset + 8])
-        elif not refreshing and not any((entry := self.zone_entry(*point)) and not entry.get("skip") for point in points):
+        channels = [self._zone_scan_points(zone) for zone in zones if zone not in plans]
+        # Give each selected zone a turn before continuing a long channel list.
+        points = []
+        longest_list = max(map(len, channels), default=0)
+        for offset in range(0, max(longest_list, 1), PRESET_SCAN_BATCH):
+            points.extend((zone, -1 - offset) for zone in plans)
+            for channel_list in channels:
+                points.extend(channel_list[offset:offset + PRESET_SCAN_BATCH])
+        if not plans and not refreshing and not any(
+                (entry := self.zone_entry(*point)) and not entry.get("skip") for point in points):
             raise ValueError("The selected zones have no eligible presets")
         if not points:
             self.stop_scan()

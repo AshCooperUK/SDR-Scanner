@@ -188,13 +188,50 @@ class AccessPolicyTests(unittest.TestCase):
                     old_grant, _ = pin.unlock(digits, IPv4Address("203.0.113.15"), token)
                     self.assertTrue(pin.authorized(old_grant, token))
 
+    def test_trusted_lan_needs_host_code_to_set_variable_length_pin(self):
+        with TemporaryDirectory() as folder:
+            pin = AccessPin(Path(folder) / "access.json")
+            token = "1" * 32
+            for host, digits in (("scanner.home.arpa:8766", "0007"),
+                                 ("192.168.42.18:8766", "9" * 4096)):
+                with self.subTest(host=host, length=len(digits)):
+                    allowed, handler = self.request(host, headers=[("Origin", "http://" + host)])
+                    self.assertTrue(allowed)
+                    handler.radio = Mock()
+                    reply, status = self.program_pin(handler, pin, token, {
+                        "new_pin": digits, "setup_code": pin.issue_setup_code(),
+                    })
+                    self.assertEqual(status, HTTPStatus.OK)
+                    self.assertFalse(reply["can_program_pin"])
+                    self.assertTrue(reply["can_program_pin_with_code"])
+                    self.assertFalse(reply["can_manage_settings"])
+                    self.assertFalse(reply["pin_required"])
+                    self.assertTrue(pin.unlock(digits, IPv4Address("203.0.113.15"), token)[0])
+                    handler.radio.assert_not_called()
+                    handler.send_error.assert_not_called()
+
+    def test_trusted_lan_cannot_replace_pin_without_host_code(self):
+        with TemporaryDirectory() as folder:
+            pin = AccessPin(Path(folder) / "access.json")
+            pin.set_pin("1234")
+            before = pin.backup()
+            token = "1" * 32
+            _, handler = self.request("scanner.home.arpa:8766", headers=[
+                ("Origin", "http://scanner.home.arpa:8766"),
+            ])
+            reply, status = self.program_pin(handler, pin, token, {"new_pin": "7"})
+            self.assertEqual(status, HTTPStatus.FORBIDDEN)
+            self.assertFalse(reply["can_program_pin"])
+            self.assertTrue(reply["can_program_pin_with_code"])
+            self.assertEqual(pin.backup(), before)
+
     def test_setup_code_requires_trusted_lan_and_is_single_use(self):
         with TemporaryDirectory() as folder:
             pin = AccessPin(Path(folder) / "access.json")
             code = pin.issue_setup_code()
             token = "1" * 32
             for peer, body, power, expected in (
-                ("192.168.42.26", {"new_pin": "123456"}, False, HTTPStatus.FORBIDDEN),
+                ("203.0.113.15", {"new_pin": "123456"}, False, HTTPStatus.FORBIDDEN),
                 ("203.0.113.15", {"new_pin": "123456", "setup_code": code}, False, HTTPStatus.FORBIDDEN),
                 ("192.168.42.26", {"new_pin": "123456", "setup_code": "0" * 32}, False, HTTPStatus.FORBIDDEN),
                 ("192.168.42.26", {"new_pin": "123456", "setup_code": code}, True, HTTPStatus.OK),
@@ -318,6 +355,7 @@ class AccessPolicyTests(unittest.TestCase):
             handler.json_response = Mock()
             handler.radio = Mock()
             handler.server.radios = pool
+            handler.server.public_display = True
             with patch.object(radio, "state", side_effect=AssertionError("private state requested")):
                 handler.do_GET()
                 display, = handler.json_response.call_args.args
@@ -371,6 +409,7 @@ class AccessPolicyTests(unittest.TestCase):
                                           headers=[("Origin", origin), ("X-Forwarded-Proto", "https")])
                 handler.path = "/api/v10/display"
                 handler.server.radios = Mock()
+                handler.server.public_display = True
                 handler.radio = Mock()
                 handler.json_response = Mock()
                 handler.send_error.reset_mock()
@@ -392,6 +431,86 @@ class AccessPolicyTests(unittest.TestCase):
                         method()
                         self.assertEqual(handler.json_response.call_args.args[1], HTTPStatus.UNAUTHORIZED)
                 handler.radio.assert_not_called()
+
+    def test_remote_display_requires_explicit_public_opt_in(self):
+        _, handler = self.request("scanner.example.com", headers=[
+            ("X-Forwarded-Proto", "https"),
+        ])
+        handler.path = "/api/v10/display"
+        handler.json_response = Mock()
+        handler.server.radios = Mock()
+        handler.do_GET()
+        self.assertEqual(handler.json_response.call_args.args[1], HTTPStatus.FORBIDDEN)
+        handler.server.radios.lcd_display.assert_not_called()
+        handler.server.public_display = True
+        handler.do_GET()
+        handler.server.radios.lcd_display.assert_called_once_with()
+
+    def test_trusted_local_display_does_not_require_public_opt_in(self):
+        _, handler = self.request("192.168.42.18:8766")
+        handler.path = "/api/v10/display"
+        handler.json_response = Mock()
+        handler.server.radios = Mock()
+        handler.do_GET()
+        handler.server.radios.lcd_display.assert_called_once_with()
+
+    def test_trusted_lan_operator_cannot_reset_or_select_host_folders(self):
+        for action in ({"v10": "reset", "scope": "all"}, {"v10": "reset", "scope": "partial"},
+                       {"record": "browse"}, {"record": "select", "path": "/tmp"}):
+            with self.subTest(action=action):
+                _, handler = self.request("192.168.42.18:8766", headers=[
+                    ("Origin", "http://192.168.42.18:8766"),
+                ])
+                handler.path = "/api/action?session=" + "1" * 32
+                handler.headers["Content-Type"] = "application/json"
+                payload = json.dumps(action).encode()
+                handler.headers["Content-Length"] = str(len(payload))
+                handler.rfile = BytesIO(payload)
+                handler.json_response = Mock()
+                handler.radio = Mock()
+                handler.do_POST()
+                self.assertEqual(handler.json_response.call_args.args[1], HTTPStatus.FORBIDDEN)
+                handler.radio.assert_not_called()
+
+    def test_local_owner_can_change_recording_folder_and_reset_receiver(self):
+        for action in ({"v10": "reset", "scope": "all"}, {"record": "select", "path": "/tmp"}):
+            with self.subTest(action=action):
+                _, handler = self.request("127.0.0.1:8766", peer="127.0.0.1", destination="127.0.0.1", headers=[
+                    ("Origin", "http://127.0.0.1:8766"),
+                ])
+                handler.path = "/api/action?session=" + "1" * 32
+                handler.headers["Content-Type"] = "application/json"
+                payload = json.dumps(action).encode()
+                handler.headers["Content-Length"] = str(len(payload))
+                handler.rfile = BytesIO(payload)
+                handler.json_response = Mock()
+                runtime = Mock()
+                runtime.act.return_value = {"power": False}
+                handler.radio = Mock(return_value=(runtime, 1, False))
+                handler.do_POST()
+                runtime.act.assert_called_once_with(action)
+
+    def test_pin_authenticated_remote_operator_cannot_restore_programming(self):
+        with TemporaryDirectory() as folder:
+            runtime = ScannerRuntime(Path(folder) / "state.json")
+            self.addCleanup(runtime.close)
+            action = {"v10": "restore", "backup": runtime.v10.backup()}
+            self.assertTrue(valid_action(action))
+            host = "scanner.example.com"
+            _, handler = self.request(host, headers=[
+                ("Origin", "https://" + host), ("X-Forwarded-Proto", "https"),
+            ])
+            handler.path = "/api/action?session=" + "1" * 32
+            handler.headers["Content-Type"] = "application/json"
+            payload = json.dumps(action).encode()
+            handler.headers["Content-Length"] = str(len(payload))
+            handler.rfile = BytesIO(payload)
+            handler.json_response = Mock()
+            handler.radio = Mock()
+            handler.check_pin = Mock(return_value=True)
+            handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args[1], HTTPStatus.FORBIDDEN)
+            handler.radio.assert_not_called()
 
     def test_second_display_follows_first_powered_v10_tuner(self):
         with TemporaryDirectory() as folder:

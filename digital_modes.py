@@ -3,12 +3,14 @@
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Condition, Thread
 import time
 
 import numpy as np
 from scipy import signal
 
-from dmr_decoder import DmrDecoderError, _SlotDecoder, _RESAMPLE_FILTER, _DISCRIMINATOR_DC_POLE, decoder_path
+from dmr_decoder import (DmrDecoderError, _SlotDecoder, _RESAMPLE_FILTER, _DISCRIMINATOR_DC_POLE,
+                         _metadata as _dmr_metadata, decoder_path)
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,11 @@ _DIGITAL = {
 DIGITAL_MODES = frozenset(_DIGITAL)
 _CONFIRM_SECONDS = 0.25
 _PCM_FRAME_BYTES = 320  # 20 ms of mono 8 kHz PCM16.
+AUTO_VOICE_MODES = ("DMR", "P25", "NXDN-VN")
+_AUTO_PROBE_SECONDS = 2.25
+_NXDN_CONFIRM_SECONDS = 1.5
+_AUTO_BUFFER_BLOCKS = 32
+_AUTO_CONFIRM_PREROLL_BLOCKS = 10
 
 
 def _bounded_code(value, lower, upper):
@@ -81,6 +88,144 @@ def _audio_identity(metadata):
     if metadata["voice"] and metadata["encrypted"] is False:
         return tuple(metadata[key] for key in ("source", "destination", "unit_id", "talkgroup", "receive_code"))
     return None
+
+
+def _verified_auto_mode(status, calls, *, nxdn48=False):
+    """Promote only protocols with validated receive data and a clear voice identity."""
+    protocol = status.get("protocol")
+    if protocol == "DMR" and not nxdn48:
+        mode = "DMR"
+        result = _dmr_metadata(status, calls, {})
+    else:
+        mode = "NXDN-VN" if protocol == "NXDN" else "P25"
+        if nxdn48 and mode != "NXDN-VN":
+            return None
+        result, _ = _metadata(mode, _DIGITAL[mode], status, calls, None)
+        if result["receive_code"] is None:
+            return None
+    if (result["sync"] and result["voice"] and result["encrypted"] is False
+            and _bounded_code(result["unit_id"], 1, 0xFFFFFF) is not None):
+        # Native AUTO uses the same NXDN status code for both symbol rates.
+        return "NXDN" if mode == "NXDN-VN" and not nxdn48 else mode
+    return None
+
+
+class _AutoDigitalProbe(_SlotDecoder):
+    """Use the native automatic decoder's telemetry without forwarding its audio."""
+
+    def __init__(self, executable, *, nxdn48=False):
+        self._dc = np.zeros(1)
+        self._nxdn48 = nxdn48
+        super().__init__(executable, preset="-fi" if nxdn48 else "-fa")
+
+    def process(self, discriminator):
+        samples = np.frombuffer(discriminator, dtype="<i2")
+        filtered, self._dc = signal.lfilter([1, -1], [1, -_DISCRIMINATOR_DC_POLE], samples, zi=self._dc)
+        return super().process(np.clip(filtered, -32768, 32767).astype("<i2").tobytes())
+
+    def _read_message(self, row):
+        pass
+
+    def _read_result(self):
+        self._output.clear()
+        return _verified_auto_mode(self._status, self._calls, nxdn48=self._nxdn48)
+
+
+class AutoDigitalDetector:
+    """Acquisition off the live audio thread, with at most one probe per carrier."""
+
+    def __init__(self):
+        self._condition = Condition()
+        self._blocks = deque(maxlen=_AUTO_BUFFER_BLOCKS)
+        self._key = None
+        self._generation = 0
+        self._finished = False
+        self._result = None
+        self._closed = False
+        self._worker = None
+
+    def _select(self, key):
+        if self._key != key:
+            self._key = key
+            self._generation += 1
+            self._blocks.clear()
+            self._finished = False
+            self._result = None
+            self._condition.notify_all()
+
+    def observe(self, key, pcm):
+        with self._condition:
+            if self._closed:
+                return None
+            self._select(key)
+            if not self._finished and pcm:
+                self._blocks.append(pcm)
+                self._condition.notify_all()
+            if self._worker is None and pcm:
+                self._worker = Thread(target=self._run, name="scanner-auto-digital", daemon=True)
+                self._worker.start()
+            return self._result
+
+    def reset(self):
+        with self._condition:
+            self._select(None)
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+        if self._worker is not None:
+            self._worker.join(timeout=3)
+
+    def _run(self):
+        generation = 0
+        while True:
+            with self._condition:
+                self._condition.wait_for(lambda: self._closed or self._generation != generation)
+                if self._closed:
+                    return
+                generation, key = self._generation, self._key
+            if key is None:
+                continue
+            result = self._probe(generation)
+            with self._condition:
+                if generation == self._generation:
+                    self._result = result
+                    self._finished = True
+                    self._blocks.clear()
+
+    def _probe(self, generation):
+        if (executable := decoder_path()) is None:
+            return None
+        recent = deque(maxlen=_AUTO_CONFIRM_PREROLL_BLOCKS)
+        mode = self._listen(generation, executable, recent)
+        if mode == "NXDN":
+            return self._listen(generation, executable, recent, nxdn48=True)
+        return mode
+
+    def _listen(self, generation, executable, recent, *, nxdn48=False):
+        deadline = time.monotonic() + (_NXDN_CONFIRM_SECONDS if nxdn48 else _AUTO_PROBE_SECONDS)
+        buffered = deque(recent) if nxdn48 else deque()
+        probe = None
+        try:
+            probe = _AutoDigitalProbe(executable, nxdn48=nxdn48)
+            while (remaining := deadline - time.monotonic()) > 0:
+                with self._condition:
+                    self._condition.wait_for(lambda: buffered or self._blocks
+                                             or generation != self._generation or self._closed, timeout=remaining)
+                    if self._closed or generation != self._generation or not (buffered or self._blocks):
+                        return None
+                    pcm = (buffered or self._blocks).popleft()
+                recent.append(pcm)
+                if mode := probe.process(pcm):
+                    return mode
+        except (DmrDecoderError, OSError):
+            # Optional decoding has no effect on the analogue receive path.
+            return None
+        finally:
+            if probe is not None:
+                probe.close()
+        return None
 
 
 class DigitalDecoder(_SlotDecoder):

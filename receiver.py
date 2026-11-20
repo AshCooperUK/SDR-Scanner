@@ -9,9 +9,11 @@ from __future__ import annotations
 import ctypes as c
 from collections import deque
 from ctypes.util import find_library
+from functools import lru_cache
 from threading import Condition, Event, Thread
 from time import monotonic
 from typing import NamedTuple
+from weakref import finalize
 
 import numpy as np
 from scipy import signal
@@ -42,10 +44,13 @@ NEARBY_MIN_PEAK_FRACTION = 10 ** (-18 / 10)
 WATERFALL_BINS = 320
 WATERFALL_SPAN_HZ = 2 * PROBE_HALF_WIDTH
 WATERFALL_INTERVAL = 1 / 7
+CARRIER_SNAP_MAX_HZ = 7_500
+CARRIER_DC_GUARD_HZ = 1_500
 SSB_MODES = frozenset(("USB", "LSB"))
 CW_MODES = frozenset(("CW", "CW-R"))
 FSK_MODES = frozenset(("FSK", "FSK-R"))
 SAM_MODES = frozenset(("S-AM(D)", "S-AM(U)", "S-AM(L)"))
+ANALOG_VOICE_MODES = SSB_MODES | SAM_MODES | {"AM", "FM"}
 SSB_LOW_HZ = 300
 SSB_HIGH_HZ = 3_000
 SSB_GAIN_DECAY = np.exp(-IQ_SAMPLES / (IQ_RATE * .5))
@@ -90,6 +95,77 @@ class NearbyPeak(NamedTuple):
     hz: int
     level_dbfs: float
     strength_db: float
+
+
+class ScopeSpectrum(NamedTuple):
+    """Full-resolution FFT behind a specific row of the live scope."""
+
+    sequence: int
+    time_ms: int
+    center_hz: int
+    low_hz: int
+    high_hz: int
+    power: np.ndarray
+
+    def carrier_near(self, hz, radius_hz, mode):
+        if not self.low_hz <= hz < self.high_hz or mode in SSB_MODES | FSK_MODES:
+            return None
+        radius_hz = min(radius_hz, CARRIER_SNAP_MAX_HZ)
+        bin_hz = IQ_RATE / PROBE_FFT
+        wide = mode == "WFM"
+        narrow_carrier = mode in SAM_MODES | CW_MODES | {"AM"}
+        width = 27 if wide else 1 if narrow_carrier else 5
+        margin = 250_000 if wide else 25_000
+        lower = max(self.low_hz, hz - margin)
+        upper = min(self.high_hz, hz + margin)
+        first = PROBE_FFT // 2 + int(np.ceil((lower - self.center_hz) / bin_hz))
+        stop = PROBE_FFT // 2 + int(np.ceil((upper - self.center_hz) / bin_hz))
+        raw = self.power[first:stop]
+        if raw.size < max(16, width + 2):
+            return None
+        floor = max(float(np.percentile(raw, 30 if wide else 50)), 1e-15)
+        power = raw.copy()
+        dc = PROBE_FFT // 2 - first
+        guard = int(np.ceil(CARRIER_DC_GUARD_HZ / bin_hz))
+        power[max(0, dc - guard):max(0, dc + guard + 1)] = floor
+        smoothed = np.convolve(power, np.ones(width) / width, mode="same")
+        occupied = smoothed > 4 * floor
+        edges = np.flatnonzero(np.diff(np.r_[False, occupied, False]))
+        candidates = []
+        for start, end in zip(edges[::2], edges[1::2]):
+            if start == 0 or end == len(smoothed) or smoothed[start:end].max() < 10 * floor:
+                continue
+            bandwidth = (end - start) * bin_hz
+            peak = start + np.argmax(power[start:end])
+            if wide:
+                # Several nearby modulation peaks may belong to one FM station.
+                # Estimate its center from both shoulders of an occupied channel.
+                if not 70_000 <= bandwidth <= 240_000:
+                    continue
+                location = (start + end - 1) / 2
+            elif narrow_carrier or bandwidth <= 2_000:
+                location = _interpolated_fft_bin(power, peak)
+            elif bandwidth <= 20_000:
+                weights = smoothed[start:end] - floor
+                location = np.dot(np.arange(start, end), weights) / weights.sum()
+            else:
+                continue
+            frequency = round(self.center_hz + (first + location - PROBE_FFT // 2) * bin_hz)
+            if (self.low_hz <= frequency < self.high_hz and abs(frequency - hz) <= radius_hz
+                    and abs(frequency - self.center_hz) > CARRIER_DC_GUARD_HZ):
+                candidates.append(frequency)
+        candidates.sort(key=lambda frequency: abs(frequency - hz))
+        if not candidates or (len(candidates) > 1
+                              and abs(candidates[1] - hz) - abs(candidates[0] - hz) <= bin_hz):
+            return None
+        return candidates[0]
+
+
+def _interpolated_fft_bin(power, peak):
+    left, middle, right = np.log(np.maximum(power[peak - 1:peak + 2], 1e-15))
+    curvature = left - 2 * middle + right
+    offset = np.clip(0.5 * (left - right) / curvature, -0.5, 0.5) if curvature < 0 else 0
+    return peak + offset
 
 
 def _rtl_library():
@@ -250,6 +326,60 @@ class _NoiseReduction:
         output = self.tail + filtered[:size]
         self.previous, self.tail = block, filtered[size:]
         return output
+
+
+@lru_cache(maxsize=1)
+def _speexdsp():
+    try:
+        library = c.CDLL(find_library("speexdsp") or "libspeexdsp.so.1")
+        signatures = {
+            "speex_preprocess_state_init": (c.c_void_p, (c.c_int, c.c_int)),
+            "speex_preprocess_state_destroy": (None, (c.c_void_p,)),
+            "speex_preprocess_ctl": (c.c_int, (c.c_void_p, c.c_int, c.c_void_p)),
+            "speex_preprocess_run": (c.c_int, (c.c_void_p, c.POINTER(c.c_int16))),
+        }
+        for name, (result, arguments) in signatures.items():
+            function = getattr(library, name)
+            function.restype = result
+            function.argtypes = arguments
+    except (OSError, AttributeError):
+        return None
+    return library
+
+
+class _SpeechNoiseReduction:
+    def __init__(self, library, size, depth):
+        self.library = library
+        self.handle = library.speex_preprocess_state_init(size, SAMPLE_RATE)
+        if not self.handle:
+            raise ReceiverError("Could not start the audio noise reducer")
+        # Each tune gets a fresh noise estimate. Free the old native state
+        # when the decoder replaces this block processor.
+        close = finalize(self, library.speex_preprocess_state_destroy, self.handle)
+        close.atexit = False
+        noise_suppress = 18  # SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, in negative dB.
+        suppression = c.c_int(-round(25 * depth / 15))
+        if library.speex_preprocess_ctl(self.handle, noise_suppress, c.byref(suppression)) != 0:
+            close()
+            raise ReceiverError("Could not configure the audio noise reducer")
+
+    def process(self, block):
+        # Reserve 6 dB of PCM headroom for the decoder's floating-point audio.
+        pcm = np.rint(np.clip(block * 16384, -32768, 32767)).astype(np.int16)
+        self.library.speex_preprocess_run(self.handle, pcm.ctypes.data_as(c.POINTER(c.c_int16)))
+        return pcm / 16384
+
+
+def _audio_noise_reducer(mode, level):
+    if not level or mode == "DMR":
+        return None
+    size = IQ_SAMPLES * SAMPLE_RATE // IQ_RATE
+    if mode in ANALOG_VOICE_MODES and (library := _speexdsp()) is not None:
+        try:
+            return _SpeechNoiseReduction(library, size, level)
+        except ReceiverError:
+            pass
+    return _NoiseReduction(size, level)
 
 
 def _analog_mode_evidence(channel):
@@ -424,8 +554,8 @@ class _ChannelDecoder:
                                          fs=SAMPLE_RATE, btype="bandpass", output="sos"))
         self.post_filter = np.concatenate(filters) if filters else None
         self.post_history = np.zeros((len(self.post_filter), 2)) if filters else None
-        self.noise_reduction = (_NoiseReduction(IQ_SAMPLES * SAMPLE_RATE // IQ_RATE, settings.get("nr_level", 7))
-                                if settings.get("noise_reduction") and mode != "DMR" else None)
+        level = settings.get("nr_level", 7) if settings.get("noise_reduction") else 0
+        self.noise_reduction = _audio_noise_reducer(mode, level)
 
     def reset(self, offset_hz, mode, keep_rds=False):
         if self.rds is not None:
@@ -580,11 +710,14 @@ class Receiver:
         self._nominal_gain = None
         self._headroom_blocks = 0
         self._gain_percent = None
+        self._gain_tenths_db = None
         self._decoder = _ChannelDecoder()
         self._auto_revision = None
         self._auto_filter_history = np.zeros(len(self._decoder.filters["FM"]) - 1, dtype=np.complex64)
         self._auto_votes = deque(maxlen=12)
         self._stream = None
+        self.iq_listener = None
+        self._iq_stream_generation = 0
         self._last_sequence = None
         self._probe_ranges = ()
         self._probe_centers = ()
@@ -624,16 +757,26 @@ class Receiver:
         self._apply_gain(self._nominal_gain)
 
     def _select_nominal_gain(self):
-        target = TUNER_GAIN_TARGET
-        if self._gain_percent is not None:
+        target = self._gain_tenths_db
+        if target is None and self._gain_percent is not None:
             target = self._gains[0] + (self._gains[-1] - self._gains[0]) * self._gain_percent / 100
+        if target is None:
+            target = TUNER_GAIN_TARGET
         self._nominal_gain = min(self._gains, key=lambda gain: abs(gain - target))
+
+    @property
+    def tuner_gain(self):
+        """Steps and selected/actual gain in tenths of a dB, if adjustable."""
+        if self._direct or not self._gains:
+            return None
+        return {"steps": self._gains, "target": self._nominal_gain, "actual": self._gain}
 
     def configure(self, settings):
         """Apply panel changes in the same thread that owns the RTL device."""
         rf_gain = settings.get("rf_gain")
-        if self._gain_percent != rf_gain:
-            self._gain_percent = rf_gain
+        gain_tenths_db = settings.get("rf_gain_tenths_db")
+        if (self._gain_percent, self._gain_tenths_db) != (rf_gain, gain_tenths_db):
+            self._gain_percent, self._gain_tenths_db = rf_gain, gain_tenths_db
             if self._gains and not self._direct:
                 self._select_nominal_gain()
                 if self._nominal_gain != self._gain:
@@ -670,6 +813,8 @@ class Receiver:
         self._gain = gain
         self._headroom_blocks = 0
         self._watch_iq = None
+        self._tuning_noise_dbfs = None
+        self._meter_blocks_until_spectrum = 0
 
     def _gain_for_block(self, raw):
         if self._direct or not self._gains:
@@ -783,20 +928,33 @@ class Receiver:
         return self._tuning_snr_db if self._prepared else None
 
     @property
+    def tuning_noise_dbfs(self):
+        """Estimated in-channel noise power, measured with the SNR."""
+        return self._tuning_noise_dbfs if self._prepared else None
+
+    @property
     def waterfall(self):
         """Return the most recent display row measured on the audio tuning."""
         return self._waterfall if self._prepared else None
 
+    @property
+    def scope_spectrum(self):
+        """Full-resolution data for the most recent live scope frame."""
+        return self._scope_spectrum if self._prepared else None
+
     def _reset_tuning_measurement(self):
         self._tuning_offset_hz = None
         self._tuning_snr_db = None
+        self._tuning_noise_dbfs = None
         self._nfm_audio_envelope = 0.0
         self._nfm_audio_gain = 1.0
         self._meter_blocks_until_spectrum = 0
         self._meter_offsets.clear()
         self._waterfall = None
+        self._scope_spectrum = None
         self._waterfall_at = 0.0
         self._auto_revision = None
+        self._auto_discriminator_revision = None
 
     def _stop_stream(self):
         if self._stream is not None and not self._stream.stop():
@@ -807,6 +965,7 @@ class Receiver:
     def _start_stream(self):
         self._call("reset_buffer")
         self._stream = _IqStream(self._library, self._device)
+        self._iq_stream_generation += 1
 
     def _read_iq(self):
         if self._stream is None:
@@ -869,7 +1028,11 @@ class Receiver:
             hz, mode = self._tuning
             self._decoder.reset(hz - self._center, mode, keep_rds=True)
             self._auto_revision = None
+            self._auto_discriminator_revision = None
         self._last_sequence = sequence
+        if self.iq_listener is not None:
+            self.iq_listener(raw, self._iq_stream_generation, sequence, self._center, self._direct,
+                             self._gain, self._tuning)
         self._watch_iq = _decode_iq(raw)
         level, pcm = self._decoder.decode(self._watch_iq)
         self._measure_tuning(level)
@@ -894,6 +1057,29 @@ class Receiver:
             evidence = _analog_mode_evidence(channel)
         self._auto_votes.append(evidence)
         return evidence if evidence and self._auto_votes.count(evidence) >= AUTO_VOTES else None
+
+    def auto_discriminator(self, tune_revision):
+        """Produce 48 kHz discriminator PCM before analogue voice processing."""
+        raw = self._decoder.narrow_iq
+        if raw is None:
+            return b""
+        taps = self._decoder.filters["DMR"]
+        sequence = self._last_sequence
+        if (tune_revision != self._auto_discriminator_revision
+                or sequence is not None and self._auto_discriminator_sequence != sequence - 1):
+            self._auto_discriminator_revision = tune_revision
+            self._auto_discriminator_history = np.zeros(len(taps) - 1, dtype=np.complex64)
+            self._auto_discriminator_previous = 0j
+        self._auto_discriminator_sequence = sequence
+        channel, self._auto_discriminator_history = signal.lfilter(
+            taps, np.array([1], dtype=np.float32), raw, zi=self._auto_discriminator_history,
+        )
+        previous = np.empty_like(channel)
+        previous[0] = self._auto_discriminator_previous
+        previous[1:] = channel[:-1]
+        self._auto_discriminator_previous = channel[-1]
+        pcm = np.angle(channel * np.conjugate(previous)) * 44_000
+        return np.clip(pcm, -32767, 32767).astype("<i2").tobytes()
 
     def level_live_audio(self, pcm):
         """Raise quiet narrow-FM audio for live listening."""
@@ -934,7 +1120,8 @@ class Receiver:
             relative = self._probe_offsets - offset
             noise_bins = self._meter_noise_bins & (np.abs(relative) > WATCH_HALF_WIDTH[mode])
             noise = np.median(spectrum[noise_bins]) * (METER_NOISE_BANDWIDTH[mode] * PROBE_FFT / IQ_RATE)
-            self._tuning_snr_db = float(level - 10 * np.log10(max(noise, 1e-15)))
+            self._tuning_noise_dbfs = float(10 * np.log10(max(noise, 1e-15)))
+            self._tuning_snr_db = float(level - self._tuning_noise_dbfs)
             self._meter_blocks_until_spectrum = METER_SPECTRUM_INTERVAL
             if mode == "AM":
                 self._tuning_offset_hz = self._am_offset(spectrum, relative)
@@ -971,6 +1158,8 @@ class Receiver:
         self._waterfall_sequence += 1
         self._waterfall = {"sequence": self._waterfall_sequence, "center_hz": low + span // 2,
                            "span_hz": span, "levels": tuple(levels.tolist()), "time_ms": round(now * 1000)}
+        self._scope_spectrum = ScopeSpectrum(self._waterfall_sequence, self._waterfall["time_ms"],
+                                             self._center, low, high, spectrum)
         self._waterfall_at = now + WATERFALL_INTERVAL
 
     @staticmethod
@@ -982,10 +1171,7 @@ class Receiver:
         window = spectrum[peak - 1:peak + 2]
         if window.sum() < 0.25 * spectrum[start:stop].sum():
             return None
-        left, middle, right = np.log(np.maximum(window, 1e-15))
-        curvature = left - 2 * middle + right
-        bin_offset = np.clip(0.5 * (left - right) / curvature, -0.5, 0.5) if curvature < 0 else 0
-        return float(relative[peak] + bin_offset * IQ_RATE / PROBE_FFT)
+        return float(relative[0] + _interpolated_fft_bin(spectrum, peak) * IQ_RATE / PROBE_FFT)
 
     def _watch_spectrum(self, iq):
         windows = iq[:3 * PROBE_FFT].reshape(3, PROBE_FFT)

@@ -4,17 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>SDr Scanner V10.1.4</title>
+  <title>SDr Scanner V10.1.5</title>
   <link rel="icon" href="/ashcooperuk-avatar.png">
   <link rel="stylesheet" href="/v10.css">
   <script type="module" src="/v10.js"></script>
 </head>
 <body>
-<section id="sdr-v10-panel" aria-label="SDr Scanner V10.1.4 receiver">
+<section id="sdr-v10-panel" aria-label="SDr Scanner V10.1.5 receiver">
 
   <div class="radio">
     <div class="controls-left">
-      <div class="power-controls">
+      <div class="power-controls recess" role="group" aria-label="Power and settings sync">
+        <div class="power-control">
         <button type="button" class="power-button" data-action="power" aria-labelledby="sdr-v10-power-label" title="Press to power on. Hold for one second to power off." aria-pressed="false">
           <span class="power-led-ring" aria-hidden="true">
             <i style="--led-index:0"></i><i style="--led-index:1"></i><i style="--led-index:2"></i><i style="--led-index:3"></i>
@@ -26,7 +27,23 @@
           </span>
           <span class="power-symbol" aria-hidden="true"></span>
         </button>
-        <span class="power-label" id="sdr-v10-power-label">POWER</span>
+        <span class="power-caption">
+          <span class="power-label" id="sdr-v10-power-label">POWER</span>
+          <span class="power-control-state" data-el="power-status">OFF</span>
+        </span>
+        </div>
+        <div class="power-control">
+          <button type="button" class="sync-button" data-action="settings-sync" data-sync-status="pending" aria-labelledby="sdr-v10-sync-label" title="Sync all A–J and MAIN dial settings: functions, press actions, sensitivities and Auto TS acceleration. Also syncs P1/P2 buttons, audio, display, scope, bookmarks and menu settings between browsers. Settings sync is enabled." aria-pressed="true">
+            <span class="sync-light-bar" aria-hidden="true"></span>
+            <svg class="sync-symbol" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M19.5 9A8 8 0 0 0 6.2 5.4L3.5 8M3.5 3.5V8H8M4.5 15a8 8 0 0 0 13.3 3.6l2.7-2.6M16 16h4.5v4.5"/>
+            </svg>
+          </button>
+          <span class="power-caption">
+            <span class="power-label" id="sdr-v10-sync-label">SYNC</span>
+            <span class="power-control-state" data-el="sync-status">LOADING</span>
+          </span>
+        </div>
       </div>
       <div class="preset-bank recess" role="group" aria-labelledby="preset-bank-label">
         <span class="bank-label" id="preset-bank-label">PRESETS</span>
@@ -69,8 +86,10 @@
           <button class="lcd-indicator" data-action="filter" data-el="filter" type="button">FIL1</button>
           <span class="rx-options" data-el="rf-options"></span>
           <span class="record-indicator" data-el="rec" title="Recording"></span>
+          <button type="button" class="mobile-rec" data-action="mobile-record" data-record-state="off" aria-label="Enable recording" aria-pressed="false" title="Enable recording. Audio is saved when a signal opens squelch."><span class="lcd-rec-led" aria-hidden="true">REC</span></button>
           <button class="lcd-indicator" data-action="clock" data-el="clock" type="button" title="Show the host’s local time and UTC.">—</button>
         </div>
+        <div class="mobile-channel" data-el="mobile-channel"></div>
         <div class="lcd-name-line">
           <span data-el="antenna"></span>
           <strong data-el="site"></strong>
@@ -117,6 +136,7 @@
           <button type="button" class="key expand-key" data-action="expand" aria-pressed="false" title="Tap to toggle the scope-only display. Hold for one second to open Scope Set.">EXPD/SET</button>
         </div>
       </div>
+      <div class="mobile-standby" aria-hidden="true">SDR SCANNER<span>Press POWER to listen</span></div>
       <div class="overlay" id="v10-menus" hidden></div>
       <div class="overlay" id="sdr-v10-mode" data-panel="mode" hidden>
         <h2 class="overlay-title">MODE</h2>
@@ -125,7 +145,7 @@
       </div>
       <form class="overlay" data-panel="frequency" hidden>
         <h2 class="overlay-title">F-INP</h2>
-        <label class="field">Frequency in MHz <input data-el="frequency-input" type="text" inputmode="decimal" autocomplete="off" required></label>
+        <label class="field">Frequency in MHz <input data-el="frequency-input" type="text" inputmode="decimal" placeholder="44600625 or 446.00625" title="Enter MHz with a decimal point, or compact digits such as 44600625 for 446.006250 MHz." autocomplete="off" required></label>
         <div class="tile-grid frequency-keys" data-el="frequency-keys" aria-label="Frequency keypad"></div>
         <p class="error" data-el="frequency-error" role="alert" hidden></p>
         <div class="overlay-actions">
@@ -133,9 +153,15 @@
           <button class="key" type="button" data-panel-back aria-label="Back" title="Cancel frequency entry and go back.">↩</button>
         </div>
       </form>
+      <form class="overlay" data-panel="mobile-channel-entry" hidden>
+        <h2 class="overlay-title">CHANNEL / FREQUENCY</h2>
+        <label class="field">Channel 000–099, or frequency <input data-el="mobile-channel-input" type="text" inputmode="none" pattern="[0-9]{1,10}" maxlength="10" autocomplete="off" required></label>
+        <p class="error" data-el="mobile-channel-error" role="alert" hidden></p>
+        <div class="overlay-actions"><button class="key" type="submit">OK</button><button class="key" type="button" data-panel-back aria-label="Back">↩</button></div>
+      </form>
       <form class="overlay" data-panel="pin" hidden>
         <h2 class="overlay-title" data-el="pin-title">REMOTE ACCESS</h2>
-        <label class="field"><span data-el="pin-label">Enter PIN</span><input data-el="pin-input" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off" required></label>
+        <label class="field"><span data-el="pin-label">Enter PIN</span><input data-el="pin-input" type="password" inputmode="numeric" pattern="[0-9]+" autocomplete="off" title="Enter a PIN using digits only." required></label>
         <p class="error" data-el="pin-error" role="alert" hidden></p>
         <div class="overlay-actions">
           <button class="key" type="submit" title="Submit the masked PIN entry.">ENT</button>
@@ -163,6 +189,51 @@
         <div class="overlay-actions">
           <button class="key" type="button" data-panel-back aria-label="Cancel" title="Keep the saved favourite and return to the receiver.">↩</button>
         </div>
+      </div>
+    </div>
+    <div class="mobile-console" role="group" aria-label="Handheld radio controls">
+      <div class="mobile-softkeys">
+        <button type="button" class="mobile-key" data-action="mobile-bank-down" title="Select the previous populated favourite bank.">BANK −</button>
+        <button type="button" class="mobile-key mobile-fav-toggle" data-action="mobile-favourites" aria-expanded="false" aria-controls="mobile-number-keys" title="Show or hide the favourite channel keypad for this bank.">FAV 0–9</button>
+        <button type="button" class="mobile-key" data-action="mobile-bank-up" title="Select the next populated favourite bank.">BANK +</button>
+      </div>
+      <div class="mobile-navigation">
+        <div class="mobile-nav-side">
+          <button type="button" class="mobile-key mobile-program" data-action="mobile-p1" title="P1: Quick Menu. Hold to configure.">P1<small data-el="mobile-p1-label">QUICK</small></button>
+          <button type="button" class="mobile-key mobile-menu" data-action="mobile-menu" title="Open the handheld menu."><span>☰</span>MENU/OK</button>
+          <button type="button" class="mobile-key mobile-lockout" data-action="mobile-lockout" aria-pressed="false" title="Lock out the current frequency or memory. Hold for one second to clear temporary lockouts."><span><i class="lamp" aria-hidden="true"></i> L/O</span><small>hold: CLEAR</small></button>
+        </div>
+        <div class="mobile-pad" role="group" aria-label="Channel, frequency and menu navigation">
+          <button type="button" class="mobile-key mobile-up" data-action="mobile-up" aria-label="Next channel or previous menu item"><span>▲</span><small data-el="mobile-up-label">CH +</small></button>
+          <button type="button" class="mobile-key mobile-left" data-action="mobile-left" aria-label="Decrease frequency or back"><span>−</span><small data-el="mobile-left-label">FREQ −</small></button>
+          <button type="button" class="mobile-key mobile-ok" data-action="mobile-ok" title="Confirm the selected item. On the home screen, open the channel list.">OK</button>
+          <button type="button" class="mobile-key mobile-right" data-action="mobile-right" aria-label="Increase frequency or select"><span>+</span><small data-el="mobile-right-label">FREQ +</small></button>
+          <button type="button" class="mobile-key mobile-down" data-action="mobile-down" aria-label="Previous channel or next menu item"><span>▼</span><small data-el="mobile-down-label">CH −</small></button>
+        </div>
+        <div class="mobile-nav-side">
+          <button type="button" class="mobile-key mobile-program" data-action="mobile-p2" title="P2: Monitor. Hold to configure.">P2<small data-el="mobile-p2-label">MONITOR</small></button>
+          <button type="button" class="mobile-key mobile-back" data-action="mobile-back" title="Back one menu level. Hold for one second to return home."><span>↩</span>BACK<small>hold: HOME</small></button>
+          <button type="button" class="mobile-key mobile-simple-scan" data-action="mobile-simple-scan" aria-pressed="false" title="Start or stop a simple frequency scan. Hold to scan in the opposite direction.">S.SCAN</button>
+        </div>
+      </div>
+      <div id="mobile-number-keys" class="mobile-keypad" role="group" aria-label="Radio numeric keypad">
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="1">1</button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="2">2<small>ABC</small></button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="3">3<small>DEF</small></button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="4">4<small>GHI</small></button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="5">5<small>JKL</small></button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="6">6<small>MNO</small></button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="7">7<small>PQRS</small></button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="8">8<small>TUV</small></button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="9">9<small>WXYZ</small></button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="*" title="Decimal point in frequency entry; backspace in PIN entry. Hold to delete a character.">*</button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="0">0</button>
+        <button type="button" class="mobile-key" data-action="mobile-digit" data-key="#" title="Confirm the entered frequency or PIN.">#</button>
+      </div>
+      <div class="mobile-volume" role="group" aria-label="Audio volume">
+        <button type="button" class="mobile-key" data-action="mobile-volume-down" aria-label="Decrease volume">−</button>
+        <button type="button" class="mobile-key mobile-volume-readout" data-action="mobile-mute" aria-pressed="false" title="Mute or unmute audio."><span data-el="mobile-volume">VOL 32%</span></button>
+        <button type="button" class="mobile-key" data-action="mobile-volume-up" aria-label="Increase volume">+</button>
       </div>
     </div>
     <div class="right">

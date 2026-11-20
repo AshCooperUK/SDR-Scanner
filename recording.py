@@ -29,11 +29,17 @@ DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 CLIP_NAME = re.compile(r"[0-9]{6}-[0-9]{8}(?:-[0-9]+)?\.mp3")
 DAB_CLIP_NAME = re.compile(r"[0-9]{6}-[0-9]{6}(?:-[0-9]+)?\.mp3")
 FLAT_CLIP_NAME = re.compile(r"(?P<prefix>.+)-(?P<stamp>[0-9]{6}-[0-9]{8}(?:-[0-9]+)?\.mp3)")
+CLOCK_PATTERN = r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
 V10_CLIP_NAME = re.compile(
-    r"(?P<stamp>(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] - [0-9]{8})"
+    rf"(?P<stamp>{CLOCK_PATTERN} - [0-9]{{2}}\.[0-9]{{2}}\.[0-9]{{4}})"
+    r"- (?P<frequency>[0-9]{1,4}\.[0-9]{6}) MHz(?:-[0-9]+)?\.mp3"
+)
+V10_LEGACY_CLIP_NAME = re.compile(
+    rf"(?P<stamp>{CLOCK_PATTERN} - [0-9]{{8}})"
     r" - (?P<frequency>[0-9]{1,4}\.[0-9]{4,6})(?:-[0-9]+)?\.mp3"
 )
 FREQUENCY_NAME = re.compile(r"([0-9]{1,4})\.([0-9]{4,6})mhz")
+CHANNEL_FOLDER_NAME = re.compile(r"CH(?:0|[1-9][0-9]*) - .+")
 STATION_NAME_BYTES = 120
 STATION_FORBIDDEN = frozenset('/\\<>:"|?*')
 WINDOWS_DEVICE = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.IGNORECASE)
@@ -147,6 +153,21 @@ def _station_folder(name):
             or name.casefold() == RECORDINGS_FOLDER.casefold()):
         name = "_" + name
     return name.encode("utf-8")[:STATION_NAME_BYTES].decode("utf-8", errors="ignore").rstrip(" .")
+
+
+def saved_channel_folder(slot, name, *, group=None):
+    """Build a directory label from the channel name or its bank number."""
+    if type(slot) is not int or slot < 0:
+        return None
+    label = _station_folder(name)
+    if not label and type(group) is int and group >= 0:
+        label = f"Bank {group}"
+    return _station_folder(f"CH{slot} - {label}") if label else None
+
+
+def is_saved_channel_folder(folder):
+    return (isinstance(folder, str) and CHANNEL_FOLDER_NAME.fullmatch(folder) is not None
+            and _station_folder(folder) == folder)
 
 
 def _recording_identity(hz, dab_sid):
@@ -296,6 +317,14 @@ class Recorder:
     def destination(self, *, v10=False):
         return self._parent if v10 else self.root
 
+    def _clip_directory(self, *, v10, channel_folder):
+        root = self.destination(v10=v10)
+        if not v10 or channel_folder is None:
+            return root
+        if not is_saved_channel_folder(channel_folder):
+            raise RecordingError("Invalid saved channel recording folder.")
+        return root / channel_folder
+
     @property
     def active_hz(self):
         clip = self._active_clip
@@ -348,22 +377,25 @@ class Recorder:
             return _Clip(pending.hz, pending.prefix, pending.path, directory, partial, stream,
                          encoder, cleanup.pop_all(), analysis, pending.identity, pending.v10)
 
-    def _pending_clip(self, hz, prefix, when, skip_tone_only, identity, *, v10):
+    def _pending_clip(self, hz, prefix, when, skip_tone_only, identity, directory, *, v10):
         if v10:
-            stamp = when.strftime("%H:%M:%S - %d%m%Y")
-            filename = f"{stamp} - {prefix.removesuffix('mhz')}.mp3"
+            stamp = when.strftime("%H:%M:%S - %d.%m.%Y")
+            whole, fractional = divmod(hz, 1_000_000)
+            filename = f"{stamp}- {whole}.{fractional:06d} MHz.mp3"
         else:
             stamp = when.strftime("%H%M%S-%d%m%Y")
             filename = f"{prefix}-{stamp}.mp3"
-        return _PendingClip(hz, prefix, self.destination(v10=v10) / filename, skip_tone_only, identity, v10)
+        return _PendingClip(hz, prefix, directory / filename, skip_tone_only, identity, v10)
 
-    def feed(self, hz, pcm, *, skip_tone_only=False, station_name=None, dab_sid=None, v10=False):
+    def feed(self, hz, pcm, *, skip_tone_only=False, station_name=None, dab_sid=None,
+             v10=False, channel_folder=None):
         if not pcm:
             return
         if len(pcm) % 2:
             raise RecordingError("Received an incomplete audio sample.")
         frequency = _frequency_folder(hz)
         prefix = frequency if v10 else _station_folder(station_name) or frequency
+        directory = self._clip_directory(v10=v10, channel_folder=channel_folder)
         identity = _recording_identity(hz, dab_sid)
         active = self._active_clip
         active_tone_filter = None
@@ -372,12 +404,13 @@ class Recorder:
         elif self._pending:
             active_tone_filter = self._pending.skip_tone_only
         if active and (active.hz != hz or active.prefix != prefix or active.identity != identity or active.v10 != v10
-                       or active_tone_filter != skip_tone_only):
+                       or active.path.parent != directory or active_tone_filter != skip_tone_only):
             self.finish()
         try:
             if self._clip is None:
                 if self._pending is None:
-                    self._pending = self._pending_clip(hz, prefix, datetime.now(), skip_tone_only, identity, v10=v10)
+                    self._pending = self._pending_clip(hz, prefix, datetime.now(), skip_tone_only, identity,
+                                                       directory, v10=v10)
                 pending = self._pending
                 if len(pending.pcm) + len(pcm) < MIN_CLIP_PCM_BYTES:
                     pending.pcm.extend(pcm)
@@ -409,12 +442,13 @@ class Recorder:
         except OSError as exc:
             raise RecordingError(f"Could not save the MP3 clip ({exc.strerror}).") from exc
 
-    def save_received(self, hz, time_ms, chunks, *, station_name=None, dab_sid=None, v10=False):
+    def save_received(self, hz, time_ms, chunks, *, station_name=None, dab_sid=None, v10=False, channel_folder=None):
         """Write buffered audio without altering an in-progress recording."""
         frequency = _frequency_folder(hz)
         prefix = frequency if v10 else _station_folder(station_name) or frequency
+        directory = self._clip_directory(v10=v10, channel_folder=channel_folder)
         pending = self._pending_clip(hz, prefix, datetime.fromtimestamp(time_ms / 1000), False,
-                                     _recording_identity(hz, dab_sid), v10=v10)
+                                     _recording_identity(hz, dab_sid), directory, v10=v10)
         try:
             clip = self._start(pending)
             with clip.cleanup:
@@ -424,10 +458,12 @@ class Recorder:
         except OSError as exc:
             raise RecordingError(f"Could not save the MP3 clip ({exc.strerror}).") from exc
 
-    def has_saved_hit(self, filename, hz, *, dab_sid=None, v10=False):
+    def has_saved_hit(self, filename, hz, *, dab_sid=None, v10=False, channel_folder=None):
+        if Path(filename).name != filename or filename in ("", ".", ".."):
+            return False
         try:
             with ExitStack() as cleanup:
-                directory = _open_directory(self.destination(v10=v10))
+                directory = _open_directory(self._clip_directory(v10=v10, channel_folder=channel_folder))
                 cleanup.callback(os.close, directory)
                 return _has_identity(directory, filename, _recording_identity(hz, dab_sid))
         except OSError as exc:
@@ -454,11 +490,40 @@ class Recorder:
                 collision += 1
                 path = clip.path.with_stem(f"{clip.path.stem}-{collision}")
 
-    def clear_frequency(self, hz, *, station_name=None, dab_sid=None):
+    def _clear_v10_frequency(self, hz, identity, channel_folder):
+        path = self._clip_directory(v10=True, channel_folder=channel_folder)
+        active = self._active_clip
+        if active and active.v10 and active.hz == hz and active.identity == identity and active.path.parent == path:
+            self.finish()
+
+        def matches(name):
+            match = V10_CLIP_NAME.fullmatch(name)
+            if match is None and channel_folder is None:
+                match = V10_LEGACY_CLIP_NAME.fullmatch(name)
+            if match is None:
+                return False
+            whole, fraction = match["frequency"].split(".")
+            return int(whole) * 1_000_000 + int(fraction.ljust(6, "0")) == hz
+
+        try:
+            directory = _open_directory(path)
+        except FileNotFoundError:
+            return 0
+        try:
+            return _clear_clips(directory, matches, identity)
+        finally:
+            os.close(directory)
+
+    def clear_frequency(self, hz, *, station_name=None, dab_sid=None, v10=False, channel_folder=None):
         frequency = _frequency_folder(hz)
         station = _station_folder(station_name)
         prefix = station or frequency
         identity = _recording_identity(hz, dab_sid)
+        if v10:
+            try:
+                return self._clear_v10_frequency(hz, identity, channel_folder)
+            except OSError as exc:
+                raise RecordingError(f"Could not clear recordings for {frequency} ({exc.strerror}).") from exc
         legacy = not station and dab_sid is None and hz not in DAB_FREQUENCIES
         clip_name = DAB_CLIP_NAME if station else CLIP_NAME
         active = self._active_clip

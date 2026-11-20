@@ -1,5 +1,7 @@
 import { PcmBuffer } from "./pcm-buffer.js";
-import { AF_VOLUME_STEP, createReceiverMenus, favoriteBankLabel, formatP25Talkgroup, hasAnalogFilter, isCustomPreset, supportsSsbDsp, TUNING_STEPS, ZONE_NAMES } from "./v10-menus.js";
+import { CLIENT_SETTING_KEYS, snapshotClientSettings, validateClientSettings } from "./v10-backup.js";
+import { createSettingsSync } from "./v10-sync.js";
+import { AF_VOLUME_STEP, createReceiverMenus, favoriteBankLabel, formatP25Talkgroup, hasAnalogFilter, isCustomPreset, MOBILE_KEY_ACTIONS, repeaterLabel, snapshotDialPreferences, validateDialPreferences, supportsSsbDsp, TUNING_STEPS, ZONE_NAMES } from "./v10-menus.js";
 
 const root = document.getElementById("sdr-v10-panel");
 const lcd = root.querySelector(".lcd");
@@ -33,6 +35,8 @@ const mirrorPath = "/lcd";
 const isMirror = location.pathname === mirrorPath;
 const displayUpdateInterval = 125;
 const mirrorSnapshotMaxAge = 850;
+const receiverReadTimeout = 5000;
+const receiverWriteTimeout = 15000;
 const inputRate = 24000;
 const audioFadeSeconds = 0.004;
 const maxBoostDb = 24;
@@ -40,6 +44,14 @@ const maxBoostGain = 10 ** (maxBoostDb / 20);
 const minimumHz = 100000;
 const maximumHz = 1750000000;
 const scopeSpectrumFraction = 0.54;
+const repeaterBands = [
+  ["10m", 28_000_000, 30_000_000],
+  ["6m", 50_000_000, 52_000_000],
+  ["4m", 70_000_000, 71_000_000],
+  ["2m", 144_000_000, 146_000_000],
+  ["70cm", 430_000_000, 440_000_000],
+  ["23cm", 1240_000_000, 1300_000_000],
+];
 lcdContent.style.setProperty("--scope-spectrum-height", scopeSpectrumFraction * 100 + "%");
 const frequencyDoubleClickDelay = 450;
 const sessionPattern = /^[a-f0-9]{32}$/;
@@ -53,7 +65,7 @@ const defaultModes = ["FM", "WFM", "AM", "USB", "LSB", "DMR"];
 const modeOrder = ["AUTO", "FM", "WFM", "AM", "S-AM(D)", "S-AM(U)", "S-AM(L)", "USB", "LSB", "CW", "CW-R",
   "FSK", "FSK-R", "DMR", "D-STAR", "P25", "DPMR", "NXDN-VN"];
 const modeHelp = {
-  AUTO: "Select AM for airband and WFM for FM broadcasts. Check other strong signals for AM or narrow FM.",
+  AUTO: "Select AM for airband, WFM for FM broadcasts, or detect a supported digital voice signal.",
   FM: "Receive narrowband FM voice, such as PMR446 and many two-way radios.",
   WFM: "Receive wideband FM broadcast stations.",
   AM: "Receive amplitude-modulated signals, including civil VHF airband.",
@@ -97,6 +109,9 @@ let actionRevision = 0;
 let stateRequestPending = false;
 let nextStateRequestAt = -Infinity;
 let lastStateAt = -Infinity;
+let receiverOffline = false;
+let selectedRepeater;
+const repeaterDirectory = new Map();
 let overlay;
 let overlayCursor;
 let favoriteToClear;
@@ -137,6 +152,12 @@ let powerPending = false;
 let resumeSession;
 let restoringSession = false;
 let reportTimer = 0;
+let settingsSync;
+let applyingSharedSettings = false;
+let sharedRuntime = {};
+let syncStarting;
+const syncEnabledKey = "settings_sync_enabled";
+const syncRuntimeKey = "profile_runtime";
 
 function getPreference(key, fallback) {
   try {
@@ -157,6 +178,7 @@ function setPreference(key, value) {
   }
   if (key === "audio_boost" || key === "volume" || key === "volume_muted") updateAudioGain();
   render();
+  settingsChanged();
 }
 
 function panelSettings() {
@@ -185,6 +207,7 @@ function rememberPanelSettings() {
   if (current === panelSettingsSaved) return;
   panelSettingsSaved = current;
   try { localStorage.setItem(preferencePrefix + panelSettingsKey, current); } catch {}
+  settingsChanged();
   const scopeSpan = selectedScanScopeSpan();
   if (scopeSpan === previousScanScopeSpan) return;
   previousScanScopeSpan = scopeSpan;
@@ -198,6 +221,167 @@ function rememberPanelSettings() {
       return {v10: "scan_control", operation: "scope_span", scope_span_hz};
     }
   }).catch(showError);
+}
+
+function getClientSettings() {
+  return snapshotClientSettings((key, fallback) => key === "volume" ? audioVolume : getPreference(key, fallback), panelSettings());
+}
+
+function restoreClientSettings(data) {
+  const saved = validateClientSettings(data);
+  const keys = [...CLIENT_SETTING_KEYS, "quick_menu"];
+  let previous;
+  try {
+    previous = new Map(keys.map(key => [key, localStorage.getItem(preferencePrefix + key)]));
+    for (const key of keys) {
+      if (Object.hasOwn(saved, key)) localStorage.setItem(preferencePrefix + key, JSON.stringify(saved[key]));
+      else localStorage.removeItem(preferencePrefix + key);
+    }
+  } catch {
+    if (previous) for (const [key, value] of previous) {
+      try {
+        if (value === null) localStorage.removeItem(preferencePrefix + key);
+        else localStorage.setItem(preferencePrefix + key, value);
+      } catch {}
+    }
+    throw new Error("The browser could not store these settings. Allow site storage before restoring.");
+  }
+  Object.assign(ui, saved.panel_display);
+  panelSettingsSaved = JSON.stringify(panelSettings());
+  previousScanScopeSpan = selectedScanScopeSpan();
+  audioVolume = saved.volume;
+  volumeMuted = saved.volume_muted;
+  resetScope();
+  updateAudioGain();
+  render();
+  settingsChanged();
+}
+
+const dialPreferenceKeys = Object.keys(snapshotDialPreferences((key, fallback) => fallback));
+const runtimePreferenceKeys = ["profile_tune", "profile_squelch", "profile_history_logging"];
+
+function validSharedRuntime(value) {
+  if (!value || Array.isArray(value) || typeof value !== "object"
+      || Object.keys(value).some(key => !runtimePreferenceKeys.includes(key))) return false;
+  if (Object.hasOwn(value, "profile_squelch") && (!finite(value.profile_squelch)
+      || value.profile_squelch < 0 || value.profile_squelch > 1)) return false;
+  if (Object.hasOwn(value, "profile_history_logging") && typeof value.profile_history_logging !== "boolean") return false;
+  const tune = value.profile_tune;
+  return tune === undefined || tune && Object.keys(tune).length === 5
+    && ["hz", "mode", "frequency_mode", "group", "slot"].every(key => Object.hasOwn(tune, key))
+    && Number.isSafeInteger(tune.hz) && tune.hz >= minimumHz && tune.hz <= maximumHz
+    && [...modeOrder, "NFM", "dPMR"].includes(tune.mode) && ["vfo", "memory"].includes(tune.frequency_mode)
+    && Number.isSafeInteger(tune.group) && tune.group >= 0 && tune.group <= 100
+    && Number.isSafeInteger(tune.slot) && tune.slot >= 0 && tune.slot < 200;
+}
+
+function getSharedSettings() {
+  return {...getClientSettings(), ...snapshotDialPreferences(getPreference), ...sharedRuntime};
+}
+
+function applySharedSettings(data) {
+  if (!data || Array.isArray(data) || typeof data !== "object") throw new Error("Invalid saved radio setup.");
+  const allowed = new Set([...CLIENT_SETTING_KEYS, ...dialPreferenceKeys, ...runtimePreferenceKeys]);
+  if (Object.keys(data).some(key => !allowed.has(key))) throw new Error("Unsupported saved radio setting.");
+  const pick = keys => Object.fromEntries(keys.filter(key => Object.hasOwn(data, key)).map(key => [key, data[key]]));
+  const client = validateClientSettings(pick(CLIENT_SETTING_KEYS));
+  const dials = validateDialPreferences(pick(dialPreferenceKeys));
+  const runtime = pick(runtimePreferenceKeys);
+  if (!validSharedRuntime(runtime)) throw new Error("Invalid saved tuning settings.");
+  const previousRuntime = sharedRuntime;
+  const keys = [...CLIENT_SETTING_KEYS, ...dialPreferenceKeys, "quick_menu", syncRuntimeKey];
+  const previous = new Map(keys.map(key => [key, localStorage.getItem(preferencePrefix + key)]));
+  applyingSharedSettings = true;
+  try {
+    for (const [key, value] of Object.entries(dials)) localStorage.setItem(preferencePrefix + key, JSON.stringify(value));
+    localStorage.setItem(preferencePrefix + syncRuntimeKey, JSON.stringify(runtime));
+    sharedRuntime = runtime;
+    restoreClientSettings(client);
+  } catch (error) {
+    sharedRuntime = previousRuntime;
+    for (const [key, value] of previous) {
+      try {
+        if (value === null) localStorage.removeItem(preferencePrefix + key);
+        else localStorage.setItem(preferencePrefix + key, value);
+      } catch {}
+    }
+    throw error;
+  } finally {
+    applyingSharedSettings = false;
+  }
+}
+
+function expandSharedChanges(changes, current) {
+  const expanded = {...changes};
+  for (const key of Object.keys(changes)) {
+    if (!/^(?:dial_[a-j]|main_dial)_(?:function|press|sensitivity)$/.test(key)) continue;
+    const prefix = key.replace(/_(?:function|press|sensitivity)$/, "");
+    for (const suffix of ["function", "press", "sensitivity"]) expanded[prefix + "_" + suffix] = current[prefix + "_" + suffix];
+  }
+  return expanded;
+}
+
+function settingsChanged() {
+  if (!applyingSharedSettings) settingsSync?.changed();
+}
+
+function captureSharedRuntime() {
+  if (restoringSession || !state.power || !Number.isSafeInteger(state.tune_hz)) return;
+  sharedRuntime = {
+    profile_tune: {hz: state.tune_hz, mode: vfoMode(), frequency_mode: receiver().frequency_mode ?? "vfo",
+      group: receiver().group ?? 0, slot: receiver().slot ?? 0},
+    profile_squelch: state.squelch, profile_history_logging: Boolean(state.discovery_enabled),
+  };
+  try { localStorage.setItem(preferencePrefix + syncRuntimeKey, JSON.stringify(sharedRuntime)); } catch {}
+  settingsChanged();
+}
+
+function rememberRestoredSetup(runtime) {
+  if (!runtime?.tune) return;
+  const saved = {
+    profile_tune: {...runtime.tune, frequency_mode: runtime.frequency_mode, group: runtime.group, slot: runtime.slot},
+    profile_squelch: runtime.squelch, profile_history_logging: runtime.history_logging,
+  };
+  if (!validSharedRuntime(saved)) return;
+  sharedRuntime = saved;
+  try { localStorage.setItem(preferencePrefix + syncRuntimeKey, JSON.stringify(saved)); } catch {}
+  settingsChanged();
+}
+
+function syncStatus(status) {
+  const button = control("settings-sync");
+  if (!button) return;
+  const enabled = getPreference(syncEnabledKey, true) !== false;
+  pressed(button, enabled);
+  button.dataset.syncStatus = !enabled ? "off" : status === "offline" ? "error"
+    : status === "saved" ? "saved" : "pending";
+  setText("sync-status", !enabled ? "LOCAL" : status === "saved" ? "SAVED"
+    : status === "offline" ? "RETRY" : status === "saving" ? "SAVING" : "LOADING");
+  const stateLabel = !enabled ? "Off — this browser keeps its own settings."
+    : status === "saved" ? "Saved on the radio host."
+    : status === "offline" ? "Waiting for the radio host; local settings are retained."
+    : "Loading or saving the shared setup.";
+  button.title = "Sync all A–J and MAIN dial settings: functions, press actions, sensitivities and Auto TS acceleration.\n"
+    + "Also syncs P1/P2 buttons, audio, display, scope, bookmarks and menu settings between browsers.\n" + stateLabel;
+  button.setAttribute("aria-description", button.title);
+}
+
+async function startSettingsSync(publishLocal = false) {
+  if (!settingsSync || getPreference(syncEnabledKey, true) === false || access.pin_required) return;
+  if (settingsSync.enabled && !publishLocal) return syncStarting;
+  syncStarting = settingsSync.start({publishLocal});
+  try { await syncStarting; } finally { syncStarting = undefined; }
+}
+
+async function toggleSettingsSync() {
+  const enabled = getPreference(syncEnabledKey, true) === false;
+  try { localStorage.setItem(preferencePrefix + syncEnabledKey, JSON.stringify(enabled)); } catch {}
+  if (!enabled) settingsSync.stop();
+  else {
+    syncStatus("loading");
+    await startSettingsSync(true);
+  }
+  if (!enabled) syncStatus("off");
 }
 
 const receiver = () => state.v10 || {};
@@ -262,14 +446,40 @@ function sessionUrl(path, includeRadio = true) {
   return url;
 }
 
-async function request(path, { method = "GET", body } = {}) {
-  const response = await fetch(sessionUrl(path, path !== "/api/access" && path !== "/api/state"), {
-    method, cache: "no-store",
-    ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
-  });
-  const isJson = response.headers.get("content-type")?.includes("application/json");
-  const data = isJson ? await response.json() : null;
+class ReceiverConnectionError extends Error {}
+
+function showReceiverOffline() {
+  if (receiverOffline) return;
+  receiverOffline = true;
+  setText("status", "RECEIVER OFFLINE");
+  syncMirror();
+}
+
+async function request(path, { method = "GET", body, headers = {} } = {}) {
+  const url = sessionUrl(path, path !== "/api/access" && path !== "/api/state");
+  if (path === "/api/state" && Array.isArray(state.v10?.memories) && state.v10.memory_revision) {
+    headers = {...headers, "X-SDR-Memory-Revision": state.v10.memory_revision};
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), path === "/api/settings/restore" ? 30000
+    : method === "GET" ? receiverReadTimeout : receiverWriteTimeout);
+  let response, data;
+  try {
+    response = await fetch(url, {
+      method, cache: "no-store", signal: controller.signal,
+      headers: {...headers, ...(body === undefined ? {} : {"Content-Type": "application/json"})},
+      ...(body === undefined ? {} : {body: JSON.stringify(body)}),
+    });
+    data = response.headers.get("content-type")?.includes("application/json") ? await response.json() : null;
+  } catch (error) {
+    if (!controller.signal.aborted && !(error instanceof TypeError)) throw error;
+    if (path !== "/api/state" && path !== "/api/profile") showReceiverOffline();
+    throw new ReceiverConnectionError("Receiver connection lost. Try again when it reconnects.");
+  } finally {
+    clearTimeout(timeout);
+  }
   if (response.status === 401 && path !== "/api/access") {
+    settingsSync?.stop();
     access = { ...access, ...(data || {}), pin_required: true };
     openPanel("pin");
     stopLiveAudio();
@@ -277,8 +487,11 @@ async function request(path, { method = "GET", body } = {}) {
   }
   if (!response.ok) {
     if (response.status === 409 && path === "/api/action" && data?.radio_id !== undefined) applyState(data);
-    throw new Error(data?.error || data?.v10_error ||
+    const error = new Error(data?.error || data?.v10_error ||
       (response.status === 409 ? "The receiver changed. Try the action again." : "Receiver request failed."));
+    error.status = response.status;
+    error.data = data;
+    throw error;
   }
   return data;
 }
@@ -300,6 +513,11 @@ function act(action) {
     applyState(next);
     if (next?.v10_error) throw new Error(next.v10_error);
     if (payload.v10 === "scan" && payload.enabled) setPreference("last_scan", payload);
+    if (payload.v10 === "tune" || payload.v10 === "frequency_mode"
+        || payload.v10 === "memory" && payload.operation === "recall"
+        || payload.knob === "squelch" || payload.knob === "volume" && payload.value > 0 || payload.discovery) {
+      captureSharedRuntime();
+    }
     return next;
   });
   actionChain = result.catch(() => {}).finally(() => { --actionCount; });
@@ -319,11 +537,8 @@ async function refreshState() {
       if (state.power) resumeSession = null;
       else if (resumeSession) await powerOn(true);
     }
-  } catch (error) {
-    if (!access.pin_required && revision === actionRevision) {
-      view.status.textContent = "RECEIVER OFFLINE";
-      syncMirror();
-    }
+  } catch {
+    if (!access.pin_required && revision === actionRevision) showReceiverOffline();
   } finally {
     stateRequestPending = false;
   }
@@ -336,12 +551,22 @@ async function refresh() {
 
 function applyState(next) {
   if (!next) return;
+  if (next.v10?.memory_revision && next.v10.memory_revision === state.v10?.memory_revision
+      && !Object.hasOwn(next.v10, "memories")) {
+    next.v10.memories = state.v10.memories;
+  }
   lastStateAt = performance.now();
+  if (receiverOffline && state.power && !next.power && next.radio_id === null) {
+    resumeSession ??= savedListeningSession();
+  }
+  receiverOffline = false;
   if (next.power && next.volume > 0 && state.volume !== next.volume) {
     try { localStorage.setItem(preferencePrefix + "powerVolume", JSON.stringify(next.volume)); } catch {}
   }
   const wasOn = state.power;
   state = next;
+  if (selectedRepeater && (!state.power || selectedRepeater.hz !== state.tune_hz
+      || selectedRepeater.mode !== state.modulation)) selectedRepeater = undefined;
   rememberListeningSession();
   if (!state.power && wasOn) {
     if (state.radio_id != null) clearListeningSession();
@@ -357,7 +582,7 @@ function applyState(next) {
 }
 
 function showError(error) {
-  if (access.pin_required) return;
+  if (access.pin_required || error instanceof ReceiverConnectionError) return;
   view.message.textContent = error.message || String(error);
   openPanel("message");
 }
@@ -430,11 +655,14 @@ function selectOverlay() {
 }
 
 function configurePinInput(setupCode) {
+  root.classList.toggle("mobile-pin-code", setupCode);
   const field = view["pin-input"];
   field.value = "";
-  field.inputMode = setupCode ? "text" : "numeric";
-  field.maxLength = setupCode ? 32 : 6;
-  field.pattern = setupCode ? "[0-9A-Fa-f]{32}" : "[0-9]{6}";
+  field.inputMode = root.classList.contains("mobile-view") ? "none" : setupCode ? "text" : "numeric";
+  if (setupCode) field.maxLength = 32;
+  else field.removeAttribute("maxlength");
+  field.pattern = setupCode ? "[0-9A-Fa-f]{32}" : "[0-9]+";
+  field.title = setupCode ? "Enter the setup code issued by the scanner host." : "Enter a PIN using digits only.";
   for (const key of lcd.querySelectorAll("[data-pin-code-key]")) key.hidden = !setupCode;
 }
 
@@ -448,12 +676,15 @@ function openPanel(name) {
     setText("pin-title", "REMOTE ACCESS");
     setText("pin-label", "Enter PIN");
   }
-  if (menu?.isOpen()) menu.close();
+  if (menu?.isOpen() && !root.classList.contains("mobile-view")) menu.close();
   setOverlayCursor(null);
   overlayField = null;
   overlay = name;
+  root.classList.toggle("mobile-entry", ["frequency", "pin", "mobile-channel-entry", "scope-value"].includes(name));
+  root.classList.toggle("mobile-scope-entry", name === "scope-value");
   panels.forEach(panel => { panel.hidden = panel.dataset.panel !== name; });
-  lcdContent.inert = Boolean(name);
+  lcdContent.inert = Boolean(name || menu?.isOpen());
+  menusRoot.inert = Boolean(name);
   control("mode").setAttribute("aria-expanded", String(name === "mode"));
   if (name === "mode") {
     showModes();
@@ -462,14 +693,25 @@ function openPanel(name) {
   if (name === "frequency") {
     view["frequency-error"].hidden = true;
     view["frequency-input"].value = finite(state.tune_hz) ? (state.tune_hz / 1e6).toFixed(6) : "";
+    view["frequency-input"].inputMode = root.classList.contains("mobile-view") ? "none" : "decimal";
     setOverlayCursor(view["frequency-input"], true);
     view["frequency-input"].select();
   }
   if (name === "pin") {
+    if (root.classList.contains("mobile-view") && !pinSetup?.needsCode) view["pin-input"].inputMode = "none";
     setOverlayCursor(view["pin-input"], true);
     view["pin-input"].select();
   }
+  if (name === "mobile-channel-entry") {
+    view["mobile-channel-input"].value = "";
+    view["mobile-channel-error"].hidden = true;
+    setOverlayCursor(view["mobile-channel-input"], true);
+  }
   if (name === "scope-value" || name === "message" || name === "favorite-clear") setOverlayCursor(panelItems()[0], true);
+  if (root.classList.contains("mobile-view")) {
+    activePanel()?.querySelectorAll("input").forEach(field => { field.inputMode = "none"; });
+  }
+  renderMobileControls();
   syncMirror();
 }
 
@@ -478,9 +720,9 @@ function closeOverlay() {
   openPanel(null);
 }
 
-function openMenu(page) {
+function openMenu(page, options) {
   if (overlay) openPanel(null);
-  menu.open(page);
+  menu.open(page, options);
 }
 
 function receiverHz() {
@@ -496,24 +738,36 @@ async function tune(hz, mode = vfoMode()) {
 }
 
 function parseFrequency(value, current = 0) {
-  const entry = value.trim().replace(/^(\d{1,4}\.\d{3})\.(\d{3})$/, "$1$2");
+  let entry = value.trim().replace(/^(\d{1,4}\.\d{3})\.(\d{3})$/, "$1$2");
+  // Compact entry uses three MHz digits, or four for a full 10-digit GHz entry.
+  if (/^\d{5,9}$/.test(entry)) entry = entry.slice(0, 3) + "." + entry.slice(3);
+  else if (/^\d{10}$/.test(entry)) entry = entry.slice(0, 4) + "." + entry.slice(4);
   if (!/^(?:\d+\.?\d*|\.\d+)$/.test(entry)) return NaN;
   const mhz = entry.startsWith(".") ? Math.floor(current / 1e6) + Number(entry) : Number(entry);
   return Math.round(mhz * 1e6);
 }
 
 async function wakeReceiver() {
-  const saved = resumeSession;
+  const shared = settingsSync?.enabled ? structuredClone(sharedRuntime) : {};
+  const selection = shared.profile_tune;
+  const saved = selection ? {hz: selection.hz, mode: selection.mode, volume: lastVolume(),
+    memory: selection.frequency_mode === "memory" ? {group: selection.group, slot: selection.slot} : null} : resumeSession;
   resumeSession = null;
-  restoringSession = Boolean(saved);
+  restoringSession = Boolean(saved) || Object.keys(shared).length > 0;
   try {
     const volume = saved && finite(saved.volume) ? clamp(saved.volume, 0.01, 1) : lastVolume();
     const active = await act({knob: "volume", value: volume, panel: "v10"});
-    if (!saved || !active?.power || active.radio_shared) return;
-    const memory = active.v10?.memories?.find(entry => saved.memory && entry.group === saved.memory.group
+    if (!active?.power || active.radio_shared) return;
+    const memory = active.v10?.memories?.find(entry => saved?.memory && entry.group === saved.memory.group
       && entry.slot === saved.memory.slot && entry.hz === saved.hz && entry.mode === saved.mode);
     if (memory) await act({v10: "memory", operation: "recall", group: memory.group, slot: memory.slot});
-    else if (active.tune_hz !== saved.hz || vfoMode() !== saved.mode) await tune(saved.hz, saved.mode);
+    else if (saved && (active.tune_hz !== saved.hz || vfoMode() !== saved.mode)) await tune(saved.hz, saved.mode);
+    if (finite(shared.profile_squelch) && state.squelch !== shared.profile_squelch) {
+      await act({knob: "squelch", value: shared.profile_squelch});
+    }
+    if (typeof shared.profile_history_logging === "boolean" && state.discovery_enabled !== shared.profile_history_logging) {
+      await act({discovery: "toggle"});
+    }
   } catch (error) {
     if (saved && !state.power) resumeSession = saved;
     throw error;
@@ -538,6 +792,7 @@ async function powerOn(resuming = false) {
       return;
     }
     closeOverlay();
+    await startSettingsSync();
     await wakeReceiver();
   } finally {
     powerPending = false;
@@ -556,6 +811,7 @@ async function unlock(event) {
     field.value = "";
     error.hidden = true;
     closeOverlay();
+    await startSettingsSync();
     await wakeReceiver();
   } catch (problem) {
     error.textContent = problem.message;
@@ -570,7 +826,7 @@ function openPinSetup() {
   pinSetup = {firstEntry: null, saving: false, needsCode: !access.can_program_pin, setupCode: null};
   setText("pin-title", "SET PIN");
   configurePinInput(pinSetup.needsCode);
-  setText("pin-label", pinSetup.needsCode ? "One-time setup code from the scanner host" : "New six-digit PIN");
+  setText("pin-label", pinSetup.needsCode ? "One-time setup code from the scanner host" : "New PIN · digits only");
   syncMirror();
 }
 
@@ -586,7 +842,7 @@ async function savePin(field) {
     setup.setupCode = digits.toLowerCase();
     setup.needsCode = false;
     configurePinInput(false);
-    setText("pin-label", "New six-digit PIN");
+    setText("pin-label", "New PIN · digits only");
     return;
   }
   if (setup.firstEntry === null) {
@@ -596,7 +852,7 @@ async function savePin(field) {
   }
   const matches = digits === setup.firstEntry;
   setup.firstEntry = null;
-  setText("pin-label", "New six-digit PIN");
+  setText("pin-label", "New PIN · digits only");
   if (!matches) {
     error.textContent = "The PINs differ. Enter the new PIN again.";
     error.hidden = false;
@@ -606,7 +862,10 @@ async function savePin(field) {
   try {
     const body = setup.setupCode ? {new_pin: digits, setup_code: setup.setupCode} : {new_pin: digits};
     access = await request("/api/access", {method: "POST", body});
-    if (pinSetup === setup) openMenu("set");
+    if (pinSetup === setup) {
+      if (root.classList.contains("mobile-view") && menu.isOpen()) openPanel(null);
+      else openMenu("set");
+    }
   } catch {
     if (pinSetup !== setup) return;
     if (setup.setupCode) {
@@ -860,10 +1119,10 @@ function captureSpan() {
   return ui.frame?.span_hz ?? spans.at(-1);
 }
 
-function fullScopeRange() {
-  if (!ui.frame) return null;
-  const low = ui.frame.center_hz - Math.floor(ui.frame.span_hz / 2);
-  return [low, low + ui.frame.span_hz];
+function fullScopeRange(frame = ui.frame) {
+  if (!frame) return null;
+  const low = frame.center_hz - Math.floor(frame.span_hz / 2);
+  return [low, low + frame.span_hz];
 }
 
 function scopeSpans() {
@@ -951,6 +1210,8 @@ function scopeRange() {
 }
 
 const scopeFrequencyAt = (range, fraction) => range[0] + (range[1] - range[0]) * fraction;
+const waterfallRowRange = (frame, range, followCapture) => followCapture && frame ? fullScopeRange(frame) : range;
+const scopeSpectrumHeight = waterfall => waterfall ? Math.floor(canvas.height * scopeSpectrumFraction) : canvas.height;
 
 function sampleAt(frame, row, hz) {
   const index = Math.floor((hz - frame.center_hz + Math.floor(frame.span_hz / 2)) / frame.span_hz * row.length);
@@ -1031,6 +1292,33 @@ function drawTrace(range, frame, row, divide, reference, color, fill) {
   return peak;
 }
 
+const savedScopeMarkerWidth = 6;
+const savedScopeMarkerSpanHz = 1250;
+
+function savedScopeMarkerPixels(span) {
+  // Give each saved frequency a small visual band that expands with scope zoom.
+  return Math.max(savedScopeMarkerWidth, canvas.width * Math.min(savedScopeMarkerSpanHz, span) / span);
+}
+
+function savedScopeMemories(range) {
+  return (receiver().memories ?? []).filter(entry =>
+    Number.isSafeInteger(entry.hz) && entry.hz >= range[0] && entry.hz <= range[1]);
+}
+
+function drawSavedScopeMarkers(range, frequencies, height) {
+  const markerWidth = savedScopeMarkerPixels(range[1] - range[0]);
+  context.save();
+  for (const hz of frequencies) {
+    const x = (hz - range[0]) / (range[1] - range[0]) * canvas.width;
+    if (!finite(x) || x < 0 || x > canvas.width) continue;
+    context.fillStyle = "rgba(255,201,133,0.12)";
+    context.fillRect(x - markerWidth / 2, 0, markerWidth, height);
+    context.fillStyle = "rgba(255,201,133,0.38)";
+    context.fillRect(Math.floor(x), 0, 1, height);
+  }
+  context.restore();
+}
+
 let previousScopeDraw;
 function drawScope(frame, history, range, options, average, maxTrace) {
   view["scope-nearby-sweep"].hidden = !options.nearbySweep;
@@ -1040,26 +1328,32 @@ function drawScope(frame, history, range, options, average, maxTrace) {
   view["waterfall-listening"].hidden = !listening || !options.waterfall;
   const { width, height } = canvas;
   const showWaterfall = options.waterfall;
-  const divide = showWaterfall ? Math.floor(height * scopeSpectrumFraction) : height;
+  const divide = scopeSpectrumHeight(showWaterfall);
   const reference = Number(options.reference) || 0;
   const colors = Object.hasOwn(waterfallPalettes, options.palette) ? waterfallPalettes[options.palette] : waterfallPalettes.spectrum;
   const drawKey = [frame?.sequence, frame?.time_ms, range[0], range[1], options.marker, options.hz,
-    reference, options.squelchDb, options.channelDb, options.waterfall, options.palette, options.scopeHold, options.maxHold, history.length].join(":");
+    reference, options.squelchDb, options.channelDb, options.waterfall, options.followCapture, options.palette,
+    options.scopeHold, options.maxHold, history.length, options.savedFrequencies?.join(",")].join(":");
   if (drawKey === previousScopeDraw) return;
   previousScopeDraw = drawKey;
   context.fillStyle = "#050a12";
   context.fillRect(0, 0, width, height);
+  let markerHeight = height;
   if (frame && showWaterfall) {
     const strip = context.createImageData(width, height - divide);
     for (let y = 0; y < strip.height && y < history.length; y++) {
       const historical = history[y];
       const historicalFrame = Array.isArray(historical) ? frame : historical;
       const row = historical.levels ?? historical;
+      const rowRange = waterfallRowRange(historicalFrame, range, options.followCapture);
+      if (markerHeight === height && (rowRange[0] !== range[0] || rowRange[1] !== range[1])) {
+        markerHeight = divide + y;
+      }
       const noise = waterfallFloor(row);
       if (!finite(noise)) continue;
       const bottom = noise + waterfallNoiseMarginDb + reference;
       for (let x = 0; x < width; x++) {
-        const value = sampleAt(historicalFrame, row, scopeFrequencyAt(range, (x + 0.5) / width));
+        const value = sampleAt(historicalFrame, row, scopeFrequencyAt(rowRange, (x + 0.5) / width));
         if (!finite(value)) continue;
         const fraction = clamp((value - bottom) / waterfallContrastDb, 0, 1);
         const color = colors[Math.round(fraction * (colors.length - 1))];
@@ -1086,6 +1380,7 @@ function drawScope(frame, history, range, options, average, maxTrace) {
   if (frame) {
     const row = average?.length ? average : frame.levels;
     drawTrace(range, frame, row, divide, reference, "", true);
+    drawSavedScopeMarkers(range, options.savedFrequencies ?? [], divide);
     if (maxTrace?.length) drawTrace(range, frame, maxTrace, divide, reference, "#6d9867", false);
     const peak = drawTrace(range, frame, row, divide, reference, "#68e4f2", false);
     if (options.marker && peak) {
@@ -1101,7 +1396,7 @@ function drawScope(frame, history, range, options, average, maxTrace) {
   if (finite(options.hz) && x >= 0 && x <= width) {
     context.strokeStyle = "#7ab491";
     context.setLineDash([4, 4]);
-    context.beginPath(); context.moveTo(x, 0); context.lineTo(x, height); context.stroke();
+    context.beginPath(); context.moveTo(x, 0); context.lineTo(x, markerHeight); context.stroke();
     context.setLineDash([]);
   }
   const squelch = view["scope-squelch"];
@@ -1143,11 +1438,17 @@ function scopeBitmap() {
 
 let displayedScopeRange;
 let scopePointer;
-function scopeHzAt(event, bounds = canvas.getBoundingClientRect()) {
+function scopeHitAt(event, bounds = canvas.getBoundingClientRect()) {
   const border = canvas.clientLeft;
   const width = bounds.width - 2 * border;
   const fraction = width > 0 ? clamp((event.clientX - bounds.left - border) / width, 0, 1) : 0;
-  return Math.round(scopeFrequencyAt(displayedScopeRange ?? scopeRange(), fraction));
+  const height = bounds.height - 2 * canvas.clientTop;
+  const y = height > 0 ? Math.floor((event.clientY - bounds.top - canvas.clientTop) * canvas.height / height) : 0;
+  const divide = scopeSpectrumHeight(getPreference("scope_waterfall", true));
+  const inWaterfall = y >= divide && y < canvas.height;
+  const frame = inWaterfall ? ui.history[y - divide] : ui.frame;
+  const range = waterfallRowRange(frame, displayedScopeRange ?? scopeRange(), inWaterfall && scopeMode() === "CAPTURE");
+  return {hz: Math.round(scopeFrequencyAt(range, fraction)), frame, span: range[1] - range[0]};
 }
 
 function scopeWheelStep() {
@@ -1158,7 +1459,7 @@ function scopeWheelStep() {
 function scopeSelectionAt(event) {
   const samePointer = event.pointerType !== "touch" && !event.sourceCapabilities?.firesTouchEvents && scopePointer
     && Math.abs(scopePointer.clientX - event.clientX) < 1 && Math.abs(scopePointer.clientY - event.clientY) < 1;
-  return scopeHzAt(samePointer ? scopePointer : event);
+  return scopeHitAt(samePointer ? scopePointer : event);
 }
 
 function showScopeTip(event) {
@@ -1180,10 +1481,17 @@ function refreshScopeTip() {
     return;
   }
   const bounds = lcd.getBoundingClientRect();
-  tip.textContent = formatAxis(scopeHzAt(scopePointer, plot)) + " MHz";
+  const hit = scopeHitAt(scopePointer, plot);
+  const radius = hit.span * savedScopeMarkerPixels(hit.span) / (2 * canvas.width);
+  const matches = savedScopeMemories([hit.hz - radius, hit.hz + radius]);
+  const labels = matches.map(entry => {
+    const address = (entry.group === 100 ? "Auto" : "Bank " + digits(entry.group)) + " CH" + digits(entry.slot);
+    return entry.name ? entry.name + " · " + address : address;
+  });
+  tip.textContent = [formatAxis(hit.hz) + " MHz", ...labels].join("\n");
   tip.hidden = false;
   tip.style.left = clamp(clientX - bounds.left + 8, 4, lcd.clientWidth - tip.offsetWidth - 4) + "px";
-  tip.style.top = Math.max(3, clientY - bounds.top - 25) + "px";
+  tip.style.top = Math.max(3, clientY - bounds.top - tip.offsetHeight - 8) + "px";
 }
 
 function updateScope() {
@@ -1212,7 +1520,9 @@ function updateScope() {
   const scopeOptions = { marker: ui.marker, hz: mode === "CENTER" && tuned !== null ? midpoint : tuned,
     reference: getPreference("scope_reference", 0),
     waterfall: getPreference("scope_waterfall", true), palette: getPreference("waterfall_colours", "spectrum"),
+    followCapture: mode === "CAPTURE",
     scopeHold: ui.freeze,
+    savedFrequencies: state.power ? [...new Set(savedScopeMemories(range).map(entry => entry.hz))] : [],
     maxHold: getPreference("scope_max_hold", "off"), nearbySweep: Boolean(state.power && receiver().nearby_sweeping),
     nearbyListening: state.power && state.receiver === "ready" && receiver().nearby_sweeping && !activeScan(),
     squelchDb: state.power && (isMirror || state.squelch > 0) ? state.squelch_db : null, channelDb };
@@ -1351,12 +1661,14 @@ function receiverStatus() {
   if (receiver().scan_kind || state.scan_active || state.search_active) {
     const kind = receiver().scan_kind;
     const zone = receiver().scan_zone;
-    const scan = kind === "SIMPLE" ? "S.SCAN" : customPresetName(zone) || ZONE_NAMES[zone] || kind || "SCAN";
+    const customName = customPresetName(zone);
+    const scan = kind === "SIMPLE" ? "S.SCAN" : customName || ZONE_NAMES[zone] || kind || "SCAN";
+    const label = kind === "ZONE" && scanZones().length > 1 ? "MULTI · " + scan : scan;
     if (kind === "ZONE") {
-      if (receiver().scan_held) return scan + " HOLD";
-      if (receiver().scan_paused) return (customPresetName(zone) || scan.toUpperCase()) + " PAUSE";
+      if (receiver().scan_held) return label + " HOLD";
+      if (receiver().scan_paused) return (customName ? label : label.toUpperCase()) + " PAUSE";
     }
-    return [scan, receiver().scan_direction === -1 ? "◀" : "▶"].join(" ");
+    return [label, receiver().scan_direction === -1 ? "◀" : "▶"].join(" ");
   }
   if (state.digital?.call?.encrypted) return "ENCR";
   if (state.audio_open) return "RECEIVE";
@@ -1380,6 +1692,7 @@ const dialRoleHelp = {
   priority_interval: "Set the time between priority-channel checks.",
   volume: "Adjust listening volume.", audio_boost: "Boost live listening audio without changing AF volume.",
   squelch: "Set the signal level needed to open the audio.", rf_gain: "Adjust gain at the SDR input.",
+  rf_gain_tenths_db: "Adjust tuner gain using the SDR’s supported dB steps.",
   tone_treble: "Adjust the higher audio frequencies.", tone_bass: "Adjust the lower audio frequencies.",
   beep_level: "Adjust the loudness of confirmation beeps.",
   "memory-channel": "Step through saved channels.", "fine-tuning": "Tune in fixed 10 Hz steps.",
@@ -1413,7 +1726,8 @@ function updateDialTooltips() {
       const labelNode = dial.previousElementSibling;
       const visible = assignment.key === "unassigned" ? id : `${id} - ${functionName}`;
       if (labelNode.textContent !== visible) labelNode.textContent = visible;
-      const accessible = `${name === "frequency" ? "Main dial" : "Dial " + id}, ${functionName}`;
+      const accessible = `${name === "frequency" ? "Main dial" : "Dial " + id}, ${functionName}`
+        + (assignment.unavailable ? ", unavailable" : "");
       if (labelNode.title !== accessible) labelNode.title = accessible;
       if (dial.getAttribute("aria-label") !== accessible) dial.setAttribute("aria-label", accessible);
     }
@@ -1430,8 +1744,10 @@ function updateDialTooltips() {
     const press = menu?.pressAction(name);
     const pressHelp = press?.action === "none" ? "No press shortcut during reception."
       : press ? `Press action is ${press.label}.` : "";
+    const gain = ["rf_gain", "rf_gain_tenths_db"].includes(role) ? receiver().tuner_gain : null;
+    const gainLevel = gain?.actual != null ? `Current tuner gain ${(gain.actual / 10).toFixed(1)} dB.` : "";
     const current = (contextual ? contextual + ". Turn to navigate or adjust. Press to select. Right-click to go back."
-      : [label + ".", dialRoleHelp[role], pressHelp].filter(Boolean).join(" "))
+      : [label + ".", assignment?.unavailable || dialRoleHelp[role], gainLevel, pressHelp].filter(Boolean).join(" "))
       + " Hold to configure this dial.";
     if (dial.title !== current) dial.title = current;
   }
@@ -1446,6 +1762,59 @@ function assignedDialAngle(name) {
 function signalMeterFraction() {
   const strength = state.signal_snr_db;
   return state.power && finite(strength) ? clamp((strength - 5) / 40, 0, 1) : 0;
+}
+
+async function loadRepeaterDirectory(band, cache) {
+  const path = "/api/bookmarks/uk/" + band;
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), receiverReadTimeout);
+  try {
+    const response = await fetch(session ? sessionUrl(path, false) : path, {
+      cache: "no-store", signal: controller.signal,
+    });
+    if (!response.ok) return;
+    const {entries} = await response.json();
+    if (!Array.isArray(entries)) return;
+    cache.entries = entries;
+    cache.refreshAt = Date.now() + 60 * 60 * 1000;
+  } catch {
+    // Directory access is optional for tuning, polling, and the read-only LCD.
+  } finally {
+    clearTimeout(deadline);
+    cache.pending = false;
+  }
+  if (!isMirror) render();
+}
+
+function tunedRepeater() {
+  if (!state.power || receiverOffline || !Number.isSafeInteger(state.tune_hz)) return null;
+  const hz = state.tune_hz;
+  const band = repeaterBands.find(([, low, high]) => low <= hz && hz <= high)?.[0];
+  if (!band) return null;
+  let cache = repeaterDirectory.get(band);
+  if (!cache) {
+    cache = {entries: [], refreshAt: 0, pending: false};
+    repeaterDirectory.set(band, cache);
+  }
+  if (!cache.pending && Date.now() >= cache.refreshAt) {
+    cache.pending = true;
+    cache.refreshAt = Date.now() + 60 * 1000;
+    void loadRepeaterDirectory(band, cache);
+  }
+  const mode = receiver().auto_mode && ["FM", "AM"].includes(state.modulation) ? "AUTO" : state.modulation;
+  const selected = selectedRepeater?.hz === hz ? selectedRepeater.callsign : "";
+  return repeaterLabel(cache.entries, hz, mode, getPreference("repeater_locator", ""), selected);
+}
+
+function renderStationName(name = "") {
+  const repeater = tunedRepeater();
+  const repeaterText = repeater?.text ?? "";
+  if (name && name.toUpperCase() === repeaterText.split(" ")[0].toUpperCase()) name = "";
+  const mobileName = root.classList.contains("mobile-view")
+    ? receiver().frequency_mode === "memory" ? currentMemory()?.name || "CHANNEL " + digits(receiver().slot ?? 0) : "VFO"
+    : "";
+  setText("site", [repeaterText, name].filter(Boolean).join(" · ") || mobileName);
+  view.site.title = repeater?.title ?? "";
 }
 
 function render() {
@@ -1470,7 +1839,7 @@ function render() {
     receiver().priority?.enabled ? "PRIO" : "",
     state.muted ? "MUTE" : "",
     supportsSsbDsp(mode) && radioSettings.noise_blanker === true ? "NB" : "",
-    hasAnalogFilter(mode) && radioSettings.noise_reduction === true ? "NR" : "",
+    hasAnalogFilter(mode) && radioSettings.noise_reduction === true && (radioSettings.nr_level ?? 7) > 0 ? "NR" : "",
   ];
   const dialDetails = dmr ? dmrDetails() : state.digital ? digitalDetails(state.digital.call, mode) : [
     [supportsSsbDsp(mode) && radioSettings.agc ? "AGC-" + String(radioSettings.agc).charAt(0).toUpperCase() : "",
@@ -1497,19 +1866,20 @@ function render() {
   setText("rf-options", state.radio_shared ? "LAN" : "");
   setText("rec", state.record_active ? "●" : state.record_enabled ? "Ⅱ" : "");
   setText("antenna", radioSettings.antenna ? "ANT" + radioSettings.antenna : "");
-  setText("site", name || "");
+  renderStationName(name || "");
   setText("flags", flags.filter(Boolean).join(" "));
   setText("detail-a", dialDetails[0]);
   setText("detail-b", dialDetails[1]);
   setText("rds-text", rds?.text || "");
   view["rds-text"].title = rds?.text || "";
   view["rds-text"].hidden = !showRds;
-  setText("status", ui.notice || status);
+  setText("status", receiverOffline ? "RECEIVER OFFLINE" : ui.notice || status);
   view.status.title = trunk?.error || state.dmr?.error || state.digital?.error || receiver().error || "";
   setText("offset", finite(state.tuning_offset_hz) ? Math.round(state.tuning_offset_hz) + " Hz" : "");
   setText("step", "TS " + stepLabel(step));
   root.querySelector(".meter-body i").style.width = meter * 100 + "%";
   pressed(control("power"), state.power);
+  setText("power-status", state.power ? "ON" : "OFF");
   control("power").title = getPreference("screen_capture", false)
     ? "Press to power on or capture the display. Hold for one second to return to standby."
     : "Press to power on. Hold for one second to return to standby.";
@@ -1522,6 +1892,13 @@ function render() {
   recordLamp.classList.toggle("red", recording);
   record.title = recording ? "Recording. Click to stop." : armed ? "Recording armed. Click to disarm."
     : "Arm recording. Audio is saved when a signal opens squelch.";
+  const lcdRecord = control("mobile-record");
+  pressed(lcdRecord, armed);
+  lcdRecord.dataset.recordState = recording ? "recording" : armed ? "armed" : "off";
+  lcdRecord.disabled = !canOperate("record");
+  lcdRecord.setAttribute("aria-label", armed ? "Disable recording" : "Enable recording");
+  lcdRecord.title = record.title;
+  lcdRecord.setAttribute("aria-description", record.title);
   control("speech").title = getPreference("speech_lock_switch", "speech") === "lock"
     ? "Lock or unlock main tuning. Hold to announce the tuned frequency and mode."
     : "Announce the tuned frequency and mode. Hold to lock or unlock main tuning.";
@@ -1577,7 +1954,7 @@ function render() {
   root.querySelectorAll("[data-page]").forEach(key => { key.hidden = Number(key.dataset.page) !== ui.page; });
   lcd.dataset.off = String(!state.power);
   lcd.dataset.scope = ui.visible ? "shown" : "hidden";
-  setLcdExpanded(ui.visible && ui.expanded);
+  setLcdExpanded(ui.visible && ui.expanded && !root.classList.contains("mobile-view"));
   lcd.dataset.displayType = String(getPreference("lcd_type", "A")).toLowerCase();
   lcdContent.style.opacity = clamp(Number(getPreference("lcd_backlight", 100)) / 100, 0, 1);
   const muted = Boolean(state.power && volumeMuted);
@@ -1599,6 +1976,7 @@ function render() {
     knob(name).style.setProperty("--angle", angle + "deg");
   }
   updateDialTooltips();
+  renderMobileControls();
   const scope = updateScope();
   syncMirror(scope);
 }
@@ -1666,6 +2044,7 @@ function syncMirror(scope, force = false) {
     frequency: frequency.textContent, off: lcd.dataset.off, expansion: lcd.dataset.expansion, scope: lcd.dataset.scope,
     brightness: lcdContent.style.opacity, typeStyle: lcd.dataset.displayType, meter: root.querySelector(".meter-body i").style.width,
     showRds: !view["rds-text"].hidden,
+    siteTitle: view.site.title,
     menu: menuSnapshot,
   };
   const key = JSON.stringify([message, mirrorScope.frame?.sequence, mirrorScope.frame?.time_ms,
@@ -1710,6 +2089,7 @@ function renderPublicDisplay(snapshot = null, offline = false) {
   for (const key of mirrorFields) {
     if (!key.startsWith("axis-") && !key.startsWith("scope-")) setText(key, fields[key] ?? "");
   }
+  renderStationName();
   frequency.textContent = state.power ? formatFrequency(state.tune_hz) : "";
   lcd.dataset.off = "false";
   lcd.dataset.scope = state.power ? "shown" : "hidden";
@@ -1732,7 +2112,11 @@ async function fetchPublicDisplay() {
     const response = await fetch("/api/v10/display", {
       cache: "no-store", credentials: "omit", signal: controller.signal,
     });
-    if (!response.ok) throw new Error("Display feed unavailable.");
+    if (!response.ok) {
+      const error = new Error("Display feed unavailable.");
+      error.status = response.status;
+      throw error;
+    }
     const snapshot = await response.json();
     if (typeof snapshot?.power !== "boolean") throw new Error("Invalid display feed.");
     return snapshot;
@@ -1747,24 +2131,28 @@ function startMirror() {
   menusRoot.inert = true;
   renderPublicDisplay();
   let linkedAt = -Infinity;
+  let displayTimer;
+  let displayRequestPending = false;
   const linkIsCurrent = () => performance.now() - linkedAt < mirrorSnapshotMaxAge;
   function displayMessage({ data }) {
     if (data?.type === "alive") {
-      if (!data.powered || data.fresh === false) linkedAt = -Infinity;
+      if (data.powered && data.fresh === false) linkedAt = -Infinity;
       else if (linkIsCurrent()) linkedAt = performance.now();
       return;
     }
     if (data?.type !== "display") return;
-    if (data.off === "true") {
-      linkedAt = -Infinity;
-      return;
-    }
-    if (!linkIsCurrent()) {
+    const wasLinked = linkIsCurrent();
+    if (!wasLinked) {
       state = {};
       resetScope();
     }
     linkedAt = performance.now();
+    if (!wasLinked && !displayRequestPending) {
+      clearTimeout(displayTimer);
+      displayTimer = setTimeout(refreshDisplay, displayUpdateInterval);
+    }
     for (const key of mirrorFields) if (typeof data.fields?.[key] === "string") setText(key, data.fields[key]);
+    view.site.title = data.siteTitle || "";
     frequency.textContent = data.frequency;
     lcd.dataset.off = data.off;
     lcd.dataset.scope = data.scope;
@@ -1817,24 +2205,28 @@ function startMirror() {
     });
     window.opener.postMessage({type: "sdr-lcd-ready"}, location.origin);
   }
-  let displayTimer;
-  let displayRequestPending = false;
   async function refreshDisplay() {
     if (displayRequestPending) return;
     clearTimeout(displayTimer);
     displayRequestPending = true;
     const started = performance.now();
+    let denied = false;
     try {
       mirror?.postMessage({type: linkIsCurrent() ? "probe" : "ready"});
       if (!linkIsCurrent()) {
         const snapshot = await fetchPublicDisplay();
         if (!linkIsCurrent()) renderPublicDisplay(snapshot);
       }
-    } catch {
-      if (!linkIsCurrent()) renderPublicDisplay(null, true);
+    } catch (error) {
+      if (!linkIsCurrent()) {
+        denied = error.status === 403;
+        renderPublicDisplay(null, true);
+        if (denied) setText("status", "REMOTE DISPLAY DISABLED");
+      }
     } finally {
       displayRequestPending = false;
-      const delay = document.hidden ? 1250 : Math.max(20, displayUpdateInterval - (performance.now() - started));
+      const delay = denied ? 5000 : document.hidden ? 1250
+        : Math.max(20, displayUpdateInterval - (performance.now() - started));
       displayTimer = setTimeout(refreshDisplay, delay);
     }
   }
@@ -1863,13 +2255,14 @@ function editNumber(field, key, allowed) {
 }
 
 function editOverlayNumber(key) {
+  if (overlay === "mobile-channel-entry") return editNumber(overlayField, key, /^[0-9]{0,3}$/);
   if (overlay === "frequency" || (overlay === "scope-value" && ui.scopeForm === "edge")) {
-    return editNumber(overlayField, key, /^(?:\d{0,4}(?:\.\d{0,6})?|\d{1,4}\.\d{3}\.\d{0,3})$/);
+    return editNumber(overlayField, key, /^(?:\d{0,10}|\d{0,4}\.\d{0,6}|\d{1,4}\.\d{3}\.\d{0,3})$/);
   }
   if (overlay === "scope-value" && ui.scopeForm === "ref") {
     return editNumber(overlayField, key, /^-?\d{0,2}(?:\.\d?)?$/);
   }
-  if (overlay === "pin") return editNumber(overlayField, key, pinSetup?.needsCode ? /^[0-9a-fA-F]{0,32}$/ : /^\d{0,6}$/);
+  if (overlay === "pin") return editNumber(overlayField, key, pinSetup?.needsCode ? /^[0-9a-fA-F]{0,32}$/ : /^[0-9]*$/);
   return false;
 }
 
@@ -1955,7 +2348,8 @@ function commitScope(event) {
       }
       setPreference("scope_reference", ref);
     }
-    closeOverlay();
+    if (root.classList.contains("mobile-view")) openPanel(null);
+    else closeOverlay();
     render();
   } catch (problem) {
     setText("scope-error", problem.message);
@@ -1972,7 +2366,24 @@ function changeScopeSpeed() {
 }
 
 function canOperate(name) {
-  if (name === "power" || name === "exit") return true;
+  if (name === "mobile-menu") return true;
+  if (["mobile-bank-up", "mobile-bank-down", "mobile-favourites"].includes(name)) {
+    return !overlay && !menu?.isOpen() && !ui.dialLock && canOperate("group-up");
+  }
+  if (["mobile-p1", "mobile-p2", "mobile-lockout", "mobile-simple-scan"].includes(name)
+      && (overlay || menu?.isOpen())) return false;
+  if (["mobile-p1", "mobile-p2"].includes(name)) return Boolean(state.power && !access.pin_required);
+  const mobileAction = {"mobile-back": "exit", "mobile-lockout": "lockout",
+    "mobile-simple-scan": "simple-scan", "mobile-record": "record", "mobile-volume-up": "volume", "mobile-volume-down": "volume", "mobile-mute": "volume"}[name];
+  if (mobileAction) return canOperate(mobileAction);
+  if (["mobile-left", "mobile-right"].includes(name) && (overlay || menu?.isOpen())) {
+    return handheldNavigation() !== "list";
+  }
+  if (["mobile-up", "mobile-down", "mobile-left", "mobile-right", "mobile-ok", "mobile-digit"].includes(name)) {
+    if (menu?.isOpen() || name === "mobile-ok" && !state.power) return true;
+    return canOperate(overlay || menu?.isOpen() ? "dial-c" : "frequency");
+  }
+  if (name === "power" || name === "exit" || name === "settings-sync") return true;
   if (overlay === "pin" && name === "dial-c") return true;
   if (!state.power && canSetPin()) {
     if (name === "menu") return true;
@@ -1988,9 +2399,17 @@ function activeScan() {
 
 const zoneScanning = () => activeScan() === "ZONE";
 
-function scopeTuneAction(hz) {
-  return zoneScanning() ? {v10: "scan_control", operation: "inspect", hz}
+function scopeTuneAction(hz, snap) {
+  const action = zoneScanning() ? {v10: "scan_control", operation: "inspect", hz}
     : {v10: "tune", hz, mode: vfoMode()};
+  return snap ? {...action, snap} : action;
+}
+
+function scopeSnapAt({frame, span}) {
+  if (!getPreference("snap_to_carrier", true)) return null;
+  if (!Number.isSafeInteger(frame?.sequence) || !Number.isSafeInteger(frame.time_ms)) return null;
+  const radius_hz = Math.max(1, Math.round(Math.min(7500, frame.span_hz / frame.levels.length, span / 2)));
+  return {sequence: frame.sequence, time_ms: frame.time_ms, radius_hz};
 }
 
 function scanZones() {
@@ -2009,14 +2428,14 @@ async function togglePresetScan(zone) {
     return zones.length ? {v10: "scan", kind: "ZONE", zones, enabled: true}
       : {v10: "scan", kind: "ZONE", enabled: false};
   });
-  closeOverlay();
+  if (!root.classList.contains("mobile-view")) closeOverlay();
 }
 
 async function scan(hold) {
   const active = activeScan();
   if (active) {
     await act({ v10: "scan", kind: active, enabled: false });
-    closeOverlay();
+    if (!root.classList.contains("mobile-view")) closeOverlay();
     return;
   }
   if (receiver().trunk?.enabled) return act({ v10: "trunk", operation: "stop" });
@@ -2026,7 +2445,7 @@ async function scan(hold) {
     if (settings().scan_screen !== false) openMenu("scan");
     return;
   }
-  openMenu("scan-start");
+  openMenu("scan-start", {nested: root.classList.contains("mobile-view")});
 }
 
 async function simpleScan(direction) {
@@ -2034,7 +2453,7 @@ async function simpleScan(direction) {
   if (enabled && direction) return turnScanDirection(direction);
   await act({v10: "scan", kind: "SIMPLE", enabled: !enabled,
     ...(enabled ? {} : {direction: direction || 1, step: tuningStep()})});
-  closeOverlay();
+  if (!root.classList.contains("mobile-view")) closeOverlay();
 }
 
 async function priority(hold) {
@@ -2227,6 +2646,263 @@ function selectMenuItem() {
   return menu.select();
 }
 
+function updateMobileLayout() {
+  const width = root.getBoundingClientRect().width;
+  const mobile = !isMirror && (width <= 660
+    || width <= 1000 && matchMedia("(pointer: coarse) and (max-height: 500px)").matches);
+  if (root.classList.contains("mobile-view") === mobile) return;
+  root.classList.toggle("mobile-view", mobile);
+  if (menu) {
+    menu.update();
+    render();
+  }
+}
+
+function renderMobileControls() {
+  const navigating = Boolean(overlay || menu?.isOpen());
+  if (root.classList.contains("mobile-favourites-open") && (navigating || !state.power || access.pin_required
+      || ui.dialLock || !root.classList.contains("mobile-view") || !matchMedia("(max-height: 659px)").matches)) {
+    showMobileFavourites(false);
+  }
+  root.classList.toggle("mobile-menu-open", navigating);
+  root.classList.toggle("mobile-overlay-open", Boolean(overlay));
+  const navigation = handheldNavigation();
+  const inMemory = receiver().frequency_mode === "memory";
+  const simpleScanning = activeScan() === "SIMPLE";
+  const group = receiver().group ?? displayedFavoriteBank("a");
+  const bankName = receiver().bank_names?.[group];
+  const channelLabel = inMemory
+    ? [bankName || "BANK " + digits(group), "CH " + digits(receiver().slot ?? 0)].join(" · ")
+    : [bankName || "BANK " + digits(group), "VFO " + receiverModeLabel(state.modulation || "FM")].join(" · ");
+  setText("mobile-channel", channelLabel + (ui.dialLock ? " · LOCK" : ""));
+  setText("mobile-up-label", navigating ? "PREV" : "CH +");
+  setText("mobile-down-label", navigating ? "NEXT" : "CH −");
+  const categories = navigating && navigation === "categories";
+  const caret = navigating && navigation === "caret";
+  for (const [direction, label] of [["up", navigating ? "Previous menu item" : "Next saved channel in this bank"],
+    ["down", navigating ? "Next menu item" : "Previous saved channel in this bank"],
+    ["left", categories ? "Previous menu category" : caret ? "Move cursor left" : navigating ? "Left" : simpleScanning ? "Search downwards" : "Decrease frequency"],
+    ["right", categories ? "Next menu category" : caret ? "Move cursor right" : navigating ? "Right" : simpleScanning ? "Search upwards" : "Increase frequency"]]) {
+    control("mobile-" + direction).setAttribute("aria-label", label);
+    control("mobile-" + direction).title = label;
+  }
+  setText("mobile-left-label", categories ? "PREV" : caret ? "CURSOR" : navigating ? "" : simpleScanning ? "SCAN −" : "FREQ −");
+  setText("mobile-right-label", categories ? "NEXT" : caret ? "CURSOR" : navigating ? "" : simpleScanning ? "SCAN +" : "FREQ +");
+  setText("mobile-volume", volumeMuted ? "MUTED" : "VOL " + Math.round(audioVolume) + "%");
+  pressed(control("mobile-simple-scan"), activeScan() === "SIMPLE");
+  pressed(control("mobile-lockout"), Boolean(receiver().current_lockout || inMemory && currentMemory()?.skip));
+  pressed(control("mobile-mute"), volumeMuted);
+  for (const [key, fallback] of [["p1", "quick"], ["p2", "monitor"]]) {
+    const action = getPreference("mobile_" + key + "_action", fallback);
+    const label = MOBILE_KEY_ACTIONS[action] ?? MOBILE_KEY_ACTIONS[fallback];
+    setText("mobile-" + key + "-label", label);
+    control("mobile-" + key).title = key.toUpperCase() + ": " + label + ". Hold to configure.";
+    pressed(control("mobile-" + key), action === "monitor" ? receiver().monitor : action === "record" ? state.record_enabled
+      : action === "volume" ? volumeMuted : action === "simple-scan" ? activeScan() === "SIMPLE" : false);
+  }
+  for (const button of root.querySelectorAll(".mobile-console [data-action]")) {
+    button.disabled = !canOperate(button.dataset.action);
+    if (button.dataset.action === "mobile-digit" && /^[0-9]$/.test(button.dataset.key)) {
+      const label = navigating ? "Enter digit " + button.dataset.key
+        : "Recall CH" + button.dataset.key + " in " + (bankName || "BANK " + digits(group));
+      button.setAttribute("aria-label", label);
+      button.title = label;
+    }
+  }
+}
+
+function handheldNavigation() {
+  if (overlay) return overlayField && overlayField.selectionStart !== null ? "caret" : "list";
+  return menu?.handheldNavigation() ?? "list";
+}
+
+function mobileDirection(direction) {
+  if (overlay) {
+    if (direction === "up" || direction === "down") return moveOverlay(direction === "up" ? -1 : 1);
+    if (handheldNavigation() === "caret") {
+      const position = direction === "left" ? overlayField.selectionStart - 1 : overlayField.selectionEnd + 1;
+      const cursor = clamp(position, 0, overlayField.value.length);
+      overlayField.setSelectionRange(cursor, cursor);
+    }
+    return;
+  }
+  if (menu.isOpen()) return menu.moveHandheld(direction);
+  if (ui.dialLock) return;
+  if (direction === "left" || direction === "right") {
+    const delta = direction === "left" ? -1 : 1;
+    return activeScan() === "SIMPLE" ? turnScanDirection(delta) : tuneByOffset(delta * tuningStep());
+  }
+  return stepMobileChannel(direction === "up" ? 1 : -1);
+}
+
+function mobileBankEntries(bank) {
+  return (receiver().memories || []).filter(entry => entry.group === bank).sort((a, b) => a.slot - b.slot);
+}
+
+function stepMobileChannel(delta) {
+  const bank = receiver().group ?? displayedFavoriteBank("a");
+  const channels = mobileBankEntries(bank);
+  if (!channels.length) return report("BANK " + digits(bank) + " EMPTY");
+  const index = channels.findIndex(entry => entry.slot === receiver().slot);
+  const start = index === -1 && delta < 0 ? 0 : index;
+  const entry = channels[(start + delta + channels.length) % channels.length];
+  return act({v10: "memory", operation: "recall", group: bank, slot: entry.slot});
+}
+
+function changeMobileBank(delta) {
+  const bank = receiver().group ?? displayedFavoriteBank("a");
+  const banks = [...new Set((receiver().memories || []).map(entry => entry.group))]
+    .filter(group => Number.isInteger(group) && group >= 0 && group < favoriteBankCount).sort((a, b) => a - b);
+  if (!banks.length) return report("NO SAVED BANKS");
+  if (banks.length === 1 && banks[0] === bank && receiver().frequency_mode === "memory") return report("NO OTHER SAVED BANKS");
+  const next = (delta > 0 ? banks.find(group => group > bank) : banks.findLast(group => group < bank))
+    ?? (delta > 0 ? banks[0] : banks.at(-1));
+  const entry = mobileBankEntries(next)[0];
+  return act({v10: "memory", operation: "recall", group: next, slot: entry.slot});
+}
+
+let mobileNavigation = Promise.resolve();
+function queueMobileDirection(direction) {
+  if (overlay || menu.isOpen()) return mobileDirection(direction);
+  return queueMobileNavigation("mobile-" + direction, () => {
+    if (!overlay && !menu.isOpen()) return mobileDirection(direction);
+  });
+}
+
+function queueMobileNavigation(action, run) {
+  // Resolve rapid bank, channel and favourite taps in their original order.
+  const next = mobileNavigation.catch(() => {}).then(() => {
+    if (canOperate(action)) return run();
+  });
+  mobileNavigation = next;
+  return next;
+}
+
+function mobileMenuAction(action, value) {
+  const allowed = action === "monitor" ? "frequency" : action === "recenter-scope" ? "center"
+    : action === "tuning-lock" ? "speech" : action;
+  if (!canOperate(allowed)) return;
+  if (action === "power") {
+    const turningOff = Boolean(state.power);
+    if (turningOff) closeOverlay();
+    return commands.power(turningOff);
+  }
+  if (action === "monitor") return setMonitor(!receiver().monitor);
+  if (action === "tuning-lock") {
+    dialPressActions["tuning-lock"]();
+    closeOverlay();
+    return;
+  }
+  if (action === "speech") return speech(getPreference("speech_lock_switch", "speech") === "lock");
+  if (action === "recenter-scope") return recenterScope();
+  if (action === "scope") {
+    return openMenu("scope-set", {nested: true});
+  }
+  if (action === "reverse-scan") return turnScanDirection(-(receiver().scan_direction || 1));
+  if (action === "hold-preset-scan") return holdPresetScan();
+  if (action === "full-capture") return dialPressActions["full-capture"]();
+  if (action === "scope-hold" || action === "scope-clear") return holdScope(action === "scope-clear");
+  if (action === "scope-visibility") {
+    ui.visible = !ui.visible;
+    ui.expanded = false;
+    return;
+  }
+  if (action === "capture-screen") return snapshotScreen();
+  if (action === "frequency") return commands.frequency(false, frequency, {});
+  if (action === "zone") {
+    if (value === "NEARBY") return act(() => ({v10: "nearby", enabled: !receiver().nearby_enabled}));
+    return commands.zone(false, zoneKeys.find(key => key.dataset.zone === value));
+  }
+  return commands[action]?.(value === true);
+}
+
+function mobileProgramKey(key, held) {
+  if (held) return openMenu("mobile-" + key);
+  if (overlay || menu.isOpen()) return;
+  const action = getPreference("mobile_" + key + "_action", key === "p1" ? "quick" : "monitor");
+  if (action === "none" || !Object.hasOwn(MOBILE_KEY_ACTIONS, action)) return;
+  if (["quick", "bookmarks", "scan-speed", "memory", "group"].includes(action)) return openMenu(action);
+  return mobileMenuAction(action);
+}
+
+function showMobileFavourites(open) {
+  root.classList.toggle("mobile-favourites-open", open);
+  const key = control("mobile-favourites");
+  key.setAttribute("aria-expanded", String(open));
+  key.textContent = open ? "BACK" : "FAV 0–9";
+}
+
+function mobileDigit(held, node) {
+  const key = node.dataset.key;
+  if (!overlay && menu.isOpen()) return menu.inputKey(key, held);
+  if (!overlay) {
+    if (menu.isOpen() || !state.power || access.pin_required || ui.dialLock) return;
+    if (/^[0-9]$/.test(key)) {
+      if (root.classList.contains("mobile-favourites-open")) {
+        showMobileFavourites(false);
+        control("mobile-favourites").focus({preventScroll: true});
+      }
+      return queueMobileNavigation("mobile-digit", () => {
+        if (overlay || menu.isOpen() || ui.dialLock) return;
+        const bank = receiver().group ?? displayedFavoriteBank("a");
+        return useFavorite(false, {dataset: {bank: String(bank), slot: key}});
+      });
+    }
+    openPanel(receiver().frequency_mode === "memory" ? "mobile-channel-entry" : "frequency");
+    if (key === "#" || key === "*") return;
+  }
+  if (!["frequency", "pin", "mobile-channel-entry", "scope-value"].includes(overlay)) return;
+  if (key === "#") return activePanel()?.requestSubmit();
+  editOverlayNumber(key === "*" ? held || ["pin", "mobile-channel-entry"].includes(overlay) ? "⌫" : "." : key);
+  if (overlay === "mobile-channel-entry" && key !== "*") continueMobileChannelEntry();
+}
+
+function continueMobileChannelEntry() {
+  if (overlay !== "mobile-channel-entry") return;
+  const entry = view["mobile-channel-input"].value;
+  if (!/^\d{3,10}$/.test(entry)) return;
+  // Banks have slots 00–99. A larger prefix belongs to frequency entry.
+  if (entry.length > 3 || Number(entry) > 99) {
+    openPanel("frequency");
+    view["frequency-input"].value = entry;
+    view["frequency-input"].setSelectionRange(entry.length, entry.length);
+  } else activePanel().requestSubmit();
+}
+
+async function commitMobileChannel(event) {
+  event.preventDefault();
+  const slot = Number(view["mobile-channel-input"].value);
+  const entry = receiver().memories?.find(item => item.group === receiver().group && item.slot === slot);
+  if (!entry) {
+    setText("mobile-channel-error", "CH " + digits(slot) + " is empty in this bank.");
+    view["mobile-channel-error"].hidden = false;
+    return;
+  }
+  try {
+    await act({v10: "memory", operation: "recall", group: entry.group, slot: entry.slot});
+    closeOverlay();
+  } catch (error) {
+    setText("mobile-channel-error", error.message);
+    view["mobile-channel-error"].hidden = false;
+  }
+}
+
+function mobileConfirm(home = "mobile", held = false) {
+  if (held && !overlay && menu.isOpen() && handheldNavigation() === "caret") return menu.inputKey("#");
+  if (["frequency", "pin", "mobile-channel-entry", "scope-value"].includes(overlay)) {
+    if (overlayCursor?.closest(".frequency-keys")) return selectOverlay();
+    return activePanel()?.requestSubmit();
+  }
+  if (overlay || menu.isOpen()) return selectMenuItem();
+  return openMenu(state.power ? home : "mobile");
+}
+
+function mobileBack(hold) {
+  if (hold) return closeOverlay();
+  if (overlay) return openPanel(null);
+  return commands.exit();
+}
+
 function openDialAssignment(name) {
   if (!state.power || access.pin_required) return;
   if (overlay) openPanel(null);
@@ -2307,6 +2983,23 @@ function pressDial(name, hold) {
 }
 
 const commands = {
+  "mobile-favourites": () => showMobileFavourites(!root.classList.contains("mobile-favourites-open")),
+  "mobile-menu": hold => mobileConfirm("mobile", hold),
+  "mobile-bank-down": () => queueMobileNavigation("mobile-bank-down", () => changeMobileBank(-1)),
+  "mobile-bank-up": () => queueMobileNavigation("mobile-bank-up", () => changeMobileBank(1)),
+  "mobile-record": () => commands.record(),
+  "mobile-lockout": hold => lockout(hold),
+  "mobile-simple-scan": hold => commands["simple-scan"](hold),
+  "mobile-p1": hold => mobileProgramKey("p1", hold),
+  "mobile-p2": hold => mobileProgramKey("p2", hold),
+  "mobile-digit": mobileDigit,
+  "mobile-back": mobileBack,
+  "mobile-ok": hold => mobileConfirm("mobile-zones", hold),
+  ...Object.fromEntries(["up", "down", "left", "right"].map(direction => ["mobile-" + direction, () => queueMobileDirection(direction)])),
+  "mobile-volume-up": () => adjustDial("volume", 2),
+  "mobile-volume-down": () => adjustDial("volume", -2),
+  "mobile-mute": () => commands.volume(),
+  "settings-sync": toggleSettingsSync,
   power: hold => state.power ? (hold ? powerOff() : snapshotScreen()) : powerOn(),
   volume: () => {
     const mute = !volumeMuted;
@@ -2349,7 +3042,8 @@ const commands = {
   },
   quick: () => openMenu("quick"),
   exit: () => {
-    if (menu.isOpen()) {
+    if (overlay && menu.isOpen()) openPanel(null);
+    else if (menu.isOpen()) {
       if (typeof menu.back === "function") menu.back();
       else menu.close();
     } else if (pinSetup) openMenu("set");
@@ -2630,7 +3324,7 @@ function configureTuningWheel(element, stepAtPointer) {
   }, {passive: false});
 }
 
-const longControls = new Set(["power", ...dialNames, "scan", "simple-scan", "prio", "lockout", "zone",
+const longControls = new Set(["power", "mobile-back", "mobile-menu", "mobile-ok", "mobile-lockout", "mobile-simple-scan", "mobile-p1", "mobile-p2", "mobile-digit", ...dialNames, "scan", "simple-scan", "prio", "lockout", "zone",
   "speech", "vm", "memory", "favorite", "hold", "expand"]);
 const gestures = new WeakMap();
 
@@ -2643,6 +3337,7 @@ function finishGesture(node, data) {
 function configureControl(node) {
   const name = node.dataset.action;
   if (!commands[name]) return;
+  if (name === "mobile-up" || name === "mobile-down") configureMenuRepeat(node);
   if (longControls.has(name)) node.addEventListener("contextmenu", event => {
     if (event.pointerType && event.pointerType !== "mouse") event.preventDefault();
   });
@@ -2746,13 +3441,87 @@ function configureControl(node) {
   }
 }
 
+function configureMenuRepeat(node) {
+  let timer;
+  let pointer;
+  let repeated = false;
+  const stop = () => {
+    clearTimeout(timer);
+    pointer = undefined;
+  };
+  node.addEventListener("pointerdown", event => {
+    stop();
+    repeated = false;
+    if (event.button !== 0 || !(overlay || menu.isOpen())) return;
+    pointer = event.pointerId;
+    const route = activePanel() ?? menusRoot;
+    const routeId = menusRoot.dataset.route;
+    const repeat = () => {
+      if (pointer === undefined || node.disabled || !(overlay || menu.isOpen())
+          || (activePanel() ?? menusRoot) !== route || menusRoot.dataset.route !== routeId) return stop();
+      repeated = true;
+      invoke(node, false, event);
+      timer = setTimeout(repeat, 130);
+    };
+    timer = setTimeout(repeat, 420);
+  });
+  for (const type of ["pointerup", "pointercancel", "pointerleave", "lostpointercapture"]) {
+    node.addEventListener(type, event => {
+      if (event.pointerId === pointer) stop();
+    });
+  }
+  node.addEventListener("click", event => {
+    if (!repeated || event.detail === 0) return;
+    repeated = false;
+    event.stopImmediatePropagation();
+  }, true);
+}
+
 function handlePanelKeys(event) {
   if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
   const key = event.key;
   const target = event.target;
-  if (key === "Enter" && target.closest?.("button.hardware, .knob")) return;
   const menuOpen = menu.isOpen();
-  if (menuOpen && menu.handleKey?.(key)) {
+  if (key === "Escape" && root.classList.contains("mobile-favourites-open")) {
+    event.preventDefault();
+    showMobileFavourites(false);
+    control("mobile-favourites").focus({preventScroll: true});
+    return;
+  }
+  if (root.classList.contains("mobile-view") && (overlay || menuOpen)) {
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(key)) {
+      event.preventDefault();
+      invoke(control("mobile-" + key.slice(5).toLowerCase()), false, event);
+      return;
+    }
+    if (key === "Enter" || key === "Escape") {
+      event.preventDefault();
+      if (!event.repeat) invoke(control(key === "Enter" ? "mobile-ok" : "mobile-back"), false, event);
+      return;
+    }
+  }
+  if (key === "Enter" && target.closest?.(".mobile-console button, .mobile-rec")) return;
+  if (key === "Enter" && target.closest?.("button.hardware, .knob")) return;
+  const nativeField = target instanceof HTMLElement && target.matches("input, textarea, [contenteditable=true]");
+  if (root.classList.contains("mobile-view") && !nativeField && !overlay && !menuOpen && /^[0-9]$/.test(key)) {
+    event.preventDefault();
+    if (!event.repeat) invoke(root.querySelector('.mobile-keypad [data-key="' + key + '"]'), false, event);
+    return;
+  }
+  if (root.classList.contains("mobile-view") && !nativeField
+      && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(key)) {
+    event.preventDefault();
+    invoke(control("mobile-" + key.slice(5).toLowerCase()), false, event);
+    return;
+  }
+  if (root.classList.contains("mobile-view") && !overlay && menuOpen && (!nativeField || target.readOnly)
+      && (/^[0-9.*#-]$/.test(key) || key === "Backspace")) {
+    if (menu.inputKey(key === "Backspace" ? "*" : key)) {
+      event.preventDefault();
+      return;
+    }
+  }
+  if (!overlay && menuOpen && menu.handleKey?.(key)) {
     event.preventDefault();
     return;
   }
@@ -2767,7 +3536,6 @@ function handlePanelKeys(event) {
     return;
   }
 
-  const nativeField = target instanceof HTMLElement && target.matches("input, textarea, [contenteditable=true]");
   if (overlay && !nativeField && (/^[0-9.\-]$/.test(key) || key === "Backspace"
       || pinSetup?.needsCode && /^[a-f]$/i.test(key))) {
     if (editOverlayNumber(key === "Backspace" ? "⌫" : key)) {
@@ -2801,6 +3569,7 @@ function handlePanelKeys(event) {
 
 function configurePanel() {
   restorePanelSettings();
+  updateMobileLayout();
   const savedVolume = getPreference("volume", lastVolume() * 100);
   audioVolume = finite(savedVolume) ? Math.round(clamp(savedVolume, 0, 100) * 2) / 2 : 32;
   volumeMuted = getPreference("volume_muted", false) === true;
@@ -2809,27 +3578,42 @@ function configurePanel() {
   setupMirrorSource();
   menu = createReceiverMenus({
     root: menusRoot,
+    isHandheld: () => root.classList.contains("mobile-view"),
     getState: () => state,
     getAccess: () => access,
     onPinSetup: openPinSetup,
     onDialAction: (action, delta, dial) => dialActions[action](delta, dial),
+    onMobileAction: mobileMenuAction,
     act,
     request,
     getPreference: (key, fallback) => key === "volume" ? audioVolume : getPreference(key, fallback),
     setPreference,
+    getClientSettings,
+    validateClientSettings,
+    restoreClientSettings,
+    onSettingsRestored: rememberRestoredSetup,
     getTuningStep: tuningStep,
     getFavoriteBank: displayedFavoriteBank,
-    onOpen: () => { lcdContent.inert = true; syncMirror(); },
-    onRender: () => { updateDialTooltips(); syncMirror(); },
-    onClose: () => { lcdContent.inert = Boolean(overlay); syncMirror(); },
+    onOpen: () => { lcdContent.inert = true; renderMobileControls(); syncMirror(); },
+    onRender: () => { updateDialTooltips(); renderMobileControls(); syncMirror(); },
+    onClose: () => { lcdContent.inert = Boolean(overlay); renderMobileControls(); syncMirror(); },
     onMirror: openMirror,
     onTune: tune,
     onScope: () => { closeOverlay(); ui.visible = true; ui.expanded = true; render(); },
     onMode: () => openPanel("mode"),
+    onRepeaterTune: (hz, mode, callsign) => {
+      selectedRepeater = {hz, mode, callsign};
+      render();
+    },
     onPlay: play,
     onReplay: () => play("/api/discovery/replay"),
     onStopPlayback: stopPlayback,
   });
+  const cachedRuntime = getPreference(syncRuntimeKey, {});
+  if (validSharedRuntime(cachedRuntime)) sharedRuntime = cachedRuntime;
+  settingsSync = createSettingsSync({request, getSettings: getSharedSettings, applySettings: applySharedSettings,
+    expandChanges: expandSharedChanges, onStatus: syncStatus});
+  syncStatus(getPreference(syncEnabledKey, true) === false ? "off" : "loading");
   numericKeys("Frequency keypad", ["."], view["frequency-keys"]);
   view["pin-error"].before(numericKeys("PIN keypad", ["A", "B", "C", "D", "E", "F"]));
   for (const panel of panels) {
@@ -2848,6 +3632,8 @@ function configurePanel() {
     invoke(control("exit"), false, event);
   });
   panels.find(panel => panel.dataset.panel === "frequency").addEventListener("submit", commitFrequency);
+  panels.find(panel => panel.dataset.panel === "mobile-channel-entry").addEventListener("submit", commitMobileChannel);
+  view["mobile-channel-input"].addEventListener("input", continueMobileChannelEntry);
   panels.find(panel => panel.dataset.panel === "scope-value").addEventListener("submit", commitScope);
   view["scope-full"]?.addEventListener("click", () => {
     const range = fullScopeRange();
@@ -2862,7 +3648,10 @@ function configurePanel() {
     if (!key || key.disabled || !canOperate("mode")) return;
     feedback(false);
     void tune(receiverHz(), key.dataset.mode).then(() => {
-      closeOverlay();
+      if (overlay === "mode" && activePanel()?.contains(key)) {
+        if (root.classList.contains("mobile-view") && menu.isOpen()) openPanel(null);
+        else closeOverlay();
+      }
       render();
     }).catch(showError);
   });
@@ -2873,8 +3662,9 @@ function configurePanel() {
   });
   canvas.addEventListener("click", event => {
     if (!ui.frame || !canOperate("frequency") || ui.dialLock) return;
-    const hz = scopeSelectionAt(event);
-    void act(() => scopeTuneAction(hz)).catch(showError);
+    const hit = scopeSelectionAt(event);
+    const snap = scopeSnapAt(hit);
+    void act(() => scopeTuneAction(hit.hz, snap)).catch(showError);
   });
   configureTuningWheel(frequency, event => Number(event.target.closest("[data-step-hz]")?.dataset.stepHz));
   configureTuningWheel(canvas, scopeWheelStep);
@@ -2903,12 +3693,19 @@ function configurePanel() {
     if (state.power || audioContext) void prepareAudio().catch(() => {});
   });
   window.addEventListener("blur", () => { if (receiver().monitor) void setMonitor(false).catch(() => {}); });
-  request("/api/access").then(result => { access = result; }).catch(() => {}).then(refresh);
+  request("/api/access").then(async result => {
+    access = result;
+    await refreshState();
+    // Seed from the current listening setup only when no remembered selection exists.
+    if (!sharedRuntime.profile_tune && state.power) captureSharedRuntime();
+    await startSettingsSync();
+  }).catch(() => {}).then(refresh);
   // Restored tabs can already own an active receiver. Audio becomes available on activation if autoplay is restricted.
   window.addEventListener("pageshow", () => void prepareAudio().catch(() => {}));
 }
 
 window.addEventListener("resize", () => {
+  updateMobileLayout();
   if (lcd.dataset.expansion === "true") setLcdExpanded(true, true);
   if (!isMirror && scopePointer) refreshScopeTip();
 });

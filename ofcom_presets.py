@@ -3,6 +3,8 @@
 Contains Ofcom copyright data from the Wireless Telegraphy Register CSV
 snapshot dated 13 November 2026.
 https://www.ofcom.org.uk/spectrum/frequencies/spectrum-information-portal
+Ofcom copyright and information re-use terms:
+https://www.ofcom.org.uk/about-ofcom/our-website/copyright
 
 Includes live, publishable F3E and G3E voice assignments. Business also includes
 the Simple UK, Simple Site and Suppliers Light licence schedule channels.

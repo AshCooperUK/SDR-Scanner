@@ -18,7 +18,7 @@ from tempfile import NamedTemporaryFile
 from urllib.parse import urlsplit
 
 
-PIN_PATTERN = re.compile(r"[0-9]{6}")
+PIN_PATTERN = re.compile(r"[0-9]+")
 SESSION_PATTERN = re.compile(r"[0-9a-f]{32}")
 CAPABILITY_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
 PIN_SETUP_PATTERN = re.compile(r"[0-9a-f]{32}")
@@ -104,6 +104,48 @@ class AccessPin:
             return {"remote_url": self._remote_url, "pin_configured": self._credential is not None,
                     "revision": self._revision}
 
+    def backup(self):
+        """Export credentials only after the HTTP caller has checked owner access."""
+        with self._lock:
+            credential = None
+            if self._credential is not None:
+                salt, digest = self._credential
+                credential = {"salt": salt.hex(), "digest": digest.hex()}
+            return {"remote_url": self._remote_url, "credential": credential}
+
+    @staticmethod
+    def validate_backup(data):
+        if not isinstance(data, dict) or data.keys() != {"remote_url", "credential"}:
+            raise ValueError("Invalid access settings backup.")
+        remote_url = data["remote_url"]
+        if remote_url is not None and normalize_remote_url(remote_url) != remote_url:
+            raise ValueError("Invalid remote URL in settings backup.")
+        credential = data["credential"]
+        if credential is not None:
+            if not isinstance(credential, dict) or credential.keys() != {"salt", "digest"}:
+                raise ValueError("Invalid PIN credential in settings backup.")
+            try:
+                salt, digest = bytes.fromhex(credential["salt"]), bytes.fromhex(credential["digest"])
+            except (TypeError, ValueError):
+                raise ValueError("Invalid PIN credential in settings backup.") from None
+            if (len(salt) != SALT_BYTES or len(digest) != hashlib.sha256().digest_size
+                    or salt.hex() != credential["salt"] or digest.hex() != credential["digest"]):
+                raise ValueError("Invalid PIN credential in settings backup.")
+            credential = salt, digest
+        return credential, remote_url
+
+    @contextmanager
+    def restore_backup(self, data):
+        """Stage an owner-authorized restore; commit only after other files are ready."""
+        credential, remote_url = self.validate_backup(data)
+        with self._lock:
+            if credential is None and remote_url is None:
+                # The unconfigured default is represented by the absence of a file.
+                yield lambda: self._commit(None, None, None)
+            else:
+                with self._stage(credential, remote_url) as temporary:
+                    yield lambda: self._commit(temporary, credential, remote_url)
+
     def guard(self):
         """Hold policy and PIN state constant while checking one request."""
         return self._lock
@@ -161,12 +203,15 @@ class AccessPin:
     @staticmethod
     def _make_credential(pin):
         if not _matches(PIN_PATTERN, pin):
-            raise ValueError("Enter a six-digit PIN.")
+            raise ValueError("Enter a PIN using digits only.")
         salt = secrets.token_bytes(SALT_BYTES)
         return salt, _digest(pin, salt)
 
     def _commit(self, temporary, credential, remote_url):
-        temporary.replace(self.path)
+        if temporary is None:
+            self.path.unlink(missing_ok=True)
+        else:
+            temporary.replace(self.path)
         self._credential = credential
         self._remote_url = remote_url
         self._revision = secrets.token_hex(16)

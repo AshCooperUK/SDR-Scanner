@@ -18,8 +18,8 @@ class SquelchTests(unittest.TestCase):
         runtime.act({"v10": "tune", "hz": 446_006_250, "mode": mode})
         return runtime
 
-    def receive(self, readings, *, squelch=.34, monitor=False, mode="FM"):
-        runtime = self.runtime(mode)
+    def receive(self, readings, *, squelch=.46, monitor=False, runtime=None):
+        runtime = runtime or self.runtime()
         runtime.act({"knob": "squelch", "value": squelch})
         if monitor:
             runtime.act({"v10": "monitor", "enabled": True})
@@ -36,6 +36,8 @@ class SquelchTests(unittest.TestCase):
         def read():
             previous_gates.append(runtime.scanner.audio_gate_open)
             level, receiver.tuning_snr_db = next(frames)
+            snr = receiver.tuning_snr_db
+            receiver.tuning_noise_dbfs = level - snr if snr is not None else None
             if len(previous_gates) == len(readings):
                 runtime.stopped.set()
             return level, pcm
@@ -45,9 +47,32 @@ class SquelchTests(unittest.TestCase):
             runtime.run()
         return previous_gates[1:] + [runtime.scanner.audio_gate_open], publish.call_count
 
-    def test_fm_noise_does_not_open_gate_even_above_the_absolute_threshold(self):
+    def test_fm_noise_stays_closed_near_the_noise_floor(self):
         readings = [(-51.2, -0.2), (-51.2, 12.0), (-66.0, 12.0), (-51.2, 0.3)]
         self.assertEqual(self.receive(readings), ([False, True, False, False], 1))
+
+    def test_low_manual_sql_passes_hiss_without_recording_it(self):
+        runtime = self.runtime()
+        runtime.act({"record": "toggle"})
+        readings = [(-47.3, 1.1), (-42.1, 8.0), (-47.3, 1.1)]
+        with patch.object(runtime.recording, "receive") as record:
+            self.assertEqual(self.receive(readings, squelch=.24, runtime=runtime), ([True, True, True], 3))
+        captured = [args[1] for args, _ in record.call_args_list]
+        self.assertEqual([bool(pcm) for pcm in captured], [False, True, False])
+        self.assertEqual(len(runtime.discovery.status()["hits"]), 1)
+
+    def test_low_sql_does_not_make_fm_scan_stop_on_hiss(self):
+        runtime = self.runtime()
+        runtime.act({"v10": "memory", "operation": "write", "group": 1, "slot": 9,
+                     "hz": 446_006_250, "mode": "FM", "name": ""})
+        runtime.act({"v10": "scan", "kind": "ZONE", "enabled": True, "zones": ["FAV"]})
+        self.assertEqual(self.receive([(-47.3, 1.1)], squelch=.24, runtime=runtime), ([False], 0))
+        self.assertFalse(runtime.v10.paused_at)
+
+    def test_low_sql_respects_a_saved_tone(self):
+        runtime = self.runtime()
+        runtime.scanner.v10_tone = {"kind": "CTCSS", "value": 123.0}
+        self.assertEqual(self.receive([(-47.3, 1.1)], squelch=.24, runtime=runtime), ([False], 0))
 
     def test_monitor_and_fully_open_squelch_pass_noise(self):
         noise = [(-51.2, -0.2)]

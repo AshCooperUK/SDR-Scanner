@@ -42,6 +42,7 @@ class DiscoveryHit:
     snr_db: float | None = None
     offset_hz: float | None = None
     mode_detected: bool = False
+    channel_folder: str | None = None
 
 
 class Discovery:
@@ -96,7 +97,7 @@ class Discovery:
 
     def receive(self, pcm, *, channel=None, revision=0, signal_dbfs=None, tone=None,
                 dab_sid=None, station_name=None, dmr=None, digital=None, snr_db=None, offset_hz=None,
-                mode_detected=False):
+                mode_detected=False, channel_folder=None):
         if not pcm:
             self.boundary()
             return
@@ -122,9 +123,11 @@ class Discovery:
             digital = {key: digital[key] for key in DIGITAL_FIELDS if digital.get(key) is not None}
         if (active is None or (active.hz, active.mode) != channel
                 or active.revision != revision or active.dab_sid != dab_sid or active.dmr != dmr
+                or active.channel_folder != channel_folder
                 or _digital_call_changed(active.digital, digital)):
             active = DiscoveryHit(self._next_id, time_ns() // 1_000_000, *channel, revision,
-                                  start, self._end, None, None, dab_sid, None, dmr, digital=digital)
+                                  start, self._end, None, None, dab_sid, None, dmr,
+                                  digital=digital, channel_folder=channel_folder)
             self._next_id += 1
             self._hits.appendleft(active)
             self._active = active

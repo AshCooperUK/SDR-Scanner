@@ -297,6 +297,23 @@ class ProgrammingTests(unittest.TestCase):
         self.assertFalse(valid_action({"v10": "memory", "operation": "write", "group": 100, "slot": 200,
                                        "hz": 98_400_000, "mode": "WFM"}))
 
+    def test_tuner_gain_in_db_preserves_existing_percent_setting_until_changed(self):
+        self.act("setting", key="rf_gain", value=40)
+        state = self.act("setting", key="rf_gain_tenths_db", value=220)
+        self.assertEqual(state["v10"]["settings"]["rf_gain"], 40)
+        self.assertEqual(state["v10"]["settings"]["rf_gain_tenths_db"], 220)
+
+        runtime = ScannerRuntime(self.path)
+        self.addCleanup(runtime.close)
+        self.assertEqual(runtime.v10.settings["rf_gain_tenths_db"], 220)
+        state = self.act("setting", key="rf_gain_tenths_db", value=None)
+        self.assertEqual(state["v10"]["settings"]["rf_gain"], 40)
+        self.assertIsNone(state["v10"]["settings"]["rf_gain_tenths_db"])
+
+        self.act("setting", key="rf_gain_tenths_db", value=0)
+        state = self.act("setting", key="rf_gain", value=40)
+        self.assertIsNone(state["v10"]["settings"]["rf_gain_tenths_db"])
+
     def test_auto_vfo_uses_band_mode_and_keeps_manual_memories_explicit(self):
         state = self.act("tune", hz=128_125_000, mode="AUTO")
         self.assertEqual(state["modulation"], "AM")
@@ -530,6 +547,34 @@ class ProgrammingTests(unittest.TestCase):
         state = self.act("scan", kind="ZONE", enabled=False)
         self.assertEqual(state["v10"]["scan_zones"], [])
         self.assertFalse(valid_action({"v10": "scan", "kind": "ZONE", "enabled": True, "zones": ["PMR", "PMR"]}))
+
+    def test_adding_a_preset_visits_it_before_finishing_the_first_zone(self):
+        radio = self.runtime
+        favorites = [128_125_000, 128_150_000]
+        for slot, hz in enumerate(favorites):
+            self.write(slot, hz, "AM")
+        self.act("scan", kind="ZONE", zones=["PMR"], enabled=True)
+        state = self.act("scan", kind="ZONE", zones=["PMR", "FAV"], enabled=True)
+        self.assertEqual(state["v10"]["scan_zones"], ["PMR", "FAV"])
+        pmr = [entry["hz"] for entry in radio.v10.zone_entries("PMR")]
+        self.assertEqual(state["tune_hz"], pmr[0])
+
+        seen = {"PMR": [state["tune_hz"]], "FAV": []}
+        first_favorite_at = None
+        now = radio.v10.next_scan_at
+        for index in range(1, len(pmr) + len(favorites)):
+            with radio.lock:
+                radio._v10_advance(now, False, digital_carrier=False)
+                radio._v10_advance(now + 2, False, digital_carrier=False)
+            now += 3
+            state = radio.state()
+            zone = state["v10"]["scan_zone"]
+            seen[zone].append(state["tune_hz"])
+            if zone == "FAV" and first_favorite_at is None:
+                first_favorite_at = index
+        self.assertIsNotNone(first_favorite_at)
+        self.assertLess(first_favorite_at, len(pmr))
+        self.assertEqual(seen, {"PMR": pmr, "FAV": favorites})
 
     def test_scope_inspection_leaves_digital_mode_for_distant_signals_until_scan_resumes(self):
         self.write(2, 446_196_875, "dPMR")
@@ -784,6 +829,22 @@ class ProgrammingTests(unittest.TestCase):
 
 
 class SignalTests(unittest.TestCase):
+    def test_tuner_gain_selects_hardware_steps_and_direct_sampling_disables_them(self):
+        radio = Receiver()
+        radio._gains = (-9, 0, 220, 280, 330)
+        with patch.object(radio, "_call") as commands:
+            radio.configure({"rf_gain": 70})
+            self.assertEqual(radio.tuner_gain, {"steps": radio._gains, "target": 220, "actual": 220})
+            radio.configure({"rf_gain": 70, "rf_gain_tenths_db": 0})
+            self.assertEqual(radio.tuner_gain["actual"], 0)
+            radio.configure({"rf_gain_tenths_db": 300})
+            self.assertEqual(radio.tuner_gain["actual"], 280)
+            radio._direct = True
+            radio.configure({"rf_gain_tenths_db": 330})
+            self.assertIsNone(radio.tuner_gain)
+            self.assertEqual(commands.call_args_list, [call("set_tuner_gain", 220),
+                                                       call("set_tuner_gain", 0), call("set_tuner_gain", 280)])
+
     def test_nearby_ranks_eligible_channels_beyond_the_loudest_fft_peaks(self):
         radio = Receiver()
         radio._gain = 280

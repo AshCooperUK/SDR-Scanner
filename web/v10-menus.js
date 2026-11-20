@@ -10,6 +10,13 @@ export const isCustomPreset = zone => Object.hasOwn(CUSTOM_PRESET_NAMES, zone);
 export const ZONE_NAMES = {FAV: "Favourite", CB: "CB", PMR: "PMR446", BUS: "Business", HAM: "Amateur",
   BCAST: "FM Radio", RAIL: "Rail", EVT: "Events", UTIL: "Utilities", AIR: "Air", MRN: "Marine",
   NEARBY: "Nearby Signals", ...CUSTOM_PRESET_NAMES};
+export const MOBILE_KEY_ACTIONS = Object.freeze({
+  none: "None", quick: "Quick Menu", monitor: "Monitor", record: "Recording", mode: "Mode",
+  frequency: "Frequency Entry", volume: "Mute", speech: "Announce Frequency", lockout: "Lock Out",
+  "simple-scan": "Simple Scan", bookmarks: "Bookmarks / UK Repeaters", "scan-speed": "Scan Speed",
+  memory: "Memory Channels", group: "Choose Bank", "tuning-lock": "Lock / Unlock Tuning",
+  scope: "Scope Settings", "recenter-scope": "Centre Desktop Scope",
+});
 const ZONE_PAGE_SIZE = 50;
 const PROJECT_LINKS = [
   {kind: "link", label: "GitHub", href: "https://github.com/AshCooperUK", title: "Open the maintainer’s GitHub profile."},
@@ -29,6 +36,12 @@ function readout(label, value) {
   return {kind: "readout", label, value};
 }
 
+function hostSettings(ctx, items, label) {
+  if (ctx.access.can_manage_settings) return items;
+  const instruction = "Open the scanner on localhost to use this setting.";
+  return [label ? readout(label, instruction) : readout(instruction)];
+}
+
 function selectable(item) {
   return item && !item.disabled && ["page", "setting", "action", "link"].includes(item.kind);
 }
@@ -45,8 +58,8 @@ function flag(key, label, initial = false, target) {
   return choice(key, label, initial, [[false, "OFF"], [true, "ON"]], target);
 }
 
-function run(label, action, value = "") {
-  return {kind: "action", label, action, value};
+function run(label, action, value = "", id) {
+  return {kind: "action", label, action, value, id};
 }
 
 function field(label, name, options = {}) {
@@ -61,11 +74,15 @@ const timeChoices = (first, last, hold) => [
 export const TUNING_STEPS = [100, 1000, 2500, 3125, 5000, 6250, 8333, 9000, 10000, 12500, 20000, 25000, 100000, 1000000];
 
 const SCAN_SPEED = choice("scan_speed", "Scan Speed", 8,
-  Array.from({length: 30}, (_, index) => [index + 1, String(index + 1)]));
+  Array.from({length: 30}, (_, index) => {
+    const rate = index + 1;
+    return [rate, rate + " /s · " + (rate === 1 ? "1 s" : Math.round(1000 / rate) + " ms")];
+  }));
+const SCAN_PAUSE = choice("pause_time", "Scan Pause Time", 10, timeChoices(1, 30, 0));
 
 const SCAN_SETTING = [
   flag("scan_resume", "Scan Resume", true),
-  choice("pause_time", "Pause Timer", 10, timeChoices(1, 30, 0)),
+  SCAN_PAUSE,
   choice("resume_time", "Resume Timer", 2, timeChoices(0, 5, -1)),
   SCAN_SPEED,
   flag("scan_follow_scope", "Scan Follows Scope"),
@@ -146,10 +163,10 @@ const DIGITAL_SETTINGS = [
 const OTHER_SETTINGS = [
   run("Timer", next => next.push(timerPage(next))),
   page("information", "Information", () => [readout("Version", document.title)]),
-  page("reset", "Reset", [
+  page("reset", "Reset", ctx => hostSettings(ctx, [
     run("Partial Reset", next => next.push(resetConfirm("partial"))),
     run("All Reset", next => next.push(resetConfirm("all"))),
-  ]),
+  ])),
 ];
 
 const SCOPE_SETTINGS = [
@@ -213,7 +230,7 @@ function optionLabel(spec, value) {
   return spec.options.find(([option]) => String(option) === value)?.[1] ?? value;
 }
 
-function createField(spec, value, onChoose) {
+function createField(spec, value, onChoose, handheld = false) {
   const input = node("input");
   input.name = spec.name;
   input.value = value ?? "";
@@ -228,7 +245,7 @@ function createField(spec, value, onChoose) {
     return wrap;
   }
   const label = node("label", "field", spec.label);
-  input.type = spec.type === "time" ? "text" : spec.type ?? "text";
+  input.type = spec.type === "time" || handheld && spec.type === "number" ? "text" : spec.type ?? "text";
   if (spec.type === "time") {
     input.dataset.format = "time";
     input.placeholder = "HH:MM";
@@ -255,14 +272,24 @@ const SET_PAGES = [
   page("digital-settings", "Digital Set", DIGITAL_SETTINGS),
   page("display", "Display", displaySettings),
   page("dials", "Dials", dialAssignmentItems),
+  page("dials-backup", "Dials Backup", [
+    run("Save Configuration", saveDialBackup),
+    run("Restore Configuration", next => next.push(restoreDialBackupPage())),
+  ]),
+  page("mobile-controls", "Mobile Controls", ctx => ["p1", "p2"].map(key => {
+    const fallback = key === "p1" ? "quick" : "monitor";
+    const assigned = ctx.getPreference("mobile_" + key + "_action", fallback);
+    return run(key.toUpperCase(), next => next.push(menuRoute("mobile-" + key, next)),
+      MOBILE_KEY_ACTIONS[assigned] ?? MOBILE_KEY_ACTIONS[fallback]);
+  })),
   page("presets", "Presets", ctx => Object.entries(ZONE_NAMES).map(([zone, name]) =>
     run(name, async next => next.push(await getZonePage(next, zone)), ctx.v10.custom_presets?.[zone]?.name))),
   page("favorite-banks", "Favourite Banks", favoriteBankItems),
   page("quick-menu-settings", "Quick Menu", quickMenuSettingItems),
-  page("settings-backup", "Settings Backup", [
+  page("settings-backup", "Settings Backup", ctx => hostSettings(ctx, [
     run("Load Setting", next => next.push(restorePage())),
     run("Save Setting", saveBackup),
-  ]),
+  ])),
   page("others", "Others", OTHER_SETTINGS),
 ];
 
@@ -856,12 +883,20 @@ function priorityPage(ctx) {
   ]);
 }
 
+function rfGainUnavailable(ctx, key) {
+  if (!["rf_gain", "rf_gain_tenths_db"].includes(key) || ctx.v10.tuner_gain?.steps?.length) return "";
+  return ctx.radio.power && ctx.radio.receiver === "ready" && ctx.hz < 25_000_000
+    ? "Hardware RF gain is unavailable here: direct sampling bypasses the tuner. Use AF Volume or Audio Boost for listening level."
+    : "Hardware RF gain is unavailable without an active tuner.";
+}
+
 function rfChoice(ctx, key, label, initial, options) {
-  return supports(ctx, key) ? choice(key, label, initial, options) : null;
+  return supports(ctx, key) ? {...choice(key, label, initial, options), unavailable: rfGainUnavailable(ctx, key)} : null;
 }
 
 function rfNumber(ctx, key, label, initial, min, max, step, unit = "") {
-  return supports(ctx, key) ? number(key, label, initial, min, max, step, unit) : null;
+  return supports(ctx, key)
+    ? {...number(key, label, initial, min, max, step, unit), unavailable: rfGainUnavailable(ctx, key)} : null;
 }
 
 function filterPage(ctx) {
@@ -997,7 +1032,6 @@ const DIAL_DEFAULTS = {"dial-a": "pause_time", "dial-b": "volume", "dial-c": "me
   "dial-d": "squelch", "dial-e": "fine-tuning", "dial-f": "scope-pan",
   "dial-g": UNASSIGNED.key, "dial-h": UNASSIGNED.key, "dial-i": UNASSIGNED.key, "dial-j": UNASSIGNED.key,
   frequency: "tuning"};
-const SCAN_PAUSE = number("pause_time", "Scan Pause Time", 10, 0, 30, 1, "s");
 const PRIORITY_INTERVAL = number("priority_interval", "PRIO INTVL", 5, 1, 15, 1, "s");
 const SCAN_RESUME = choice("resume_time", "RESUME TIME", 2, timeChoices(0, 5, -1));
 const FINE_TUNING = dialAction("fine-tuning", "Fine Tuning · 10 Hz");
@@ -1061,6 +1095,7 @@ const DIAL_PRESS_ACTIONS = {
   volume: ["mute", "adjust", "audio-controls"],
   squelch: ["monitor", "adjust", "audio-controls"],
   rf_gain: ["adjust", "audio-controls"],
+  rf_gain_tenths_db: AUDIO_PRESS,
   audio_boost: AUDIO_PRESS,
   tone_treble: AUDIO_PRESS,
   tone_bass: AUDIO_PRESS,
@@ -1074,11 +1109,18 @@ const DIAL_PRESS_ACTIONS = {
   resume_time: SCAN_PRESS,
   priority_interval: ["adjust", "priority", "scan-settings"],
 };
+const DIAL_FUNCTIONS = new Set([UNASSIGNED.key, ...Object.keys(DIAL_PRESS_ACTIONS)]);
+
+function tunerGainOption(ctx) {
+  return rfChoice(ctx, "rf_gain_tenths_db", "RF Gain · dB", null,
+    (ctx.v10.tuner_gain?.steps ?? []).map(step => [step, (step / 10).toFixed(1) + " dB"]));
+}
 
 function dialBOptions(ctx) {
   return [
     DIAL_B_VOLUME,
     rfNumber(ctx, "rf_gain", "RF GAIN", 100, 0, 100, 1, "%"),
+    tunerGainOption(ctx),
     SQUELCH,
     AUDIO_BOOST,
     rfNumber(ctx, "tone_treble", "TREBLE", 0, -15, 15, 1, "dB"),
@@ -1124,11 +1166,22 @@ function dialPressPage(ctx, dial) {
   });
 }
 
-function dialAssignmentPage(ctx, dial) {
-  const options = dialOptions(ctx);
-  const assignment = choicesPage("dial-assignment", DIAL_LABELS[dial], options.map(({key, label}) => [key, label]),
-    assignedDial(ctx, dial, options).key, (active, key) => {
+const DIAL_FUNCTION_GROUPS = [
+  ["Tuning", ["tuning", "fine-tuning", "coarse-tuning", "tuning-step"]],
+  ["Channels & Favourites", ["memory-channel", "preset-channel", "favorite-bank-a", "favorite-bank-b"]],
+  ["Audio", ["volume", "audio_boost", "tone_treble", "tone_bass", "beep_level"]],
+  ["RF & Squelch", ["rf_gain", "rf_gain_tenths_db", "squelch"]],
+  ["Screen & Scope", ["scope-span", "scope-pan", "scope_reference"]],
+  ["Scan Features", ["scan-direction", "scan_speed", "pause_time", "resume_time", "priority_interval"]],
+];
+
+function dialFunctionGroupPage(ctx, dial, label, keys) {
+  const options = dialOptions(ctx).filter(option => keys.includes(option.key));
+  const assignment = choicesPage("dial-assignment-category", DIAL_LABELS[dial] + " · " + label,
+    options.map(({key, label}) => [key, label]),
+    assignedDial(ctx, dial).key, (active, key) => {
       active.setPreference(DIAL_PREFERENCES[dial], key);
+      active.back();
       active.back();
     });
   const assignments = Object.keys(DIAL_LABELS).filter(other => other !== dial).map(other => [
@@ -1137,20 +1190,123 @@ function dialAssignmentPage(ctx, dial) {
   assignments.push(["volume", "VOLUME"]);
   const rows = assignment.items.map((item, index) => {
     const key = options[index].key;
-    if (key === UNASSIGNED.key) return item;
     const otherDials = assignments.filter(([role]) => role === key).map(([, label]) => label);
     return {...item, value: [...otherDials, item.value].filter(Boolean).join(" · ")};
   });
+  return {...assignment, dial, items: rows};
+}
+
+function dialAssignmentPage(ctx, dial) {
   const sensitivity = choice(dialSensitivityKey(dial), "Sensitivity", 1, DIAL_SENSITIVITIES, "client");
-  return {...assignment, dial, items: next => [
-    run("Press Action", active => active.push(dialPressPage(active, dial)), dialPressChoice(next, dial).display),
-    sensitivity, ...rows,
-  ], selected: 0};
+  return {...page("dial-assignment", DIAL_LABELS[dial], next => {
+    const options = dialOptions(next);
+    const current = assignedDial(next, dial, options);
+    return [
+      run("Press Action", active => active.push(dialPressPage(active, dial)), dialPressChoice(next, dial).display),
+      sensitivity,
+      run(UNASSIGNED.label, active => {
+        active.setPreference(DIAL_PREFERENCES[dial], UNASSIGNED.key);
+        active.back();
+      }, current.key === UNASSIGNED.key ? "✓" : ""),
+      ...DIAL_FUNCTION_GROUPS.filter(([, keys]) => options.some(option => keys.includes(option.key)))
+        .map(([label, keys]) => run(label,
+          active => active.push(dialFunctionGroupPage(active, dial, label, keys)),
+          keys.includes(current.key) ? current.label + " · ✓" : "")),
+    ];
+  }), dial, selected: 0};
 }
 
 function dialAssignmentItems(ctx) {
   return Object.entries(DIAL_LABELS).map(([dial, label]) => run(label,
     next => next.push(dialAssignmentPage(next, dial)), assignedDial(ctx, dial).label));
+}
+
+function validDialConfiguration(config) {
+  if (!config || Array.isArray(config) || typeof config !== "object") return false;
+  if (!DIAL_FUNCTIONS.has(config.function)) return false;
+  const pressActions = [...(DIAL_PRESS_ACTIONS[config.function] ?? []), ...COMMON_PRESS, "auto"];
+  return pressActions.includes(config.press)
+    && DIAL_SENSITIVITIES.some(([factor]) => factor === config.sensitivity);
+}
+
+export function snapshotDialPreferences(read) {
+  const settings = {};
+  for (const [dial, key] of Object.entries(DIAL_PREFERENCES)) {
+    // Keep assignments to hardware controls even when the current SDR cannot use them.
+    const role = read(key, DIAL_DEFAULTS[dial]);
+    const press = read(dialPressKey(dial), "auto");
+    const sensitivity = read(dialSensitivityKey(dial), 1);
+    const config = {function: role, press, sensitivity};
+    if (!DIAL_FUNCTIONS.has(role)) config.function = DIAL_DEFAULTS[dial];
+    if (![...(DIAL_PRESS_ACTIONS[config.function] ?? []), ...COMMON_PRESS, "auto"].includes(press)) config.press = "auto";
+    if (!DIAL_SENSITIVITIES.some(([factor]) => factor === sensitivity)) config.sensitivity = 1;
+    settings[key] = config.function;
+    settings[dialPressKey(dial)] = config.press;
+    settings[dialSensitivityKey(dial)] = config.sensitivity;
+  }
+  const savedAutoTs = read("dial_auto_ts", "high");
+  settings.dial_auto_ts = ["off", "low", "high"].includes(savedAutoTs) ? savedAutoTs : "high";
+  return settings;
+}
+
+export function validateDialPreferences(settings) {
+  const keys = Object.values(DIAL_PREFERENCES).flatMap(key =>
+    [key, key.replace(/_function$/, "_press"), key.replace(/_function$/, "_sensitivity")]);
+  if (!settings || Array.isArray(settings) || typeof settings !== "object"
+      || Object.keys(settings).length !== keys.length + 1
+      || !keys.every(key => Object.hasOwn(settings, key))
+      || !["off", "low", "high"].includes(settings.dial_auto_ts)
+      || !Object.keys(DIAL_PREFERENCES).every(dial => validDialConfiguration({
+        function: settings[DIAL_PREFERENCES[dial]], press: settings[dialPressKey(dial)],
+        sensitivity: settings[dialSensitivityKey(dial)],
+      }))) throw new Error("This saved setup contains unsupported dial settings.");
+  return structuredClone(settings);
+}
+
+function saveDialBackup(ctx) {
+  const saved = snapshotDialPreferences(ctx.getPreference);
+  const dials = Object.fromEntries(Object.entries(DIAL_PREFERENCES).map(([dial, key]) => [dial, {
+    function: saved[key], press: saved[dialPressKey(dial)], sensitivity: saved[dialSensitivityKey(dial)],
+  }]));
+  const auto_ts = saved.dial_auto_ts;
+  downloadJson({format: "sdr-scanner-dials", version: 1, saved_at: new Date().toISOString(), auto_ts, dials},
+    "sdr-scanner-dials-" + new Date().toISOString().replaceAll(":", "-").replace(/\.\d+Z$/, "Z") + ".json");
+}
+
+function restoreDialBackupPage() {
+  return formPage("restore-dials", "RESTORE DIAL CONFIGURATION", [
+    field("Dial Configuration Backup", "backup", {type: "file", accept: ".json,application/json", required: true}),
+  ], async (ctx, form) => {
+    const [file] = form.elements.namedItem("backup").files;
+    if (!file || file.size > 64 * 1024) throw new Error("Choose a dial configuration backup no larger than 64 KB.");
+    let backup;
+    try {
+      backup = JSON.parse(await file.text());
+    } catch {
+      throw new Error("Choose a valid SDr Scanner dial configuration backup.");
+    }
+    if (!ctx.isCurrent()) return;
+    const dials = backup?.dials;
+    const keys = Object.keys(DIAL_PREFERENCES);
+    if (backup?.format !== "sdr-scanner-dials" || backup.version !== 1 || !["off", "low", "high"].includes(backup.auto_ts)
+        || !dials || Array.isArray(dials) || typeof dials !== "object"
+        || Object.keys(dials).length !== keys.length
+        || !keys.every(dial => Object.hasOwn(dials, dial) && validDialConfiguration(dials[dial]))) {
+      throw new Error("This file does not contain a supported configuration for all eleven dials.");
+    }
+    ctx.push(confirmPage("restore-dials-confirm", "Restore Dial Configuration?",
+      "Replace the functions, press actions and sensitivities for the main dial and A–J? With SYNC enabled, the restored configuration is also saved for your other browsers.", next => {
+        for (const dial of keys) {
+          next.setPreference(DIAL_PREFERENCES[dial], dials[dial].function);
+          next.setPreference(dialPressKey(dial), dials[dial].press);
+          next.setPreference(dialSensitivityKey(dial), dials[dial].sensitivity);
+        }
+        next.setPreference("dial_auto_ts", backup.auto_ts);
+        next.back();
+        next.back();
+        next.notice("Dial configuration restored.");
+      }));
+  }, "LOAD");
 }
 
 function dialPage(ctx, id) {
@@ -1189,20 +1345,335 @@ function recorderPage(ctx) {
       ]));
     }),
     ...(ctx.radio.replay_available ? [run("Instant Replay", next => next.replay())] : []),
+    run("Search Recordings", next => next.push(recordingSearchPage())),
+    run("RF Replay", next => openRfReplay(next)),
     page("recorder-set", "Recorder Set", [
       readout("RX REC Condition", "Squelch Auto"),
       readout("File Split", "ON"),
       readout("File Format", "MP3"),
       readout("Minimum Duration", "2 s"),
-      formPage("record-folder", "REC FOLDER", [
+      ...hostSettings(ctx, [formPage("record-folder", "REC FOLDER", [
         field("Folder on Receiver Host", "path", {value: ctx.radio.record_folder, required: true}),
       ], async (active, form) => {
         await active.change({record: "select", path: getFormValue(form, "path")});
         const message = active.getState().record_message;
         if (message) active.notice(message);
         else active.back();
-      }, "SET"),
+      }, "SET")], "Recording Folder"),
     ]),
+  ]);
+}
+
+function recordingSearchPage() {
+  return formPage("record-search", "Search Recordings", [
+    field("Channel, Folder or Name", "query", {maxLength: 120}),
+    field("Date · DD.MM.YYYY", "date", {maxLength: 10}),
+    field("Frequency · MHz", "mhz", {inputMode: "decimal", maxLength: 20}),
+  ], async (next, form) => {
+    const filters = Object.fromEntries(["query", "date", "mhz"].map(key => [key, getFormValue(form, key)]));
+    next.push(await recordingResults(next, filters, 1));
+  }, "SEARCH");
+}
+
+async function recordingResults(ctx, filters, requestedPage) {
+  const result = await ctx.request("/api/recordings/search", {
+    method: "POST", body: {...filters, page: requestedPage},
+  });
+  const items = [
+    run("STOP", next => next.stopPlayback()),
+    ...result.clips.map(clip => run(clip.label, next => next.play(clip.url))),
+  ];
+  if (result.page > 1) items.push(run("Previous Page", async next => {
+    next.replace(await recordingResults(next, filters, result.page - 1));
+  }));
+  if (result.page < result.pages) items.push(run("Next Page", async next => {
+    next.replace(await recordingResults(next, filters, result.page + 1));
+  }));
+  const description = result.total
+    ? result.total + " recordings · Page " + result.page + " of " + result.pages
+    : "No recordings match those filters.";
+  return {...page("record-results", "Recording Results", items), description};
+}
+
+async function openRfReplay(ctx, refresh = false) {
+  const capture = await ctx.request("/api/rf-replay/capture", {method: "POST"});
+  const hz = capture.tune_hz >= capture.min_hz && capture.tune_hz <= capture.max_hz
+    ? capture.tune_hz : capture.center_hz;
+  const selection = {hz, mode: capture.modes.includes(capture.mode) ? capture.mode : "FM"};
+  const replay = rfReplayPage(capture, selection);
+  if (refresh) ctx.replace(replay);
+  else ctx.push(replay);
+}
+
+function rfReplayPage(capture, selection) {
+  const description = (capture.duration_ms / 1000).toFixed(1) + " s captured · "
+    + frequency(capture.min_hz) + " – " + frequency(capture.max_hz);
+  const items = () => [
+    run("Replay Frequency", next => next.push(formPage("rf-replay-frequency", "Replay Frequency", [
+      field("Frequency · MHz", "hz", {value: asMHz(selection.hz), inputMode: "decimal", required: true}),
+    ], (active, form) => {
+      const hz = frequencyValue(getFormValue(form, "hz"), "Replay frequency");
+      if (hz < capture.min_hz || hz > capture.max_hz) throw new Error("Enter a frequency inside the captured range.");
+      selection.hz = hz;
+      active.back();
+    }, "SET")), frequency(selection.hz)),
+    run("Replay Mode", next => next.push(choicesPage("rf-replay-mode", "Replay Mode",
+      capture.modes.map(mode => [mode, mode]), selection.mode, (active, mode) => {
+        selection.mode = mode;
+        active.back();
+      })), selection.mode),
+    run("PLAY", next => next.play(`/api/rf-replay/${capture.id}/${encodeURIComponent(selection.mode)}/${selection.hz}`)),
+    run("STOP", next => next.stopPlayback()),
+    run("Capture Latest RF", next => openRfReplay(next, true)),
+  ];
+  return {...page("rf-replay", "RF Replay", items), description};
+}
+
+const BOOKMARK_BANDS = ["10m", "6m", "4m", "2m", "70cm", "23cm"];
+const BOOKMARK_PAGE_SIZE = 8;
+const REPEATER_LOCATOR = "repeater_locator";
+const REPEATER_TUNE_TOLERANCE_HZ = 1000;
+const GRID_LOCATOR = /^[A-R]{2}[0-9]{2}(?:[A-X]{2}(?:[0-9]{2})?)?$/i;
+const RADIANS = Math.PI / 180;
+const EARTH_RADIUS_MILES = 3958.76;
+const bookmarkModeAvailable = (ctx, mode) => mode === "AUTO" || modeAvailable(ctx, mode);
+const personalBookmarks = ctx => ctx.getPreference("radio_bookmarks", []);
+
+function bookmarkTune(next, entry, mode) {
+  return next.change({v10: "tune", hz: entry.hz, mode}).then(() => {
+    if (entry.callsign) next.onRepeaterTune?.(entry.hz, mode, entry.callsign);
+    next.close();
+  });
+}
+
+function bookmarkEditor(entry, index = -1) {
+  return formPage("bookmark-editor", index < 0 ? "Save Bookmark" : "Rename Bookmark", [
+    field("Name", "name", {value: entry.name, maxLength: 64, required: true}),
+  ], (next, form) => {
+    const name = getFormValue(form, "name");
+    if (!name) throw new Error("Enter a bookmark name.");
+    const saved = [...personalBookmarks(next)];
+    const duplicate = saved.findIndex(item => item.name === name && item.mode === entry.mode && item.hz === entry.hz);
+    if (index >= 0) saved[index] = {...entry, name};
+    else if (duplicate < 0) {
+      if (saved.length >= 200) throw new Error("Remove a bookmark before saving another.");
+      saved.push({...entry, name});
+    } else if (entry.callsign && !saved[duplicate].callsign) {
+      saved[duplicate] = {...saved[duplicate], callsign: entry.callsign};
+    }
+    next.setPreference("radio_bookmarks", saved);
+    next.back();
+    if (index >= 0) next.replace(bookmarkPage(saved[index], index));
+  }, "SAVE");
+}
+
+function bookmarkPage(entry, index) {
+  return page("bookmark", entry.name, next => [
+    bookmarkModeAvailable(next, entry.mode) ? run("Tune", active => bookmarkTune(active, entry, entry.mode),
+      frequency(entry.hz) + " · " + entry.mode) : readout("Mode unavailable", entry.mode),
+    run("Rename", active => active.push(bookmarkEditor(entry, index))),
+    run("Delete", active => active.push(confirmPage("bookmark-delete", "Delete Bookmark",
+      entry.name, confirmed => {
+        const saved = [...personalBookmarks(confirmed)];
+        saved.splice(index, 1);
+        confirmed.setPreference("radio_bookmarks", saved);
+        confirmed.back();
+        confirmed.back();
+      }))),
+  ]);
+}
+
+function bookmarkListPage(offset = 0) {
+  return page("personal-bookmarks", "Personal Bookmarks", ctx => {
+    const saved = personalBookmarks(ctx);
+    const first = Math.min(offset, Math.max(0, Math.ceil(saved.length / BOOKMARK_PAGE_SIZE) - 1) * BOOKMARK_PAGE_SIZE);
+    return saved.length ? [
+      ...saved.slice(first, first + BOOKMARK_PAGE_SIZE).map((entry, index) =>
+        run(entry.name, next => next.push(bookmarkPage(entry, first + index)), frequency(entry.hz) + " · " + entry.mode)),
+      ...(first ? [run("Previous Page", next => next.replace(bookmarkListPage(first - BOOKMARK_PAGE_SIZE)))] : []),
+      ...(first + BOOKMARK_PAGE_SIZE < saved.length ?
+        [run("Next Page", next => next.replace(bookmarkListPage(first + BOOKMARK_PAGE_SIZE)))] : []),
+    ] : [readout("No saved bookmarks")];
+  });
+}
+
+function locatorCentre(locator) {
+  const value = typeof locator === "string" ? locator.trim() : "";
+  if (!GRID_LOCATOR.test(value)) return null;
+  const grid = value.toUpperCase();
+  const letter = index => grid.charCodeAt(index) - 65;
+  let longitude = letter(0) * 20 - 180 + Number(grid[2]) * 2;
+  let latitude = letter(1) * 10 - 90 + Number(grid[3]);
+  let width = 2;
+  if (grid.length >= 6) {
+    width /= 24;
+    longitude += letter(4) * width;
+    latitude += letter(5) * width / 2;
+  }
+  if (grid.length === 8) {
+    width /= 10;
+    longitude += Number(grid[6]) * width;
+    latitude += Number(grid[7]) * width / 2;
+  }
+  return [(latitude + width / 4) * RADIANS, (longitude + width / 2) * RADIANS];
+}
+
+function repeaterDistance(origin, locator) {
+  if (!origin) return null;
+  const destination = locatorCentre(locator);
+  if (!destination) return null;
+  const [latitude, longitude] = destination;
+  const haversine = Math.sin((latitude - origin[0]) / 2) ** 2
+    + Math.cos(latitude) * Math.cos(origin[0]) * Math.sin((longitude - origin[1]) / 2) ** 2;
+  return 2 * EARTH_RADIUS_MILES * Math.asin(Math.sqrt(Math.min(1, haversine)));
+}
+
+const repeaterDistanceLabel = miles => miles < 1 ? "<1 mi" : Math.round(miles) + " mi";
+
+function compareRepeaters(a, b) {
+  return (a.distance ?? Infinity) - (b.distance ?? Infinity) || a.callsign.localeCompare(b.callsign) || a.hz - b.hz;
+}
+
+export function repeaterLabel(entries, hz, mode, locator, selectedCallsign = "") {
+  if (!Array.isArray(entries) || !Number.isSafeInteger(hz) || hz < 100_000) return null;
+  const receiveMode = displayMode(String(mode ?? "").trim().toUpperCase().replace(/^AUTO\s+/, ""));
+  const candidates = [];
+  let closestOffset = REPEATER_TUNE_TOLERANCE_HZ;
+  for (const entry of entries) {
+    if (typeof entry?.callsign !== "string" || !entry.callsign || !Number.isSafeInteger(entry.hz)
+        || !Array.isArray(entry.modes) || !entry.modes.length
+        || (receiveMode !== "AUTO" && !entry.modes.includes(receiveMode))) continue;
+    const offset = Math.abs(entry.hz - hz);
+    if (offset > closestOffset) continue;
+    if (offset < closestOffset) {
+      candidates.length = 0;
+      closestOffset = offset;
+    }
+    candidates.push(entry);
+  }
+  if (!candidates.length) return null;
+
+  const origin = locatorCentre(locator);
+  const ranked = candidates.map(entry => ({...entry, distance: repeaterDistance(origin, entry.locator)}));
+  ranked.sort(compareRepeaters);
+  const wanted = String(selectedCallsign ?? "").trim().toUpperCase();
+  const selected = wanted ? ranked.find(entry => entry.callsign.toUpperCase() === wanted) : null;
+  const primary = selected ?? ranked[0];
+  const alternatives = [...new Set(ranked.map(entry => entry.callsign.toUpperCase()))]
+    .filter(callsign => callsign !== primary.callsign.toUpperCase());
+  const text = primary.callsign + (alternatives.length ? " +" + alternatives.length : "");
+  const match = [
+    "UK Repeater directory · " + primary.callsign,
+    primary.town, frequency(primary.hz), primary.modes.join(", "), primary.status,
+    primary.distance === null ? "" : "approx. " + repeaterDistanceLabel(primary.distance),
+  ].filter(Boolean).join(" · ");
+  const title = [
+    match,
+    ...(alternatives.length ? ["Other listed callsigns · " + alternatives.join(", ")] : []),
+  ].join("\n");
+  return {text, title};
+}
+
+function repeaterLocatorEditor(locator) {
+  return {...formPage("uk-repeater-locator", "My Locator", [
+    field("Maidenhead Locator", "locator", {value: locator, maxLength: 8, placeholder: "e.g. JO02PP"}),
+  ], (next, form) => {
+    const value = getFormValue(form, "locator");
+    if (value && !GRID_LOCATOR.test(value)) {
+      throw new Error("Enter a 4, 6 or 8 character Maidenhead locator, such as JO02PP.");
+    }
+    next.setPreference(REPEATER_LOCATOR, value.toUpperCase());
+    next.back();
+  }, "SET"), description: "Leave blank to clear your locator."};
+}
+
+function repeaterPage(entry) {
+  return page("uk-repeater", entry.callsign, ctx => [
+    readout(entry.town || "Location unavailable", entry.locator),
+    readout("Output", frequency(entry.hz)),
+    ...(entry.distance === null ? [] : [readout("Approx. distance", repeaterDistanceLabel(entry.distance))]),
+    ...(entry.status ? [readout("Status", entry.status)] : []),
+    ...entry.modes.filter(mode => bookmarkModeAvailable(ctx, mode)).flatMap(mode => [
+      run("Tune " + mode, next => bookmarkTune(next, entry, mode)),
+      run("Bookmark " + mode, next => next.push(bookmarkEditor({
+        name: entry.callsign, callsign: entry.callsign, hz: entry.hz, mode,
+      }))),
+    ]),
+    ...(!entry.modes.some(mode => bookmarkModeAvailable(ctx, mode))
+      ? [readout("Receiver mode unavailable", entry.modes.join(", "))] : []),
+  ]);
+}
+
+function repeaterListPage(band, entries, locator, unavailable, query = "") {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const matches = entries.filter(entry => {
+    const info = [entry.callsign, entry.town, entry.locator, entry.band, ...entry.modes].join(" ").toLowerCase();
+    return words.every(word => info.includes(word));
+  });
+  const items = [
+    run("Filter", next => next.push(formPage("uk-repeater-filter", "Filter Repeaters", [
+      field("Callsign, Town, Grid, Mode or Band", "query", {value: query, maxLength: 64}),
+    ], (active, form) => {
+      const value = getFormValue(form, "query");
+      active.back();
+      active.replace(repeaterListPage(band, entries, locator, unavailable, value));
+    }, "SEARCH")), query || "All"),
+    ...matches.map(entry => run([entry.callsign, entry.town].filter(Boolean).join(" · "),
+      next => next.push(repeaterPage(entry)), entry.distance === null ? frequency(entry.hz)
+        : frequency(entry.hz) + " · " + repeaterDistanceLabel(entry.distance))),
+  ];
+  const count = matches.length
+    ? matches.length + (matches.length === 1 ? " result" : " results")
+    : "No repeaters match this filter.";
+  const description = [
+    count + (locator ? " · Closest to " + locator : ""),
+    unavailable.length ? "Unavailable bands · " + unavailable.join(", ") : "",
+  ].filter(Boolean).join("\n");
+  return {...page("uk-repeaters-results", "UK Repeaters · " + band, items), description, pinFirstRow: true};
+}
+
+async function openRepeaterBand(next, band) {
+  const bands = band ? [band] : BOOKMARK_BANDS;
+  const directory = await Promise.allSettled(bands.map(item => next.request("/api/bookmarks/uk/" + item)));
+  if (!next.isCurrent()) return;
+  const locator = next.getPreference(REPEATER_LOCATOR, "");
+  const origin = locatorCentre(locator);
+  const unavailable = [];
+  const entries = directory.flatMap((result, index) => {
+    const item = bands[index];
+    if (result.status === "rejected") {
+      unavailable.push(item);
+      return [];
+    }
+    return result.value.entries.map(entry => ({
+      ...entry, band: item, distance: repeaterDistance(origin, entry.locator),
+    }));
+  });
+  if (unavailable.length === bands.length) throw directory[0].reason;
+  entries.sort(compareRepeaters);
+  next.push(repeaterListPage(band || "All Bands", entries, origin ? locator : "", unavailable));
+}
+
+function ukRepeaterPage() {
+  return page("uk-repeaters", "UK Repeaters", ctx => {
+    const locator = ctx.getPreference(REPEATER_LOCATOR, "");
+    return [
+      run("My Locator", next => next.push(repeaterLocatorEditor(locator)), locator || "Not set"),
+      run("All Bands", next => openRepeaterBand(next)),
+      ...BOOKMARK_BANDS.map(band => run(band, next => openRepeaterBand(next, band))),
+    ];
+  });
+}
+
+function bookmarksPage() {
+  return page("bookmarks", "Bookmarks", ctx => [
+    ...(ctx.radio.power && Number.isSafeInteger(ctx.hz) ? [run("Bookmark Tuned Frequency", next => {
+      const mode = next.v10.auto_mode ? "AUTO" : next.mode;
+      const name = next.v10.frequency_mode === "memory" ? currentMemory(next)?.name : "";
+      next.push(bookmarkEditor({name: name || frequency(next.hz), hz: next.hz, mode}));
+    })] : []),
+    run("Personal Bookmarks", next => next.push(bookmarkListPage()), personalBookmarks(ctx).length),
+    ukRepeaterPage(),
   ]);
 }
 
@@ -1414,7 +1885,10 @@ function vfoMemoryPage(ctx) {
   ]);
 }
 
-const DEFAULT_QUICK_ITEMS = ["group", "meter", "record", "mirror", "tier-iii"];
+const SCAN_QUICK_ITEMS = ["scan-speed", "scan-pause"];
+const NEW_QUICK_ITEMS = ["snap-carrier", "record-search", "rf-replay", "bookmarks", ...SCAN_QUICK_ITEMS];
+const DEFAULT_QUICK_ITEMS = ["group", "meter", "record", "mirror", "tier-iii", ...NEW_QUICK_ITEMS];
+const QUICK_MENU_KEY = "quick_menu_v3";
 
 function quickMenuItems(ctx) {
   return [
@@ -1427,11 +1901,19 @@ function quickMenuItems(ctx) {
     })],
     ["mirror", "Second Display", run("Second Display", next => next.mirror())],
     ["tier-iii", "DMR Tier III", ctx.mode === "DMR" ? run("DMR Tier III", next => next.push(trunkPage(next))) : null],
+    ["snap-carrier", "Snap to Carrier", run("Snap to Carrier",
+      next => next.setPreference("snap_to_carrier", !next.getPreference("snap_to_carrier", true)),
+      ctx.getPreference("snap_to_carrier", true) ? "ON" : "OFF")],
+    ["record-search", "Search Recordings", run("Search Recordings", next => next.push(recordingSearchPage()))],
+    ["rf-replay", "RF Replay", run("RF Replay", next => openRfReplay(next))],
+    ["bookmarks", "Bookmarks", run("Bookmarks", next => next.push(bookmarksPage()))],
     ["mode", "Mode", run("Mode", next => next.selectMode())],
     ["tuning-step", "Tuning Step", run("Tuning Step", next => next.push(tuningStepPage(next)))],
     ["filter", "Receive Filter", hasAnalogFilter(ctx.mode) && supports(ctx, "bandwidth_hz")
       ? run("Receive Filter", next => next.push(filterPage(next))) : null],
     ["scan-start", "Scan Start", run("Scan Start", next => next.push(makeScanPage(next, true)))],
+    ["scan-speed", "Scan Speed", SCAN_SPEED],
+    ["scan-pause", "Scan Pause Time", SCAN_PAUSE],
     ["scan-settings", "Scan Settings", run("Scan Settings", next => next.push(menuRoute("scan-set", next)))],
     ["priority", "Priority Scan", run("Priority Scan", next => next.push(priorityPage(next)))],
     ["skip", "Temporary Skip", ctx.v10.scan_paused && ctx.v10.settings?.skip_function
@@ -1448,8 +1930,12 @@ function quickMenuItems(ctx) {
 }
 
 function selectedQuickItems(ctx) {
-  const saved = ctx.getPreference("quick_menu", DEFAULT_QUICK_ITEMS);
-  return new Set(Array.isArray(saved) ? saved : DEFAULT_QUICK_ITEMS);
+  const saved = ctx.getPreference(QUICK_MENU_KEY, null);
+  if (Array.isArray(saved)) return new Set(saved);
+  const version2 = ctx.getPreference("quick_menu_v2", null);
+  if (Array.isArray(version2)) return new Set([...version2, ...SCAN_QUICK_ITEMS]);
+  const previous = ctx.getPreference("quick_menu", null);
+  return new Set(Array.isArray(previous) ? [...previous, ...NEW_QUICK_ITEMS] : DEFAULT_QUICK_ITEMS);
 }
 
 function quickMenuSettingItems(ctx) {
@@ -1459,9 +1945,9 @@ function quickMenuSettingItems(ctx) {
       const items = selectedQuickItems(next);
       if (items.has(key)) items.delete(key);
       else items.add(key);
-      next.setPreference("quick_menu", [...items]);
+      next.setPreference(QUICK_MENU_KEY, [...items]);
     }, selected.has(key) ? "ON" : "OFF")),
-    run("Restore Default Shortcuts", next => next.setPreference("quick_menu", DEFAULT_QUICK_ITEMS)),
+    run("Restore Default Shortcuts", next => next.setPreference(QUICK_MENU_KEY, DEFAULT_QUICK_ITEMS)),
   ];
 }
 
@@ -1472,9 +1958,11 @@ function quickPage(ctx, highlighted) {
       next.back();
     }, displayValue(highlighted, highlighted.initial)),
   ]);
-  const selected = selectedQuickItems(ctx);
-  const items = quickMenuItems(ctx).flatMap(([key, , item]) => selected.has(key) && item ? [item] : []);
-  return page("quick", "QUICK MENU", items.length ? items : [readout("Choose shortcuts in MENU › SET › Quick Menu")]);
+  return page("quick", "QUICK MENU", current => {
+    const selected = selectedQuickItems(current);
+    const items = quickMenuItems(current).flatMap(([key, , item]) => selected.has(key) && item ? [item] : []);
+    return items.length ? items : [readout("Choose shortcuts in MENU › SET › Quick Menu")];
+  });
 }
 
 function timerPage(ctx) {
@@ -1524,12 +2012,18 @@ function timerEditor(ctx) {
 }
 
 async function saveBackup(ctx) {
-  const data = await ctx.request("/api/v10/backup");
+  const server = await ctx.request("/api/settings/backup", {headers: {"X-SDR-Settings-Backup": "1"}});
+  const browser = ctx.getClientSettings();
+  const data = {format: "sdr-scanner-settings", version: 2, saved_at: new Date().toISOString(), server, browser};
+  downloadJson(data, "sdr-scanner-settings-" + new Date().toISOString().slice(0, 10) + ".json");
+}
+
+function downloadJson(data, filename) {
   const blob = new Blob([JSON.stringify(data, null, 2) + "\n"], {type: "application/json"});
   const url = URL.createObjectURL(blob);
   const link = node("a");
   link.href = url;
-  link.download = "sdr-scanner-settings-" + new Date().toISOString().slice(0, 10) + ".json";
+  link.download = filename;
   document.body.append(link);
   link.click();
   link.remove();
@@ -1549,8 +2043,21 @@ function restorePage() {
       throw new Error("Choose a valid SDr Scanner settings backup.");
     }
     if (!backup || Array.isArray(backup) || typeof backup !== "object") throw new Error("Choose a valid SDr Scanner settings backup.");
-    ctx.push(confirmPage("restore-confirm", "Load Setting?", "Replace current receiver settings and memories?", async next => {
-      await next.change({v10: "restore", backup});
+    if (!ctx.isCurrent()) return;
+    const full = backup.format === "sdr-scanner-settings";
+    if (full && (backup.version !== 2 || !backup.server)) throw new Error("Unsupported SDr Scanner settings backup version.");
+    const browser = full ? ctx.validateClientSettings(backup.browser) : null;
+    const description = full
+      ? "Replace receiver programming, audio, display, scope, bookmarks, menu, storage and access settings, including the PIN? Dials keep their current configuration. The receiver will stop. SYNC also saves restored browser preferences for your other browsers."
+      : "Replace receiver settings and memories from this older backup? Browser, access and dial settings keep their current configuration.";
+    ctx.push(confirmPage("restore-confirm", "Load Setting?", description, async next => {
+      if (full) {
+        await next.request("/api/settings/restore", {method: "POST", body: {backup: backup.server}});
+        next.rememberRestoredSetup?.(backup.server.runtime);
+        next.restoreClientSettings(browser);
+      } else {
+        await next.change({v10: "restore", backup});
+      }
       next.close();
     }));
   }, "LOAD");
@@ -1560,7 +2067,8 @@ function tuningStepPage(ctx) {
   const current = ctx.tuningStep;
   const route = choicesPage("tune-step", "TUNING STEP", stepOptions(current), current, async (next, value) => {
     await next.change({v10: "setting", key: "tune_step", value});
-    next.close();
+    if (next.handheld) next.back();
+    else next.close();
   });
   const custom = current >= 100 && current <= 999900 && current % 100 === 0 && !TUNING_STEPS.includes(current);
   route.items.push(formPage("programmable-step", "PROGRAMMABLE TS", [
@@ -1569,13 +2077,123 @@ function tuningStepPage(ctx) {
     }),
   ], async (next, form) => {
     await next.change({v10: "setting", key: "tune_step", value: Math.round(Number(getFormValue(form, "step")) * 1000)});
-    next.close();
+    if (next.handheld) {
+      next.back();
+      next.back();
+    } else next.close();
   }, "SET"));
   return route;
 }
 
 function menuRoute(id, ctx) {
   switch (id) {
+    case "mobile": return {...page(id, "RADIO MENU", ctx.radio.power && !ctx.access?.pin_required ? [
+      run("Channels", next => next.push(menuRoute("mobile-zones", next))),
+      run("Audio / RF", next => next.push(menuRoute("mobile-audio", next))),
+      run("Scan", next => next.push(menuRoute("mobile-scan", next))),
+      run("Recordings", next => next.push(recorderPage(next))),
+      run("Scope", next => next.push(menuRoute("mobile-scope", next))),
+      run("Settings", next => next.push(menuRoute("mobile-features", next))),
+    ] : [
+      run("Power On", next => next.mobileAction("power")),
+      run("Settings Sync", next => next.mobileAction("settings-sync"),
+        ctx.getPreference("settings_sync_enabled", true) ? "ON" : "OFF"),
+      ...(ctx.access?.can_program_pin || ctx.access?.can_program_pin_with_code ? [SET_MENU] : []),
+    ]), columns: 2};
+    case "mobile-zones": return page(id, "CHANNELS / ZONES", next => [
+      run("Current Bank", active => active.push(memoryGroupPage(active)),
+        [groupLabel(next.v10.group ?? 0), next.v10.bank_names?.[next.v10.group ?? 0]].filter(Boolean).join(" · ")),
+      run("Choose Bank", active => active.push(makeGroupPage(active))),
+      ...["a", "b"].map(side => {
+        const group = next.getFavoriteBank(side);
+        return run(favoriteBankLabel(side, group), active => active.push(memoryGroupPage(active, group)),
+          next.v10.bank_names?.[group]);
+      }),
+      run("Presets", active => active.push(menuRoute("presets", active))),
+      run("Bookmarks / UK Repeaters", active => active.push(bookmarksPage())),
+      run("VFO / Memory", active => active.push(vfoMemoryPage(active))),
+      run("Direct Frequency Entry", active => active.mobileAction("frequency")),
+      run("Tuning Step", active => active.push(tuningStepPage(active)), fmtStep(next.tuningStep)),
+    ]);
+    case "mobile-audio": return page(id, "AUDIO / RF", next => [
+      ...dialBOptions(next),
+      run("Monitor", active => active.mobileAction("monitor"), next.v10.monitor ? "ON" : "OFF"),
+      run("Mute", active => active.mobileAction("volume"), next.getPreference("volume_muted", false) ? "ON" : "OFF"),
+      run("RF / DSP Functions", active => active.push(functionPage(active))),
+      run("Receive Adjustments", active => active.push(dialPage(active, "dial-c"))),
+      run("Mode", active => active.selectMode(), next.mode),
+      hasAnalogFilter(next.mode) && supports(next, "bandwidth_hz")
+        ? run("Receive Filter", active => active.push(filterPage(active))) : null,
+    ]);
+    case "mobile-scan": return {...page(id, "SCAN", next => [
+      run(next.v10.scan_kind && next.v10.scan_kind !== "OFF" ? "Stop Scan" : "Start Scan",
+        active => active.mobileAction("scan"), "", "scan-toggle"),
+      run("Simple Frequency Scan", active => active.mobileAction("simple-scan"), next.v10.scan_kind === "SIMPLE" ? "ON" : "OFF"),
+      run("Preset Range Scan", active => active.push(menuRoute("mobile-preset-scan", active))),
+      run("Nearby Signals", active => active.mobileAction("zone", "NEARBY"), next.v10.nearby_enabled ? "ON" : "OFF"),
+      SCAN_SPEED,
+      SCAN_PAUSE,
+      run("Priority Scan", active => active.push(priorityPage(active))),
+      next.v10.scan_kind && next.v10.scan_kind !== "OFF" && !next.v10.trunk?.enabled
+        ? run("Reverse Scan Direction", active => active.mobileAction("reverse-scan"),
+          next.v10.scan_direction < 0 ? "DOWN" : "UP") : null,
+      next.v10.scan_kind === "ZONE" || next.v10.nearby_receiving
+        ? run(next.v10.scan_held || next.v10.nearby_held ? "Resume Scan" : "Hold Scan",
+          active => active.mobileAction("hold-preset-scan"), "", "scan-hold") : null,
+      run("Scan Settings", active => active.push(menuRoute("scan-set", active))),
+    ]), liveRows: true};
+    case "mobile-preset-scan": return {...page(id, "PRESET SCAN RANGES", next =>
+      Object.entries(ZONE_NAMES).filter(([zone]) => zone !== "NEARBY").map(([zone, name]) =>
+        run(next.v10.custom_presets?.[zone]?.name || name, active => active.mobileAction("zone", zone),
+          next.v10.scan_zones?.includes(zone) ? "ON" : "", zone))), liveRows: true,
+      description: "Select a range to add or remove it from the preset scan. Reception starts when a range is selected."};
+    case "mobile-scope": return page(id, "SCOPE", [
+      run("Scope Settings", next => next.push(menuRoute("scope-set", next))),
+      run("Centre Scope", next => next.mobileAction("recenter-scope")),
+      run("Desktop Scope Controls", next => next.push(menuRoute("mobile-scope-controls", next))),
+      run("Open Second Display", next => next.mirror()),
+    ]);
+    case "mobile-scope-controls": return {...page(id, "DESKTOP SCOPE CONTROLS", [
+      run("Span / Fixed Edges", next => next.mobileAction("span")),
+      run("Centre / Fixed", next => next.mobileAction("center")),
+      run("Full Capture", next => next.mobileAction("full-capture")),
+      run("Hold / Resume Scope", next => next.mobileAction("scope-hold")),
+      run("Clear Peak Trace", next => next.mobileAction("scope-clear")),
+      run("Toggle Peak Marker", next => next.mobileAction("peak")),
+      choice("scope_sweep_speed", "Sweep Speed", "mid", [["slow", "Slow"], ["mid", "Mid"], ["fast", "Fast"]], "client"),
+      run("Show / Hide Scope on Second Display", next => next.mobileAction("scope-visibility")),
+    ]), description: "Controls the scope shown in this browser’s desktop layout and on its linked Second Display."};
+    case "mobile-features": return page(id, "FEATURES / SETTINGS", next => [
+      run(next.radio.power ? "Power Off" : "Power On", active => active.mobileAction("power")),
+      run("Settings Sync", active => active.mobileAction("settings-sync"), next.getPreference("settings_sync_enabled", true) ? "ON" : "OFF"),
+      SET_MENU,
+      run("Mobile Controls", active => active.push(menuRoute("mobile-controls", active))),
+      run("Quick Menu", active => active.push(quickPage(active))),
+      run("Mode", active => active.selectMode(), next.mode),
+      run("Direct Frequency Entry", active => active.mobileAction("frequency")),
+      run("VFO / Memory", active => active.push(vfoMemoryPage(active))),
+      run("Lock Out Current Frequency", active => active.mobileAction("lockout"), next.v10.current_lockout ? "ON" : "OFF"),
+      run("Clear Temporary Lockouts", active => active.mobileAction("lockout", true)),
+      run("Monitor", active => active.mobileAction("monitor"), next.v10.monitor ? "ON" : "OFF"),
+      run("Mute", active => active.mobileAction("volume"), next.getPreference("volume_muted", false) ? "ON" : "OFF"),
+      run("Announce Frequency", active => active.mobileAction("speech")),
+      ...(next.getPreference("screen_capture", false) ? [run("Capture Screen", active => active.mobileAction("capture-screen"))] : []),
+      run("Local / UTC Clock", active => active.mobileAction("clock")),
+      run("Lock / Unlock Tuning", active => active.mobileAction("tuning-lock")),
+      run("Full Receiver Menu", active => active.push(menuRoute("menu", active))),
+    ]);
+    case "mobile-controls": return {...SET_PAGES.find(item => item.id === id)};
+    case "bookmarks": return bookmarksPage();
+    case "mobile-p1":
+    case "mobile-p2": {
+      const key = id === "mobile-p1" ? "mobile_p1_action" : "mobile_p2_action";
+      const fallback = id === "mobile-p1" ? "quick" : "monitor";
+      return choicesPage(id, id === "mobile-p1" ? "P1 ACTION" : "P2 ACTION",
+        Object.entries(MOBILE_KEY_ACTIONS), ctx.getPreference(key, fallback), (next, value) => {
+          next.setPreference(key, value);
+          next.back();
+        });
+    }
     case "menu": {
       const showDecode = ctx.radio.power && (ctx.mode === "DMR" || ctx.mode.startsWith("FSK"));
       return {...page(id, "MENU", ctx.radio.power ? [
@@ -1645,6 +2263,21 @@ function resetConfirm(scope) {
 function settingValue(ctx, option) {
   if (option.target === "client") return ctx.getPreference(option.key, option.initial);
   if (option.target === "knob") return Math.round((ctx.radio[option.knob] ?? 0) * 100);
+  if (option.key === "rf_gain" && ctx.v10.tuner_gain?.steps?.length) {
+    const gain = ctx.v10.tuner_gain;
+    const requested = ctx.v10.settings?.rf_gain;
+    if (requested != null && ctx.v10.settings?.rf_gain_tenths_db == null) return requested;
+    const low = gain.steps[0], high = gain.steps.at(-1);
+    return high === low ? 0 : Math.max(0, Math.min(100, Math.round(100 * (gain.target - low) / (high - low))));
+  }
+  if (option.key === "rf_gain_tenths_db") {
+    const gain = ctx.v10.tuner_gain;
+    if (!gain) return null;
+    const requested = ctx.v10.settings?.[option.key];
+    if (requested == null) return gain.target;
+    return gain.steps.reduce((nearest, step) =>
+      Math.abs(step - requested) < Math.abs(nearest - requested) ? step : nearest, gain.steps[0]);
+  }
   if (option.mode) return ctx.v10.settings_by_mode?.[option.mode]?.[option.key] ?? option.initial;
   return ctx.v10.settings?.[option.key] ?? option.initial;
 }
@@ -1664,7 +2297,7 @@ function timeValue(value) {
   return parts[1].padStart(2, "0") + ":" + parts[2];
 }
 
-function createLcdKeyboard({label, value, inputSpec = {}, onAccept}) {
+function createLcdKeyboard({label, value, inputSpec = {}, onAccept, handheld = false}) {
   const time = inputSpec.type === "time";
   const hexadecimal = inputSpec.inputMode === "hex";
   const numeric = time || hexadecimal || inputSpec.type === "number"
@@ -1716,28 +2349,36 @@ function createLcdKeyboard({label, value, inputSpec = {}, onAccept}) {
     items() {
       const clearKey = run(numeric ? "CE" : "CLR", clear);
       const enter = run("ENT", accept);
-      if (numeric) return [
-        ...[..."123"].map(character), run("⌫", erase),
-        ...[..."456"].map(character), clearKey,
-        ...[..."789"].map(character), enter,
-        ...[...`0${extraKeys}`].map(character),
-      ];
+      if (numeric) {
+        if (handheld) return [
+          enter, ...[...DIGITS + extraKeys].map(character), run("⌫", erase), clearKey,
+        ];
+        return [
+          ...[..."123"].map(character), run("⌫", erase),
+          ...[..."456"].map(character), clearKey,
+          ...[..."789"].map(character), enter,
+          ...[...`0${extraKeys}`].map(character),
+        ];
+      }
       const digits = [...DIGITS].map(character);
       const space = run("SPACE", () => insert(" "));
-      const left = {...run("←", () => moveCursor(-1)), accessibleName: "Move cursor left"};
-      const right = {...run("→", () => moveCursor(1)), accessibleName: "Move cursor right"};
-      if (symbols) return [...digits, ...[...SYMBOLS].map(character), symbolsKey(), space, left, right, clearKey, enter];
+      const cursorKeys = handheld ? [] : [
+        {...run("←", () => moveCursor(-1)), accessibleName: "Move cursor left"},
+        {...run("→", () => moveCursor(1)), accessibleName: "Move cursor right"},
+      ];
+      if (symbols) return [...digits, ...[...SYMBOLS].map(character), symbolsKey(), space, ...cursorKeys, clearKey, enter];
       const [top, middle, bottom] = LETTER_ROWS.map(row => [...(capitals ? row.toUpperCase() : row)].map(character));
       return [
         ...digits, ...top, ...middle, clearKey,
-        ...bottom, caseKey(), space, left, right, symbolsKey(), enter,
+        ...bottom, caseKey(), space, ...cursorKeys, symbolsKey(), enter,
       ];
     },
     handleKey(key) {
       if (key === "Enter") return accept;
+      if (key === "Clear") return clear;
       if (key === "Backspace" || key === "Delete") return erase;
-      if (!numeric && key === "ArrowLeft") return () => moveCursor(-1);
-      if (!numeric && key === "ArrowRight") return () => moveCursor(1);
+      if ((!numeric || handheld) && key === "ArrowLeft") return () => moveCursor(-1);
+      if ((!numeric || handheld) && key === "ArrowRight") return () => moveCursor(1);
       if (typeof key !== "string" || Array.from(key).length !== 1) return false;
       const char = hexadecimal ? key.toUpperCase() : key;
       if (numeric && !`${DIGITS}${extraKeys}`.includes(char)) return false;
@@ -1747,12 +2388,21 @@ function createLcdKeyboard({label, value, inputSpec = {}, onAccept}) {
 }
 
 function settingPage(ctx, option) {
+  const unavailable = rfGainUnavailable(ctx, option.key);
+  if (unavailable) {
+    return page("edit-setting", option.label, [readout(unavailable)]);
+  }
   const current = settingValue(ctx, option);
   if (option.options) {
+    const description = option.key === "scan_speed"
+      ? "Target rate and time on each quiet frequency. Mode acquisition can take longer; Scan Follows Scope can increase the rate. Active signals follow the scan's pause and hold rules."
+      : option.key === "pause_time"
+        ? "Ordinary scans pause on an active signal for this long; HOLD has no time limit. Preset scans stay until the signal ends, then use Resume Timer."
+        : "";
     return {...choicesPage("edit-setting", option.label, option.options, current, async (next, value) => {
       await next.set(option, value);
       next.back();
-    }), option};
+    }), option, description};
   }
   return {...formPage("edit-setting", option.label, [
     field(option.unit ? option.label + " · " + option.unit : option.label, option.key, {
@@ -1774,6 +2424,7 @@ function choicesPage(id, label, options, current, choose) {
 }
 
 function rowTitle(row, ctx) {
+  if (rfGainUnavailable(ctx, row.key)) return "Unavailable";
   if (row.kind === "setting") return displayValue(row, settingValue(ctx, row));
   return typeof row.value === "function" ? row.value(ctx) : row.value;
 }
@@ -1810,18 +2461,19 @@ const settingHelp = {
   noise_blanker: "Suppress short bursts of impulse noise in the selected mode.",
   noise_reduction: "Reduce steady background noise in the selected mode.",
   notch: "Set the filter frequency used to suppress an unwanted steady tone.",
-  nr_level: "Adjust how strongly the noise reduction acts.",
+  nr_level: "Set noise reduction strength. Level 0 bypasses the filter.",
   p25_rx_id_format: "Show P25 receive IDs in decimal or hexadecimal.",
-  pause_time: "Set how long scanning pauses on an active signal.",
+  pause_time: "Set the active-signal pause limit for ordinary scans, or choose HOLD. Preset scans follow the signal until it ends.",
   pbt1: "Shift one edge of the receive passband to reduce interference.",
   pbt2: "Shift the other edge of the receive passband.",
   priority_interval: "Set how often the receiver checks the priority channel.",
   resume_time: "Set how long the radio waits before resuming after a signal ends.",
   rf_gain: "Adjust receiver input gain before demodulation.",
+  rf_gain_tenths_db: "Choose an input gain in dB from the SDR’s supported steps.",
   scan_dial: "Choose whether turning the main dial changes scan direction or stops scanning.",
   scan_resume: "Choose whether scanning resumes automatically after it pauses.",
   scan_screen: "Show the scan controls automatically when a scan starts.",
-  scan_speed: "Set how quickly the receiver checks quiet frequencies during a scan.",
+  scan_speed: "Set the target rate and time spent checking each quiet frequency during a scan.",
   scan_follow_scope: "Use wider selected scope spans to check quiet frequencies faster while keeping the same tuning steps.",
   scope_averaging: "Average successive spectrum traces for a steadier display.",
   scope_max_hold: "Set how long the scope keeps peak levels visible.",
@@ -1861,6 +2513,7 @@ const fieldDescriptions = {
   group: "Choose the bank of memory channels.",
   hold: "Enter a talkgroup ID to follow exclusively.",
   hz: "Enter the receive frequency in MHz.",
+  locator: "Enter the Maidenhead grid locator of your listening location.",
   memory: "Choose the saved channel this function uses.",
   mode: "Choose the modulation used to receive the signal.",
   name: "Enter a label for the stored channel.",
@@ -1887,6 +2540,7 @@ function fieldHelp(spec) {
 }
 
 const menuActionsHelp = {
+  "All Bands": "Search the UK repeater directory across all six listed bands.",
   "All Reset": "Open confirmation to clear stored memories and receiver settings.",
   "CH-INP": "Enter a memory channel number to recall directly.",
   "Conventional": "Manage and scan conventional DMR channels.",
@@ -1908,6 +2562,8 @@ const menuActionsHelp = {
   "History Logging": "Toggle logging of received signals.",
   "Instant Replay": "Play the latest audio from the receiver's replay buffer.",
   "Load Setting": "Select a backup to restore receiver settings and memories.",
+  "Save Configuration": "Download the turn functions, press actions and sensitivities for the main dial and A–J.",
+  "Restore Configuration": "Choose a dial configuration backup to restore in this browser.",
   "LOWER EDGE": "Return to the lower frequency limit of the current scan.",
   "MEMORY": "Browse saved channels or switch to the current memory channel.",
   "MW": "Open the memory writing controls.",
@@ -1916,10 +2572,11 @@ const menuActionsHelp = {
   "Memory Copy": "Open an editor to copy this channel to another memory.",
   "Memory Write": "Open an editor to write the current tuning to this memory.",
   "Mode": "Choose the receive modulation.",
+  "My Locator": "Set the Maidenhead grid locator used to sort repeaters by distance.",
   "NO": "Cancel and return without applying this operation.",
   "P": "Edit pairs of frequency limits used for programmed scans.",
   "PBT CLEAR": "Return both passband tuning offsets to zero.",
-  "PIN": "Set or change the six-digit PIN for remote access.",
+  "PIN": "Set or change the numeric PIN for remote access.",
   "PLAY": "Play the audio captured for this history entry.",
   "PRIO": "Choose a channel to check at regular intervals while listening.",
   "Partial Reset": "Open confirmation to restore receiver settings to their defaults.",
@@ -1934,6 +2591,11 @@ const menuActionsHelp = {
   "Recall Channel": "Tune to this saved channel and apply its receive settings.",
   "Receive Filter": "Choose the filter for the current receive mode.",
   "Restore Default Shortcuts": "Reset the list of shortcuts shown under QUICK.",
+  "Snap to Carrier": "Prefer an identifiable carrier close to a spectrum or waterfall tap.",
+  "Search Recordings": "Find recordings by name, date, or frequency.",
+  "RF Replay": "Capture recent RF and replay any supported frequency within the captured span.",
+  "Bookmarks": "Open your saved frequencies and the UK Repeater directory.",
+  "Bookmark Tuned Frequency": "Save the tuned frequency and receive mode in this browser.",
   "Resume Log": "Continue collecting new receiver history entries.",
   "SCAN": "Open scan options or start scanning the relevant memories.",
   "SCOPE": "Open the live spectrum and waterfall display.",
@@ -2010,10 +2672,11 @@ function menuHelp(item, route) {
   if (["favorite-banks", "favorite-bank-range"].includes(route.id) || label === "Edit Bank Name") {
     return "Edit the bank name, or leave it blank to show only the bank number.";
   }
-  if (route.id === "dial-assignment") {
+  if (route.id === "dial-assignment" || route.id === "dial-assignment-category") {
     if (label === "Press Action") return "Choose what a short press does during reception.";
     if (label === "Sensitivity") return `Choose how much ${route.label} changes its assigned setting when turned.`;
     if (label === UNASSIGNED.label) return `Clear the assignment for ${route.label}.`;
+    if (route.id === "dial-assignment") return `Browse ${label} functions for ${route.label}.`;
     if (label === PRESET_CHANNEL.label) return `Step through the current preset zone with ${route.label}.`;
     if (label === FAVORITE_BANK_A.label) return "Change the memory group shown on the left favourite bank.";
     if (label === FAVORITE_BANK_B.label) return "Change the memory group shown on the right favourite bank.";
@@ -2040,15 +2703,20 @@ const editorSubmitHelp = {
   ENT: "Accept the entered values.",
   LOAD: "Check the selected backup before restoring it.",
   MW: "Write the configured frequency and settings to memory.",
+  SAVE: "Save the bookmark in this browser.",
+  SEARCH: "Apply the search filters.",
   SET: "Apply the displayed settings.",
   START: "Start using the settings in this editor.",
 };
 
 export function createReceiverMenus({
   root, getState, act, onMirror, onScope, onMode, onClose, onOpen, onScopeSettings,
-  getAccess, onPinSetup, onDialAction,
+  getAccess, onPinSetup, onDialAction, onRepeaterTune, onMobileAction,
+  isHandheld = () => false,
   request = requestJson, onPlay, onReplay, onStopPlayback, onRender,
   getPreference, setPreference, getTuningStep, getFavoriteBank = side => side === "a" ? 0 : 1,
+  getClientSettings, validateClientSettings, restoreClientSettings,
+  onSettingsRestored,
 }) {
   if (!root) throw new Error("The receiver LCD menu mount is missing.");
   // Persist client-only changes in this page when a host panel does not supply storage.
@@ -2057,7 +2725,8 @@ export function createReceiverMenus({
   const write = setPreference ?? ((key, value) => local.set(key, value));
   const stack = [];
   let selected = 0;
-  let busy = false;
+  const pendingRoutes = new Set();
+  const busy = () => isHandheld() ? pendingRoutes.has(current()) : pendingRoutes.size > 0;
   let error = "";
   let rows = [];
   let rowNodes = [];
@@ -2065,8 +2734,12 @@ export function createReceiverMenus({
   let formCursor = null;
   let submitKey = null;
   let keypadKey = null;
+  let keypadTarget = null;
   let scrollPane = null;
+  let renderedRoute = null;
+  let renderedRows = "";
   let renderedMode = null;
+  let renderedHandheld = false;
   let fskHeld = false;
   let fskDisplay = "";
   let fskCleared = "";
@@ -2075,15 +2748,29 @@ export function createReceiverMenus({
   const current = () => stack.at(-1);
   const getV10 = () => getState()?.v10 ?? {};
   const isoContext = () => {
+    const route = current();
+    let navigationRoute = route;
+    const whileOnPage = action => (...args) => {
+      if (current() !== navigationRoute) return;
+      const result = action(...args);
+      navigationRoute = current();
+      return result;
+    };
+    const navigate = isHandheld() ? whileOnPage : action => action;
     const radio = getState() ?? {};
     const v10 = radio.v10 ?? {};
     const mode = displayMode(v10.mode ?? (radio.dmr?.enabled ? "DMR" : radio.modulation ?? v10.vfo?.mode ?? "FM"));
     return {
-      radio, v10, mode, access: getAccess?.() ?? {}, setupPin: onPinSetup,
+      radio, v10, mode, handheld: isHandheld(), access: getAccess?.() ?? {}, setupPin: onPinSetup,
       hz: v10.hz ?? radio.tune_hz ?? (mode === "DMR" ? radio.dmr?.hz : v10.vfo?.hz),
       tuningStep: getTuningStep?.() ?? v10.settings?.tune_step ?? 12500,
-      getState, getV10, getFavoriteBank, change, close, push, replace, back, notice,
+      getState, getV10, getFavoriteBank, change, onRepeaterTune,
+      close: navigate(close), push: navigate(push), replace: navigate(replace),
+      back: navigate(back), notice: navigate(notice),
+      isCurrent: () => current() === route,
       getPreference: read, setPreference: write, set,
+      getClientSettings, validateClientSettings, restoreClientSettings,
+      rememberRestoredSetup: onSettingsRestored,
       request,
       fskHeld,
       freezeFsk: () => {
@@ -2108,9 +2795,11 @@ export function createReceiverMenus({
         onScope?.();
       },
       selectMode: () => {
-        close();
+        if (!isHandheld()) close();
         onMode?.();
       },
+      mobileAction: (action, value) => onMobileAction
+        ? onMobileAction(action, value) : Promise.reject(new Error("This mobile control is unavailable.")),
       play: path => onPlay ? onPlay(path) : Promise.reject(new Error("Audio playback is unavailable.")),
       replay: () => onReplay ? onReplay() : Promise.reject(new Error("Instant replay is unavailable.")),
       stopPlayback: () => onStopPlayback?.(),
@@ -2122,6 +2811,8 @@ export function createReceiverMenus({
   }
 
   async function set(option, value) {
+    const unavailable = rfGainUnavailable(isoContext(), option.key);
+    if (unavailable) throw new Error(unavailable);
     if (option.target === "client") {
       write(option.key, value);
       if (option.key.startsWith("scope_")) onScopeSettings?.(option.key, value);
@@ -2184,7 +2875,7 @@ export function createReceiverMenus({
     return true;
   }
 
-  function open(label) {
+  function open(label, {nested = false} = {}) {
     const id = String(label || "menu").toLowerCase().replaceAll("_", "-");
     if (id === "scope") return isoContext().scope();
     if (id === "mode" && onMode) {
@@ -2199,6 +2890,7 @@ export function createReceiverMenus({
       return;
     }
     if (id === current()?.id) return close();
+    if (nested && current()) return push(menuRoute(id, ctx));
     const hadMenu = stack.length > 0;
     stack.length = 0;
     if (hadMenu) onClose?.();
@@ -2209,7 +2901,10 @@ export function createReceiverMenus({
     const route = current();
     if (route?.dial === dial) return;
     const assignment = dialAssignmentPage(isoContext(), dial);
-    if (route?.id === "dial-assignment") replace(assignment);
+    if (route?.id === "dial-assignment-category") {
+      back();
+      replace(assignment);
+    } else if (route?.id === "dial-assignment") replace(assignment);
     else push(assignment);
   }
 
@@ -2235,7 +2930,7 @@ export function createReceiverMenus({
 
   async function openZone(zone) {
     if (!Object.hasOwn(ZONE_NAMES, zone)) return;
-    close();
+    if (!isHandheld()) close();
     const loading = page("zone-view", ZONE_NAMES[zone], [readout("Loading presets…")]);
     push(loading);
     try {
@@ -2247,10 +2942,12 @@ export function createReceiverMenus({
   }
 
   function openChoices(label, options, value, apply) {
-    close();
+    const nested = isHandheld() && Boolean(current());
+    if (!nested) close();
     push(choicesPage("choose-value", label, options, value, async (next, selectedValue) => {
       await apply(selectedValue);
-      next.close();
+      if (nested) next.back();
+      else next.close();
     }));
   }
 
@@ -2274,8 +2971,9 @@ export function createReceiverMenus({
     }));
   }
 
-  function formControls() {
-    return [...formNode.querySelectorAll("input:not([type=hidden]), button[data-field]"), submitKey];
+  function formControls(handheld = isHandheld()) {
+    return [...formNode.querySelectorAll("input:not([type=hidden]), button[data-field]"),
+      ...(handheld ? [keypadKey] : []), submitKey].filter(control => control && !control.disabled && !control.hidden);
   }
 
   function focusFormControl(control, reveal = true) {
@@ -2283,18 +2981,21 @@ export function createReceiverMenus({
     formCursor?.classList.remove("menu-cursor");
     formCursor = control;
     control.classList.add("menu-cursor");
-    keypadKey.disabled = control.tagName !== "INPUT" || control.type === "file";
+    if (control.tagName === "INPUT" && control.type !== "file") keypadTarget = control;
+    keypadKey.disabled = isHandheld() ? !keypadTarget : control.tagName !== "INPUT" || control.type === "file";
     if (reveal && scrollPane.contains(control)) revealInMenu(control);
   }
 
   function openEditorKeyboard() {
-    const spec = current().specs.find(field => field.name === formCursor?.name);
+    const input = formCursor === keypadKey ? keypadTarget : formCursor;
+    const spec = current().specs.find(field => field.name === input?.name);
     if (!spec || spec.options || spec.type === "file") return;
     const editor = current();
     push(createLcdKeyboard({
       label: spec.label,
-      value: formCursor.value,
+      value: input.value,
       inputSpec: spec,
+      handheld: isHandheld(),
       onAccept: (value, next) => {
         editor.draft[spec.name] = value;
         next.back();
@@ -2305,17 +3006,19 @@ export function createReceiverMenus({
   }
 
   async function perform(action, ctx, token = current(), repaint = true) {
-    if (busy) return;
-    busy = true;
+    if (busy()) return;
+    pendingRoutes.add(token);
     root.setAttribute("aria-busy", "true");
     error = "";
     try {
       await action(ctx);
     } catch (exception) {
-      error = exception instanceof Error ? exception.message : "The receiver rejected this operation.";
+      if (current() === token) {
+        error = exception instanceof Error ? exception.message : "The receiver rejected this operation.";
+      }
     } finally {
-      busy = false;
-      root.removeAttribute("aria-busy");
+      pendingRoutes.delete(token);
+      if (!busy()) root.removeAttribute("aria-busy");
       if (current() === token) {
         if (error && formNode) showError();
         else if (repaint || error) render();
@@ -2324,7 +3027,7 @@ export function createReceiverMenus({
   }
 
   function activate(item) {
-    if (!selectable(item) || busy) return;
+    if (!selectable(item) || busy()) return;
     if (item.kind === "link") return rowNodes[selected].click();
     const ctx = isoContext();
     if (item.kind === "page") return push({...item});
@@ -2333,7 +3036,7 @@ export function createReceiverMenus({
   }
 
   function revealInMenu(element) {
-    if (!element) return;
+    if (!element || !scrollPane.contains(element)) return;
     const row = element.getBoundingClientRect();
     const pane = scrollPane.getBoundingClientRect();
     const top = pane.top + (current().id === "tune-step" ? scrollPane.firstElementChild.offsetHeight : 0);
@@ -2341,13 +3044,17 @@ export function createReceiverMenus({
     else if (row.bottom > pane.bottom) scrollPane.scrollTop += row.bottom - pane.bottom;
   }
 
+  function setRowHighlight(index, active) {
+    const entry = rowNodes[index];
+    if (entry instanceof HTMLButtonElement) entry.setAttribute("aria-pressed", String(active));
+    else if (entry instanceof HTMLAnchorElement) entry.classList.toggle("menu-cursor", active);
+  }
+
   function highlight(index, reveal = false) {
+    setRowHighlight(selected, false);
     selected = index;
-    for (let i = 0; i < rowNodes.length; i++) {
-      const entry = rowNodes[i];
-      if (entry instanceof HTMLButtonElement) entry.setAttribute("aria-pressed", String(i === index));
-      else if (entry instanceof HTMLAnchorElement) entry.classList.toggle("menu-cursor", i === index);
-    }
+    if (current()?.liveRows) current().selectedRow = rowIdentity(rows[index]);
+    setRowHighlight(selected, true);
     if (reveal) revealInMenu(rowNodes[selected]);
   }
 
@@ -2356,11 +3063,29 @@ export function createReceiverMenus({
     if (!error) return;
     const item = node("p", "error", error);
     item.setAttribute("role", "status");
-    scrollPane.insertBefore(item, scrollPane.children[1] ?? null);
+    const header = root.querySelector(".menu-fixed-header") ?? scrollPane;
+    header.insertBefore(item, header.children[1] ?? null);
+  }
+
+  function rowIdentity(row) {
+    return row?.id ?? row?.key ?? row?.label;
+  }
+
+  function rowSignature(items, ctx) {
+    return JSON.stringify(items.map(item => [rowIdentity(item), item.label, rowTitle(item, ctx)]));
   }
 
   function update() {
-    if (current()?.id === "function" && !busy && isoContext().mode !== renderedMode) render();
+    if (current() && renderedHandheld !== Boolean(isHandheld())) {
+      render();
+      return;
+    }
+    const route = current();
+    if (route?.liveRows && !busy()) {
+      const ctx = isoContext();
+      if (renderedRows !== rowSignature(route.items(ctx).filter(Boolean), ctx)) render();
+    }
+    if (route?.id === "function" && !busy() && isoContext().mode !== renderedMode) render();
     if (!current()?.output) return;
     const output = root.querySelector(".fsk-output");
     if (!output) return;
@@ -2401,32 +3126,49 @@ export function createReceiverMenus({
 
   function render() {
     const route = current();
+    const handheld = Boolean(isHandheld());
+    root.classList.toggle("handheld-menu", handheld);
     root.hidden = !route;
+    if (route && busy()) root.setAttribute("aria-busy", "true");
+    else root.removeAttribute("aria-busy");
     if (!route) {
+      delete root.dataset.route;
       root.replaceChildren();
       rows = rowNodes = [];
-      formNode = formCursor = submitKey = keypadKey = scrollPane = null;
+      formNode = formCursor = submitKey = keypadKey = keypadTarget = scrollPane = null;
+      renderedRoute = null;
       onRender?.();
       return;
     }
     // State updates may refresh a list while the receiver is busy. A visible editor retains its draft.
-    if (formNode?.dataset.route === route.id && formNode.isConnected && route.specs) {
-      showError();
-      onRender?.();
-      return;
+    const sameRoute = renderedRoute === route;
+    if (sameRoute && formNode?.isConnected && route.specs) {
+      if (renderedHandheld === handheld) {
+        showError();
+        onRender?.();
+        return;
+      }
+      route.formSelection = formControls(renderedHandheld).indexOf(formCursor);
+      route.draft = Object.fromEntries(route.specs.filter(spec => spec.type !== "file").map(spec =>
+        [spec.name, formNode.elements.namedItem(spec.name).value]));
     }
     const ctx = isoContext();
     renderedMode = ctx.mode;
-    const scrollTop = root.dataset.route === route.id ? scrollPane?.scrollTop ?? 0 : route.scrollTop ?? 0;
+    renderedHandheld = handheld;
+    const scrollTop = sameRoute ? scrollPane?.scrollTop ?? 0 : route.scrollTop ?? 0;
+    renderedRoute = route;
     root.dataset.route = route.id;
     scrollPane = node("div", "menu-scroll");
-    scrollPane.append(node("h2", "overlay-title", route.label));
-    root.replaceChildren(scrollPane);
+    const fixedHeader = route.pinFirstRow || handheld;
+    const header = fixedHeader ? node("div", "menu-fixed-header") : scrollPane;
+    header.append(node("h2", "overlay-title", route.label));
+    if (fixedHeader) root.replaceChildren(header, scrollPane);
+    else root.replaceChildren(scrollPane);
     showError();
     if (route.description) {
       const paragraph = node("p", "menu-description", route.description);
       paragraph.style.whiteSpace = "pre-line";
-      scrollPane.append(paragraph);
+      (handheld ? scrollPane : header).append(paragraph);
     }
     const entry = route.entry;
     if (entry) {
@@ -2434,7 +3176,7 @@ export function createReceiverMenus({
       const caret = node("span", "menu-entry-caret");
       caret.setAttribute("aria-hidden", "true");
       value.append(caret, entry[1]);
-      scrollPane.append(value);
+      (handheld ? header : scrollPane).append(value);
     }
     if (route.output) {
       const output = node("pre", "fsk-output");
@@ -2454,8 +3196,13 @@ export function createReceiverMenus({
     };
     const items = livePages[route.id]?.(ctx).items ?? route.items;
     rows = (typeof items === "function" ? items(ctx) : items).filter(Boolean);
+    if (route.liveRows) {
+      renderedRows = rowSignature(rows, ctx);
+      const index = rows.findIndex(row => rowIdentity(row) === route.selectedRow);
+      selected = index >= 0 ? index : Math.min(selected, rows.length - 1);
+    }
     rowNodes = [];
-    formNode = formCursor = submitKey = keypadKey = null;
+    formNode = formCursor = submitKey = keypadKey = keypadTarget = null;
     const controls = node("div", "overlay-actions");
     if (route.specs) {
       const form = node("form", "menu-form");
@@ -2463,16 +3210,31 @@ export function createReceiverMenus({
       form.dataset.route = route.id;
       form.style.display = "grid";
       form.style.gap = "6px";
-      form.append(...route.specs.map(spec => createField(spec, route.draft?.[spec.name] ?? spec.value, openFieldOptions)));
+      form.append(...route.specs.map(spec =>
+        createField(spec, route.draft?.[spec.name] ?? spec.value, openFieldOptions, handheld)));
+      if (handheld) {
+        for (const input of form.querySelectorAll("input:not([type=hidden]):not([type=file])")) {
+          input.readOnly = true;
+          input.inputMode = "none";
+          input.tabIndex = -1;
+        }
+        for (const button of form.querySelectorAll("button[data-field]")) button.tabIndex = -1;
+      }
       keypadKey = button("KEYPAD", openEditorKeyboard);
       keypadKey.title = "Open the LCD keypad for the highlighted field.";
       submitKey = node("button", "key", route.buttonLabel);
       submitKey.type = "submit";
       submitKey.title = editorSubmitHelp[route.buttonLabel] ?? "Apply the current entry.";
       submitKey.setAttribute("form", form.id);
-      controls.append(keypadKey, submitKey);
+      if (handheld) {
+        keypadKey.classList.add("handheld-form-action");
+        submitKey.classList.add("handheld-form-action");
+        keypadKey.tabIndex = submitKey.tabIndex = -1;
+        form.append(keypadKey, submitKey);
+      } else controls.append(keypadKey, submitKey);
       form.addEventListener("submit", event => {
         event.preventDefault();
+        if (handheld && !validateHandheldForm(form)) return;
         perform(next => route.submit(next, form), isoContext(), route, false);
       });
       formNode = form;
@@ -2490,8 +3252,10 @@ export function createReceiverMenus({
         notice(event.target.validationMessage);
       }, true);
     } else if (rows?.length) {
-      const grid = node("div", route.columns ? "tile-grid" : "menu-rows");
-      if (route.columns) grid.style.gridTemplateColumns = "repeat(" + route.columns + ", minmax(0, 1fr))";
+      const columns = handheld ? null : route.columns;
+      const grid = node("div", columns ? "tile-grid" : "menu-rows");
+      if (handheld) grid.classList.add("handheld-menu-list");
+      if (columns) grid.style.gridTemplateColumns = "repeat(" + columns + ", minmax(0, 1fr))";
       else Object.assign(grid.style, {display: "grid", gap: "3px"});
       rowNodes = rows.map((item, index) => {
         const active = selectable(item);
@@ -2499,10 +3263,14 @@ export function createReceiverMenus({
           highlight(index);
           activate(item);
         }) : node("div", "key menu-status", item.label);
-        if (active) element.title = menuHelp(item, route);
+        if (active) {
+          element.title = menuHelp(item, route);
+          element.setAttribute("aria-pressed", "false");
+          if (handheld) element.tabIndex = -1;
+        }
         if (item.accessibleName) element.setAttribute("aria-label", item.accessibleName);
         const value = rowTitle(item, ctx);
-        if (!route.columns) {
+        if (!columns) {
           Object.assign(element.style, {
             display: "flex", justifyContent: "space-between", alignItems: "center",
             textAlign: "left", padding: "4px 6px", gap: "5px",
@@ -2510,16 +3278,17 @@ export function createReceiverMenus({
         }
         if (value) {
           const label = node("span", "menu-value", value);
-          if (route.columns) label.style.display = "block";
+          if (columns) label.style.display = "block";
           element.append(label);
-        } else if (item.kind === "page" && !route.columns) {
+        } else if (item.kind === "page" && !columns) {
           const icon = node("span", "menu-value", "›");
           icon.setAttribute("aria-hidden", "true");
           element.append(icon);
         }
         return element;
       });
-      grid.append(...rowNodes);
+      if (route.pinFirstRow) header.append(rowNodes[0]);
+      grid.append(...rowNodes.slice(route.pinFirstRow ? 1 : 0));
       scrollPane.append(grid);
       if (route.id === "menu") appendProjectInfo();
       if (!selectable(rows[selected])) selected = rows.findIndex(selectable);
@@ -2527,7 +3296,7 @@ export function createReceiverMenus({
     }
     const activeScan = (route.id === "scan" || route.id === "scan-start")
       && ctx.v10.scan_kind && ctx.v10.scan_kind !== "OFF";
-    if (route.navigation !== false && !NO_LCD_NAVIGATION.has(route.id) && !activeScan) {
+    if (!handheld && route.navigation !== false && !NO_LCD_NAVIGATION.has(route.id) && !activeScan) {
       if (!route.columns && !route.specs && !LCD_RETURN_ONLY.has(route.id)) {
         const scroll = direction => {
           scrollPane.scrollTop += direction * scrollPane.clientHeight * 0.9;
@@ -2538,14 +3307,23 @@ export function createReceiverMenus({
       controls.append(navigationKey("↩", "Back", back));
     }
     if (controls.childElementCount) root.append(controls);
+    if (handheld) {
+      const hint = handheldNavigation() === "categories" ? "◀ ▶ Category · OK Open"
+        : handheldNavigation() === "caret" ? "▲ ▼ Key · ◀ ▶ Cursor · Hold OK to save"
+        : route.isChoice ? "▲ ▼ Value · OK Save · Back"
+        : formNode ? "▲ ▼ Field · OK Select · Back"
+        : "▲ ▼ Item · OK Select · Back";
+      root.append(node("p", "handheld-menu-hint", hint));
+    }
     scrollPane.scrollTop = scrollTop;
-    if (!scrollTop && current().selected > 0 && !formNode) revealInMenu(rowNodes[selected]);
+    if (handheld) revealInMenu(formNode ? formCursor : rowNodes[selected]);
+    else if (!scrollTop && current().selected > 0 && !formNode) revealInMenu(rowNodes[selected]);
     onRender?.();
   }
 
   function handleDial(delta, dial) {
     if (!current()) return false;
-    if (!delta || busy) return true;
+    if (!delta || busy()) return true;
     if (formNode) {
       const fields = formControls();
       const input = formCursor;
@@ -2585,9 +3363,11 @@ export function createReceiverMenus({
   }
 
   async function adjustSetting(ctx, option, delta) {
+    if (rfGainUnavailable(ctx, option.key)) return;
     const value = settingValue(ctx, option);
     let updated;
     if (option.options) {
+      if (!option.options.length) return;
       const index = option.options.findIndex(([item]) => item === value);
       const next = Math.max(0, Math.min(option.options.length - 1, index + delta));
       updated = option.options[next][0];
@@ -2609,10 +3389,11 @@ export function createReceiverMenus({
   function dialSettingFraction(dial) {
     const ctx = isoContext();
     const option = assignedDial(ctx, dial);
-    if (option?.kind !== "setting") return undefined;
+    if (option?.kind !== "setting" || rfGainUnavailable(ctx, option.key)) return undefined;
     if (option.target === "knob") return ctx.radio[option.knob] ?? 0;
     const value = settingValue(ctx, option);
     if (!option.options) return (value - option.min) / (option.max - option.min);
+    if (option.options.length < 2) return undefined;
     const index = option.options.findIndex(([item]) => item === value);
     return Math.max(0, index) / (option.options.length - 1);
   }
@@ -2637,6 +3418,7 @@ export function createReceiverMenus({
 
   function select() {
     if (!current()) return false;
+    if (busy()) return true;
     if (!formNode) activate(rows[selected]);
     else if (formCursor === submitKey) submit();
     else if (formCursor?.dataset.field || formCursor?.type === "file") formCursor.click();
@@ -2644,9 +3426,74 @@ export function createReceiverMenus({
     return true;
   }
 
+  function validateHandheldForm(form) {
+    // Read-only fields suppress the phone keyboard, so check their constraints explicitly.
+    for (const input of form.querySelectorAll("input:not([type=hidden]):not([type=file])")) {
+      const readOnly = input.readOnly;
+      input.readOnly = false;
+      let field = input;
+      if (current().specs.some(spec => spec.name === input.name && spec.type === "number")) {
+        field = input.cloneNode();
+        field.type = "number";
+        field.value = input.value;
+      }
+      const valid = field.validity.valid && (field === input || field.value !== "" || !input.value.trim());
+      const message = field.validationMessage;
+      input.readOnly = readOnly;
+      if (!valid) {
+        focusFormControl(input);
+        notice(message || "Check this field before applying it.");
+        return false;
+      }
+    }
+    return true;
+  }
+
   function submit() {
     if (!formNode) return false;
     formNode.requestSubmit();
+    return true;
+  }
+
+  function inputKey(key, held = false) {
+    const route = current();
+    if (!route) return false;
+    if (busy()) return true;
+    const confirm = key === "#" || key === "Enter";
+    const erase = key === "*" || key === "Backspace" || key === "Delete";
+    if (route.id === "lcd-keyboard") {
+      return handleKey(confirm ? "Enter" : erase ? held ? "Clear" : "Backspace" : key);
+    }
+    if (!formNode) {
+      return confirm || erase || typeof key === "string" && /^[0-9]$/.test(key);
+    }
+    if (confirm) return submit();
+    const input = formCursor === keypadKey ? keypadTarget : formCursor;
+    if (!(input instanceof HTMLInputElement) || input.type === "file" || input.disabled) {
+      return erase || typeof key === "string" && /^[0-9]$/.test(key);
+    }
+    if (!erase && (typeof key !== "string" || Array.from(key).length !== 1)) return false;
+    const spec = route.specs.find(field => field.name === input.name);
+    const numeric = spec?.type === "number" || ["numeric", "decimal"].includes(spec?.inputMode);
+    if (!erase && numeric && !/^[0-9.+\-]$/.test(key)) return true;
+    const value = input.value;
+    const start = input.selectionStart ?? value.length;
+    const end = input.selectionEnd ?? start;
+    let updated, cursor;
+    if (erase) {
+      updated = held ? "" : start !== end ? value.slice(0, start) + value.slice(end)
+        : value.slice(0, Math.max(0, start - 1)) + value.slice(end);
+      cursor = held ? 0 : start !== end ? start : Math.max(0, start - 1);
+    } else {
+      updated = value.slice(0, start) + key + value.slice(end);
+      cursor = start + key.length;
+      if (spec?.maxLength != null && updated.length > spec.maxLength) return true;
+    }
+    input.value = updated;
+    try { input.setSelectionRange(cursor, cursor); } catch {}
+    route.draft = {...route.draft, [input.name]: input.value};
+    notifyFieldChange(input.name);
+    onRender?.();
     return true;
   }
 
@@ -2658,7 +3505,23 @@ export function createReceiverMenus({
     return true;
   }
 
-  return {open, openChoices, openZone, openDialAssignment, close, back, handleDial, dialFunction, handleKey, select, submit,
+  function handheldNavigation() {
+    if (current()?.id === "mobile") return "categories";
+    if (current()?.id === "lcd-keyboard") return "caret";
+    return "list";
+  }
+
+  function moveHandheld(direction) {
+    const vertical = direction === "up" || direction === "down";
+    const delta = direction === "up" || direction === "left" ? -1 : 1;
+    const navigation = handheldNavigation();
+    if (vertical || navigation === "categories") return handleDial(delta, "navigation");
+    if (navigation === "caret") return handleKey(direction === "left" ? "ArrowLeft" : "ArrowRight");
+    return false;
+  }
+
+  return {open, openChoices, openZone, openDialAssignment, close, back, handleDial, dialFunction, handleKey, inputKey, select, submit,
+    moveHandheld, handheldNavigation,
     assignment: dial => assignedDial(isoContext(), dial), adjustAssignedDial, dialSettingFraction,
     pressAction: dial => dialPressChoice(isoContext(), dial), openMemoryBank, openDialSetting, resetDialSetting,
     dialSensitivity: dial => {
